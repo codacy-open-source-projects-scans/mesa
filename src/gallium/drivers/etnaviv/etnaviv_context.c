@@ -302,8 +302,10 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       .sprite_coord_yinvert = !!ctx->rasterizer->sprite_coord_mode,
    };
 
-   if (pfb->cbufs[0])
-      key.frag_rb_swap = !!translate_pe_format_rb_swap(pfb->cbufs[0]->format);
+    for (i = 0; i < pfb->nr_cbufs; i++) {
+       if (pfb->cbufs[i])
+         key.frag_rb_swap |= !!translate_pe_format_rb_swap(pfb->cbufs[i]->format) << i;
+    }
 
    if (!etna_get_vs(ctx, &key) || !etna_get_fs(ctx, &key)) {
       BUG("compiled shaders are not okay");
@@ -420,8 +422,11 @@ etna_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (DBG_ENABLED(ETNA_DBG_FLUSH_ALL))
       pctx->flush(pctx, NULL, 0);
 
-   if (ctx->framebuffer_s.cbufs[0])
-      etna_resource_level_mark_changed(etna_surface(ctx->framebuffer_s.cbufs[0])->level);
+   for (i = 0; i < pfb->nr_cbufs; i++) {
+      if (pfb->cbufs[i])
+         etna_resource_level_mark_changed(etna_surface(pfb->cbufs[i])->level);
+   }
+
    if (ctx->framebuffer_s.zsbuf)
       etna_resource_level_mark_changed(etna_surface(ctx->framebuffer_s.zsbuf)->level);
    if (info->index_size && indexbuf != info->index.resource)

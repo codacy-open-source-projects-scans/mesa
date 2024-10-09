@@ -40,7 +40,6 @@
 #include "panvk_physical_device.h"
 #include "panvk_priv_bo.h"
 
-#include "pan_blitter.h"
 #include "pan_desc.h"
 #include "pan_encoder.h"
 #include "pan_props.h"
@@ -622,7 +621,7 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
    cmdbuf = vk_zalloc(&device->vk.alloc, sizeof(*cmdbuf), 8,
                       VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!cmdbuf)
-      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      return panvk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    VkResult result = vk_command_buffer_init(
       &pool->vk, &cmdbuf->vk, &panvk_per_arch(cmd_buffer_ops), level);

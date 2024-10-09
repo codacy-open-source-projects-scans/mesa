@@ -383,8 +383,7 @@ radv_amdgpu_cs_grow(struct radeon_cmdbuf *_cs, size_t min_size)
 
    uint64_t ib_size = MAX2(min_size * 4 + 16, cs->base.max_dw * 4 * 2);
 
-   /* max that fits in the chain size field. */
-   ib_size = align(MIN2(ib_size, 0xfffff), ib_alignment);
+   ib_size = align(MIN2(ib_size, ~C_3F2_IB_SIZE), ib_alignment);
 
    VkResult result = radv_amdgpu_cs_bo_create(cs, ib_size);
 
@@ -482,6 +481,7 @@ radv_amdgpu_cs_finalize(struct radeon_cmdbuf *_cs)
       radeon_emit_unchecked(&cs->base, nop_packet);
       radeon_emit_unchecked(&cs->base, nop_packet);
 
+      assert(cs->base.cdw <= ~C_3F2_IB_SIZE);
       *cs->ib_size_ptr |= cs->base.cdw;
    } else {
       radv_amdgpu_winsys_cs_pad(_cs, 0);
@@ -807,6 +807,8 @@ radv_amdgpu_cs_execute_ib(struct radeon_cmdbuf *_cs, struct radeon_winsys_bo *bo
    assert(ib_va && ib_va % cs->ws->info.ip[cs->hw_ip].ib_alignment == 0);
 
    if (cs->hw_ip == AMD_IP_GFX && cs->use_ib) {
+      assert(cdw <= ~C_3F2_IB_SIZE);
+
       radeon_emit(&cs->base, PKT3(PKT3_INDIRECT_BUFFER, 2, predicate));
       radeon_emit(&cs->base, ib_va);
       radeon_emit(&cs->base, ib_va >> 32);

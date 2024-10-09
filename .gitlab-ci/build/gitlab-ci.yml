@@ -64,11 +64,14 @@
 
 
 # Make sure this list stays the same as all the jobs with
-# `stage: build-for-tests`
+# `stage: build-for-tests`, except for the windows job as
+# explained below.
 .build-for-tests-jobs:
   - job: debian-testing
     optional: true
   - job: debian-testing-asan
+    optional: true
+  - job: debian-build-testing
     optional: true
   - job: debian-arm32
     optional: true
@@ -78,10 +81,10 @@
     optional: true
   - job: debian-arm64-asan
     optional: true
-  - job: windows-msvc
-    optional: true
-  - job: debian-clang-release
-    optional: true
+  # Windows runners don't have more than one build right now, so there is
+  # no need to wait on the "first one" to be done.
+  # - job: windows-msvc
+  #   optional: true
   - job: python-test
     optional: true
 
@@ -184,9 +187,7 @@ debian-testing-msan:
 
 debian-build-testing:
   extends: .meson-build
-  needs:
-    - !reference [.meson-build, needs]
-    - !reference [.build-for-tests-jobs]
+  stage: build-for-tests
   variables:
     BUILDTYPE: debug
     UNWIND: "enabled"
@@ -646,11 +647,7 @@ debian-clang:
 
 debian-clang-release:
   extends: debian-clang
-  stage: build-for-tests
-  # `needs:` inherited from debian-clang, so we have to override it back to
-  # its original value
-  needs:
-    - !reference [.meson-build, needs]
+  # `needs:` inherited from debian-clang
   variables:
     BUILDTYPE: "release"
     DRI_LOADERS: >

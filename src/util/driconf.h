@@ -622,6 +622,18 @@
                   "Use UBWC for D24S8 images with VK_IMAGE_USAGE_SAMPLED_BIT when customBorderColorWithoutFormat is enabled")
 
 /**
+ * \brief Honeykrisp specific configuration options
+ */
+
+#define DRI_CONF_HK_DISABLE_BORDER_EMULATION(def) \
+   DRI_CONF_OPT_B(hk_disable_border_emulation, def, \
+                  "Disable custom border colour emulation")
+
+#define DRI_CONF_HK_DISABLE_RGBA4_BORDER_COLOR_WORKAROUND(def) \
+   DRI_CONF_OPT_B(hk_disable_rgba4_border_color_workaround, def, \
+                  "Use hardware opaque_black, breaking certain RGBA4 formats")
+
+/**
  * \brief venus specific configuration options
  */
 #define DRI_CONF_VENUS_IMPLICIT_FENCING(def) \
@@ -694,7 +706,7 @@
 
 #define DRI_CONF_RADV_DGC(def) \
    DRI_CONF_OPT_B(radv_dgc, def, \
-                  "Expose an experimental implementation of VK_NV_device_generated_commands")
+                  "Expose an experimental implementation of VK_NV_device_generated_commands on GFX8+")
 
 #define DRI_CONF_RADV_FLUSH_BEFORE_QUERY_COPY(def) \
   DRI_CONF_OPT_B( \

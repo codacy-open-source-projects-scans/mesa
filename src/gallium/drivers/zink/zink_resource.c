@@ -649,12 +649,11 @@ retry:
    while (!ici->usage) {
       if (!first) {
          switch (ici->tiling) {
+         /* modifiers cannot do fallbacks, as LINEAR modifier should be present for that case */
          case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
-            ici->tiling = VK_IMAGE_TILING_OPTIMAL;
-            modifiers_count = 0;
-            break;
          case VK_IMAGE_TILING_OPTIMAL:
             ici->tiling = VK_IMAGE_TILING_LINEAR;
+            modifiers_count = 0;
             break;
          case VK_IMAGE_TILING_LINEAR:
             if (bind & PIPE_BIND_LINEAR) {
@@ -749,11 +748,11 @@ init_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe_r
 
    case PIPE_TEXTURE_3D:
       ici->imageType = VK_IMAGE_TYPE_3D;
-      if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE))
+      if (!(templ->flags & PIPE_RESOURCE_FLAG_SPARSE)) {
          ici->flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
-      if (screen->info.have_EXT_image_2d_view_of_3d &&
-          (screen->driver_workarounds.can_2d_view_sparse || !(templ->flags & PIPE_RESOURCE_FLAG_SPARSE)))
-         ici->flags |= VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT;
+         if (screen->info.have_EXT_image_2d_view_of_3d)
+            ici->flags |= VK_IMAGE_CREATE_2D_VIEW_COMPATIBLE_BIT_EXT;
+      }
       break;
 
    case PIPE_BUFFER:
@@ -1253,7 +1252,7 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
    /* we often need to be able to mutate between srgb and linear, but we don't need general
     * image view/shader image format compatibility (that path means losing fast clears or compression on some hardware).
     */
-   if (!(templ->bind & ZINK_BIND_MUTABLE)) {
+   if (!(templ->bind & ZINK_BIND_MUTABLE) && (!alloc_info->whandle || alloc_info->whandle->type == ZINK_EXTERNAL_MEMORY_HANDLE)) {
       srgb = util_format_is_srgb(templ->format) ? util_format_linear(templ->format) : util_format_srgb(templ->format);
       /* why do these helpers have different default return values? */
       if (srgb == templ->format)
@@ -1310,10 +1309,16 @@ create_image(struct zink_screen *screen, struct zink_resource_object *obj,
 
    obj->render_target = (ici.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) != 0;
 
+   if (ici.tiling == VK_IMAGE_TILING_OPTIMAL) {
+      alloc_info->external &= ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+      alloc_info->export_types &= ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+   }
+
    if (alloc_info->shared || alloc_info->external) {
       emici.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
       emici.pNext = ici.pNext;
       emici.handleTypes = alloc_info->export_types;
+      assert(!(emici.handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) || ici.tiling != VK_IMAGE_TILING_OPTIMAL);
       ici.pNext = &emici;
 
       assert(ici.tiling != VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT || mod != DRM_FORMAT_MOD_INVALID);

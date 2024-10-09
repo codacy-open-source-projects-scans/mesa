@@ -162,9 +162,6 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_FRAGMENT_SHADER_DERIVATIVES:
    case PIPE_CAP_TEXTURE_BARRIER:
    case PIPE_CAP_QUADS_FOLLOW_PROVOKING_VERTEX_CONVENTION:
-   case PIPE_CAP_VERTEX_BUFFER_OFFSET_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_BUFFER_STRIDE_4BYTE_ALIGNED_ONLY:
-   case PIPE_CAP_VERTEX_ELEMENT_SRC_OFFSET_4BYTE_ALIGNED_ONLY:
    case PIPE_CAP_TGSI_TEXCOORD:
    case PIPE_CAP_VERTEX_COLOR_UNCLAMPED:
    case PIPE_CAP_MIXED_COLOR_DEPTH_BITS:
@@ -172,6 +169,8 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
    case PIPE_CAP_STRING_MARKER:
    case PIPE_CAP_FRONTEND_NOOP:
       return 1;
+   case PIPE_CAP_VERTEX_INPUT_ALIGNMENT:
+      return PIPE_VERTEX_INPUT_ALIGNMENT_4BYTE;
    case PIPE_CAP_NATIVE_FENCE_FD:
       return screen->drm_version >= ETNA_DRM_VERSION_FENCE_FD;
    case PIPE_CAP_FS_POSITION_IS_SYSVAL:
@@ -250,6 +249,20 @@ etna_screen_get_param(struct pipe_screen *pscreen, enum pipe_cap param)
       return 7;
    case PIPE_CAP_SEAMLESS_CUBE_MAP_PER_TEXTURE:
       return screen->specs.seamless_cube_map;
+
+   /* Render targets. */
+   case PIPE_CAP_MAX_RENDER_TARGETS: {
+      /* If the GPU supports float formats we need to reserve half of
+       * the available render targets for emulation proposes.
+       */
+      if (VIV_FEATURE(screen, ETNA_FEATURE_HALTI2))
+         return screen->specs.num_rts / 2;
+
+      return screen->specs.num_rts;
+   }
+   case PIPE_CAP_INDEP_BLEND_ENABLE:
+   case PIPE_CAP_INDEP_BLEND_FUNC:
+      return screen->info->halti >= 5;
 
    /* Queries. */
    case PIPE_CAP_OCCLUSION_QUERY:
@@ -795,6 +808,17 @@ etna_screen_get_dmabuf_modifier_planes(struct pipe_screen *pscreen,
 }
 
 static void
+etna_determine_num_rts(struct etna_screen *screen)
+{
+   if (screen->info->halti >= 2)
+      screen->specs.num_rts = 8;
+   else if (screen->info->halti >= 0)
+      screen->specs.num_rts = 4;
+   else
+      screen->specs.num_rts = 1;
+}
+
+static void
 etna_determine_uniform_limits(struct etna_screen *screen)
 {
    /* values for the non unified case are taken from
@@ -940,6 +964,7 @@ etna_get_specs(struct etna_screen *screen)
       screen->specs.vertex_max_elements = 10;
    }
 
+   etna_determine_num_rts(screen);
    etna_determine_uniform_limits(screen);
    etna_determine_sampler_limits(screen);
 

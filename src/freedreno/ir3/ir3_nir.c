@@ -351,7 +351,6 @@ ir3_optimize_loop(struct ir3_compiler *compiler, nir_shader *s)
       }
       progress |= OPT(s, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       progress |= OPT(s, nir_opt_loop_unroll);
-      progress |= OPT(s, nir_lower_64bit_phis);
       progress |= OPT(s, nir_opt_remove_phis);
       progress |= OPT(s, nir_opt_undef);
       did_progress |= progress;
@@ -756,6 +755,15 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
       }
 
       OPT(s, nir_lower_subgroups, &options);
+
+      /* We want to run the 64b lowering after nir_lower_subgroups so that the
+       * operations have been scalarized. However, the 64b lowering will insert
+       * some intrinsics (e.g., nir_ballot_find_msb) that need to be lowered
+       * again.
+       */
+      if (OPT(s, ir3_nir_lower_64b_subgroups)) {
+         OPT(s, nir_lower_subgroups, &options);
+      }
    }
 
    if ((s->info.stage == MESA_SHADER_COMPUTE) ||
@@ -851,7 +859,7 @@ lower_binning(nir_shader *s)
                                      nir_metadata_control_flow, NULL);
 }
 
-static nir_mem_access_size_align
+nir_mem_access_size_align
 ir3_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
                  uint8_t bit_size, uint32_t align,
                  uint32_t align_offset, bool offset_is_const,
@@ -983,15 +991,16 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so, nir_shader *s)
    nir_lower_mem_access_bit_sizes_options mem_bit_size_options = {
       .modes = nir_var_mem_constant | nir_var_mem_ubo |
                nir_var_mem_global | nir_var_mem_shared |
-               nir_var_function_temp,
+               nir_var_function_temp | nir_var_mem_ssbo,
       .callback = ir3_mem_access_size_align,
    };
 
    progress |= OPT(s, nir_lower_mem_access_bit_sizes, &mem_bit_size_options);
    progress |= OPT(s, ir3_nir_lower_64b_global);
-   progress |= OPT(s, ir3_nir_lower_64b_intrinsics);
    progress |= OPT(s, ir3_nir_lower_64b_undef);
    progress |= OPT(s, nir_lower_int64);
+   progress |= OPT(s, ir3_nir_lower_64b_intrinsics);
+   progress |= OPT(s, nir_lower_64bit_phis);
 
    /* Cleanup code leftover from lowering passes before opt_preamble */
    if (progress) {

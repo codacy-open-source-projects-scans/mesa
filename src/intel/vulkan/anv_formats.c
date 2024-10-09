@@ -807,7 +807,8 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
           * camera/media interop in Android.
           */
          if (vk_format != VK_FORMAT_G8_B8R8_2PLANE_420_UNORM &&
-             vk_format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM) {
+             vk_format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM &&
+             vk_format != VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16) {
             anv_finishme("support more multi-planar formats with DRM modifiers");
             return 0;
          }
@@ -839,6 +840,16 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
           */
          flags &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT;
          flags &= ~VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT;
+      }
+
+      if (isl_mod_info->supports_clear_color && plane_format.isl_format !=
+          blorp_copy_get_color_format(&physical_device->isl_dev,
+                                      plane_format.isl_format)) {
+         /* If the clear color is non-zero, blorp_copy() may interpret the raw
+          * clear color channels incorrectly when it changes the surface
+          * format. Disable support for this format as a copy destination.
+          */
+         flags &= ~VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
       }
    }
 
@@ -1499,6 +1510,15 @@ anv_get_image_format_properties(
       maxArraySize = 1;
       maxMipLevels = 1;
       sampleCounts = VK_SAMPLE_COUNT_1_BIT;
+
+      if (isl_mod_info->supports_clear_color &&
+          (info->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+          (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) {
+         /* Format reinterpretation generally won't work correctly with the
+          * raw clear color channels.
+          */
+         goto unsupported;
+      }
 
       if (isl_drm_modifier_has_aux(isl_mod_info->modifier) &&
           !anv_formats_ccs_e_compatible(devinfo, info->flags, info->format,

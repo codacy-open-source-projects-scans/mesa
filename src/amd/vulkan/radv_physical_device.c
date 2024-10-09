@@ -747,8 +747,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .INTEL_shader_integer_functions2 = true,
       .MESA_image_alignment_control = pdev->info.gfx_level >= GFX9 && pdev->info.gfx_level <= GFX11_5,
       .NV_compute_shader_derivatives = true,
-      .NV_device_generated_commands = instance->drirc.enable_dgc,
-      .NV_device_generated_commands_compute = instance->drirc.enable_dgc,
+      .NV_device_generated_commands = pdev->info.gfx_level >= GFX8 && instance->drirc.enable_dgc,
+      .NV_device_generated_commands_compute = pdev->info.gfx_level >= GFX8 && instance->drirc.enable_dgc,
       /* Undocumented extension purely for vkd3d-proton. This check is to prevent anyone else from
        * using it.
        */
@@ -1171,7 +1171,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_descriptor_buffer */
       .descriptorBuffer = true,
-      .descriptorBufferCaptureReplay = false,
+      .descriptorBufferCaptureReplay = true,
       .descriptorBufferImageLayoutIgnored = true,
       .descriptorBufferPushDescriptors = true,
 
@@ -1899,11 +1899,12 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    p->maxSamplerDescriptorBufferBindings = MAX_SETS;
    p->maxEmbeddedImmutableSamplerBindings = MAX_SETS;
    p->maxEmbeddedImmutableSamplers = radv_max_descriptor_set_size();
-   p->bufferCaptureReplayDescriptorDataSize = 0;
-   p->imageCaptureReplayDescriptorDataSize = 0;
-   p->imageViewCaptureReplayDescriptorDataSize = 0;
-   p->samplerCaptureReplayDescriptorDataSize = 0;
-   p->accelerationStructureCaptureReplayDescriptorDataSize = 0;
+   /* No data required for capture/replay but these values need to be non-zero. */
+   p->bufferCaptureReplayDescriptorDataSize = 1;
+   p->imageCaptureReplayDescriptorDataSize = 1;
+   p->imageViewCaptureReplayDescriptorDataSize = 1;
+   p->samplerCaptureReplayDescriptorDataSize = 1;
+   p->accelerationStructureCaptureReplayDescriptorDataSize = 1;
    p->samplerDescriptorSize = 16;
    p->combinedImageSamplerDescriptorSize = 96;
    p->sampledImageDescriptorSize = 64;

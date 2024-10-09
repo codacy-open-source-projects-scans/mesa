@@ -51,7 +51,7 @@ GL 3.0, GLSL 1.30 --- all DONE: freedreno, nv50, nvc0, r600, radeonsi, llvmpipe,
   GL_ARB_half_float_vertex                              DONE (v3d, vc4, lima, etnaviv)
   GL_EXT_texture_integer                                DONE (v3d)
   GL_EXT_texture_array                                  DONE (v3d, etnaviv/HALTI0)
-  GL_EXT_draw_buffers2 (Per-buffer blend and masks)     DONE (v3d)
+  GL_EXT_draw_buffers2 (Per-buffer blend and masks)     DONE (v3d, etnaviv/HALTI5)
   GL_EXT_texture_compression_rgtc                       DONE (all drivers that support GL_EXT_texture_snorm)
   GL_ARB_texture_rg                                     DONE (v3d, lima, etnaviv/HALTI2)
   GL_EXT_transform_feedback (Transform feedback)        DONE (v3d)
@@ -113,7 +113,7 @@ GL 3.3, GLSL 3.30 --- all DONE: freedreno, nv50, nvc0, r600, radeonsi, llvmpipe,
 
 GL 4.0, GLSL 4.00 --- all DONE: freedreno/a6xx, nvc0, r600, radeonsi, llvmpipe, virgl, zink, d3d12, iris, crocus/gen7+, asahi
 
-  GL_ARB_draw_buffers_blend                             DONE (freedreno, nv50, softpipe, panfrost, v3d, crocus/gen6+)
+  GL_ARB_draw_buffers_blend                             DONE (freedreno, nv50, softpipe, panfrost, v3d, crocus/gen6+, etnaviv/HALTI5+)
   GL_ARB_draw_indirect                                  DONE (freedreno, softpipe, v3d)
   GL_ARB_gpu_shader5                                    DONE (freedreno/a6xx)
   - 'precise' qualifier                                 DONE (softpipe)
@@ -439,9 +439,9 @@ Vulkan 1.1 -- all DONE: anv, lvp, nvk, radv, tu, vn
   VK_KHR_external_memory_capabilities                   DONE (anv, dzn, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_external_semaphore                             DONE (anv, dzn, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_external_semaphore_capabilities                DONE (anv, dzn, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
-  VK_KHR_get_memory_requirements2                       DONE (anv, dzn, hasvk, lvp, nvk, pvr, radv, tu, v3dv, vn)
+  VK_KHR_get_memory_requirements2                       DONE (anv, dzn, hasvk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_get_physical_device_properties2                DONE (anv, dzn, hasvk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
-  VK_KHR_maintenance1                                   DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
+  VK_KHR_maintenance1                                   DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_maintenance2                                   DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
   VK_KHR_maintenance3                                   DONE (anv, dzn, hasvk, lvp, nvk, panvk, radv, tu, v3dv, vn)
   VK_KHR_multiview                                      DONE (anv, dzn, hasvk, lvp, nvk, radv, tu, v3dv, vn)
@@ -550,7 +550,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_KHR_shader_maximal_reconvergence                   DONE (anv, lvp, nvk, radv)
   VK_KHR_shader_subgroup_rotate                         DONE (anv, nvk, radv, tu)
   VK_KHR_shader_subgroup_uniform_control_flow           DONE (anv, hasvk, nvk, radv, tu)
-  VK_KHR_shader_quad_control                            DONE (anv, radv)
+  VK_KHR_shader_quad_control                            DONE (anv, nvk, radv)
   VK_KHR_shared_presentable_image                       not started
   VK_KHR_surface                                        DONE (anv, dzn, hasvk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_KHR_surface_protected_capabilities                 DONE (anv, lvp, nvk, radv, tu, v3dv, vn)
