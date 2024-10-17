@@ -3274,12 +3274,18 @@ static bool
 use_generic_clear_for_image_clear(struct tu_cmd_buffer *cmd,
                                   struct tu_image *image)
 {
-   return cmd->device->physical_device->info->a7xx.has_generic_clear &&
+   const struct fd_dev_info *info = cmd->device->physical_device->info;
+   return info->a7xx.has_generic_clear &&
           /* A7XX supports R9G9B9E5_FLOAT as color attachment and supports
            * generic clears for it. A7XX TODO: allow R9G9B9E5_FLOAT
            * attachments.
            */
-          image->vk.format != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32;
+          image->vk.format != VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 &&
+          /* Clearing VK_FORMAT_R8G8_* with fast-clear value, certain
+           * dimensions (e.g. 960x540), and having GMEM renderpass afterwards
+           * may lead to a GPU fault on A7XX.
+           */
+          !(info->a7xx.r8g8_faulty_fast_clear_quirk && image_is_r8g8(image));
 }
 
 template <chip CHIP>
@@ -3359,6 +3365,26 @@ tu_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer,
 }
 TU_GENX(tu_CmdClearDepthStencilImage);
 
+/* CmdClearAttachments uses the original color attachment index instead of the
+ * remapped index used by the shader, and our MRTs use the remapped
+ * indices, so we have to remap them. We should always be able to find a
+ * shader attachment thanks to this VU:
+ *
+ *    VUID-vkCmdClearAttachments-colorAttachment-09503
+ *    "The colorAttachment member of each element of pAttachments must not
+ *    identify a color attachment that is currently mapped to
+ *    VK_ATTACHMENT_UNUSED in commandBuffer via
+ *    VkRenderingAttachmentLocationInfoKHR"
+ */
+static unsigned
+remap_attachment(struct tu_cmd_buffer *cmd, unsigned a)
+{
+   unsigned i = cmd->vk.dynamic_graphics_state.cal.color_map[a];
+   assert(i != MESA_VK_ATTACHMENT_UNUSED &&
+          "app violates VUID-vkCmdClearAttachments-colorAttachment-09503");
+   return i;
+}
+
 template <chip CHIP>
 static void
 tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
@@ -3388,9 +3414,10 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
          if (a == VK_ATTACHMENT_UNUSED)
             continue;
 
-         clear_rts |= 1 << c;
-         clear_components |= 0xf << (c * 4);
-         memcpy(clear_value[c], &attachments[i].clearValue, 4 * sizeof(uint32_t));
+         uint32_t remapped = remap_attachment(cmd, c);
+         clear_rts |= 1 << remapped;
+         clear_components |= 0xf << (remapped * 4);
+         memcpy(clear_value[remapped], &attachments[i].clearValue, 4 * sizeof(uint32_t));
       } else {
          a = subpass->depth_stencil_attachment.attachment;
          if (a == VK_ATTACHMENT_UNUSED)

@@ -29,13 +29,15 @@ pub enum ImageDim {
 #[derive(Clone, Debug, Copy, PartialEq, Default)]
 #[repr(u8)]
 pub enum SampleLayout {
-    _1x1 = 0,
-    _2x1 = 1,
-    _2x2 = 2,
-    _4x2 = 3,
-    _4x4 = 4,
+    _1x1,
+    _2x1,
+    _2x1D3d,
+    _2x2,
+    _4x2,
+    _4x2D3d,
+    _4x4,
     #[default]
-    Invalid = 5,
+    Invalid,
 }
 
 impl SampleLayout {
@@ -47,20 +49,40 @@ impl SampleLayout {
     pub fn choose_sample_layout(samples: u32) -> SampleLayout {
         match samples {
             1 => SampleLayout::_1x1,
-            2 => SampleLayout::_2x1,
+            2 => SampleLayout::_2x1D3d,
             4 => SampleLayout::_2x2,
-            8 => SampleLayout::_4x2,
+            8 => SampleLayout::_4x2D3d,
             16 => SampleLayout::_4x4,
             _ => SampleLayout::Invalid,
         }
+    }
+
+    pub fn samples(&self) -> u32 {
+        match self {
+            SampleLayout::_1x1 => 1,
+            SampleLayout::_2x1 => 2,
+            SampleLayout::_2x1D3d => 2,
+            SampleLayout::_2x2 => 4,
+            SampleLayout::_4x2 => 8,
+            SampleLayout::_4x2D3d => 8,
+            SampleLayout::_4x4 => 16,
+            SampleLayout::Invalid => panic!("Invalid sample layout"),
+        }
+    }
+
+    #[no_mangle]
+    pub extern "C" fn nil_sample_layout_samples(self) -> u32 {
+        self.samples()
     }
 
     pub fn px_extent_sa(&self) -> Extent4D<units::Samples> {
         match self {
             SampleLayout::_1x1 => Extent4D::new(1, 1, 1, 1),
             SampleLayout::_2x1 => Extent4D::new(2, 1, 1, 1),
+            SampleLayout::_2x1D3d => Extent4D::new(2, 1, 1, 1),
             SampleLayout::_2x2 => Extent4D::new(2, 2, 1, 1),
             SampleLayout::_4x2 => Extent4D::new(4, 2, 1, 1),
+            SampleLayout::_4x2D3d => Extent4D::new(4, 2, 1, 1),
             SampleLayout::_4x4 => Extent4D::new(4, 4, 1, 1),
             SampleLayout::Invalid => panic!("Invalid sample layout"),
         }

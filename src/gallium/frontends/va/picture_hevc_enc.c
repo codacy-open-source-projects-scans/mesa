@@ -603,7 +603,7 @@ static void parseEncSliceParamsH265(vlVaContext *context,
       slice->short_term_ref_pic_set_sps_flag = vl_rbsp_u(rbsp, 1);
       if (!slice->short_term_ref_pic_set_sps_flag) {
          num_pic_total_curr = st_ref_pic_set(seq->num_short_term_ref_pic_sets, seq->num_short_term_ref_pic_sets,
-                                             &slice->st_ref_pic_set, rbsp);
+                                             seq->st_ref_pic_set, rbsp);
       }
       else if (seq->num_short_term_ref_pic_sets > 1)
          slice->short_term_ref_pic_set_idx = vl_rbsp_u(rbsp, util_logbase2_ceil(seq->num_short_term_ref_pic_sets));
@@ -1089,13 +1089,23 @@ vlVaHandleVAEncMiscParameterTypeHRDHEVC(vlVaContext *context, VAEncMiscParameter
 {
    VAEncMiscParameterHRD *ms = (VAEncMiscParameterHRD *)misc->data;
 
-   if (ms->buffer_size) {
-      context->desc.h265enc.rc[0].vbv_buffer_size = ms->buffer_size;
-      context->desc.h265enc.rc[0].vbv_buf_lv = (ms->initial_buffer_fullness << 6 ) / ms->buffer_size;
-      context->desc.h265enc.rc[0].vbv_buf_initial_size = ms->initial_buffer_fullness;
-      /* Distinguishes from the default params set for these values in other
-         functions and app specific params passed down via HRD buffer */
-      context->desc.h265enc.rc[0].app_requested_hrd_buffer = true;
+   if (ms->buffer_size == 0)
+      return VA_STATUS_ERROR_INVALID_PARAMETER;
+
+   /* Distinguishes from the default params set for these values in other
+      functions and app specific params passed down via HRD buffer */
+   context->desc.h265enc.rc[0].app_requested_hrd_buffer = true;
+   context->desc.h265enc.rc[0].vbv_buffer_size = ms->buffer_size;
+   context->desc.h265enc.rc[0].vbv_buf_lv = (ms->initial_buffer_fullness << 6) / ms->buffer_size;
+   context->desc.h265enc.rc[0].vbv_buf_initial_size = ms->initial_buffer_fullness;
+
+   for (unsigned i = 1; i < context->desc.h265enc.seq.num_temporal_layers; i++) {
+      context->desc.h265enc.rc[i].vbv_buffer_size =
+         (float)ms->buffer_size / context->desc.h265enc.rc[0].peak_bitrate *
+         context->desc.h265enc.rc[i].peak_bitrate;
+      context->desc.h265enc.rc[i].vbv_buf_lv = context->desc.h265enc.rc[0].vbv_buf_lv;
+      context->desc.h265enc.rc[i].vbv_buf_initial_size =
+         (context->desc.h265enc.rc[i].vbv_buffer_size * context->desc.h265enc.rc[i].vbv_buf_lv) >> 6;
    }
 
    return VA_STATUS_SUCCESS;

@@ -57,33 +57,38 @@ if [ -z "$DEQP_SUITE" ]; then
 
     # Generate test case list file.
     if [ "$DEQP_VER" = "vk" ]; then
-       MUSTPASS=/deqp/mustpass/vk-main.txt
+       MUSTPASS=/deqp/mustpass/vk-main.txt.zst
        DEQP=/deqp/external/vulkancts/modules/vulkan/deqp-vk
     elif [ "$DEQP_VER" = "gles2" ] || [ "$DEQP_VER" = "gles3" ] || [ "$DEQP_VER" = "gles31" ] || [ "$DEQP_VER" = "egl" ]; then
-       MUSTPASS=/deqp/mustpass/$DEQP_VER-main.txt
+       MUSTPASS=/deqp/mustpass/$DEQP_VER-main.txt.zst
        DEQP=/deqp/modules/$DEQP_VER/deqp-$DEQP_VER
     elif [ "$DEQP_VER" = "gles2-khr" ] || [ "$DEQP_VER" = "gles3-khr" ] || [ "$DEQP_VER" = "gles31-khr" ] || [ "$DEQP_VER" = "gles32-khr" ]; then
-       MUSTPASS=/deqp/mustpass/$DEQP_VER-main.txt
+       MUSTPASS=/deqp/mustpass/$DEQP_VER-main.txt.zst
        DEQP=/deqp/external/openglcts/modules/glcts
     else
-       MUSTPASS=/deqp/mustpass/$DEQP_VER-main.txt
+       MUSTPASS=/deqp/mustpass/$DEQP_VER-main.txt.zst
        DEQP=/deqp/external/openglcts/modules/glcts
     fi
 
-    cp $MUSTPASS /tmp/case-list.txt
+    [ -z "${DEQP_FRACTION:-}" ] && DEQP_FRACTION=1
+    [ -z "${CI_NODE_INDEX:-}" ] && CI_NODE_INDEX=1
+    [ -z "${CI_NODE_TOTAL:-}" ] && CI_NODE_TOTAL=1
 
-    # If the caselist is too long to run in a reasonable amount of time, let the job
-    # specify what fraction (1/n) of the caselist we should run.  Note: N~M is a gnu
-    # sed extension to match every nth line (first line is #1).
-    if [ -n "$DEQP_FRACTION" ]; then
-       sed -ni 1~$DEQP_FRACTION"p" /tmp/case-list.txt
-    fi
-
-    # If the job is parallel at the gitab job level, take the corresponding fraction
-    # of the caselist.
-    if [ -n "$CI_NODE_INDEX" ]; then
-       sed -ni $CI_NODE_INDEX~$CI_NODE_TOTAL"p" /tmp/case-list.txt
-    fi
+    # This ugly sed expression does a single pass across the case list to take
+    # into account the global fraction and sharding.
+    #
+    # First, we select only every n'th line, according to DEQP_FRACTION; for a
+    # fraction of 3, it will select lines 1, 4, 7, 10, etc.
+    #
+    # Then, we select $CI_NODE_INDEX/$CI_NODE_TOTAL for sharding; for a two-way
+    # shard, the first node will select lines 1 and 7, and the second node will
+    # select lines 4 and 10.
+    #
+    # Sharding like this gives us the best coverage, as sequential tests often
+    # test very slightly different permutations of the same functionality. So
+    # by distributing our skips as widely across the set as possible, rather
+    # than grouping them together, we get the broadest coverage.
+    zstd -d $MUSTPASS -c | sed -n "$(((CI_NODE_INDEX - 1) * DEQP_FRACTION + 1))~$((DEQP_FRACTION * CI_NODE_TOTAL))p" > /tmp/case-list.txt
 
     if [ ! -s /tmp/case-list.txt ]; then
         echo "Caselist generation failed"
@@ -126,6 +131,10 @@ fi
 if [ -n "$VK_DRIVER" ] && [ -z "$DEQP_SUITE" ]; then
     # Bump the number of tests per group to reduce the startup time of VKCTS.
     DEQP_RUNNER_OPTIONS="$DEQP_RUNNER_OPTIONS --tests-per-group ${DEQP_RUNNER_TESTS_PER_GROUP:-5000}"
+fi
+
+if [ -n "${DEQP_RUNNER_MAX_FAILS:-}" ]; then
+    DEQP_RUNNER_OPTIONS="$DEQP_RUNNER_OPTIONS --max-fails ${DEQP_RUNNER_MAX_FAILS}"
 fi
 
 # Set the path to VK validation layer settings (in case it ends up getting loaded)
@@ -177,6 +186,7 @@ done
 set -x
 
 set +e
+deqp-runner -V
 if [ -z "$DEQP_SUITE" ]; then
     deqp-runner \
         run \

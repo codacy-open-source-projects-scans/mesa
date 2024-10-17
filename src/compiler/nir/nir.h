@@ -44,6 +44,7 @@
 #include "util/macros.h"
 #include "util/ralloc.h"
 #include "util/set.h"
+#include "util/u_math.h"
 #include "util/u_printf.h"
 #define XXH_INLINE_ALL
 #include <stdio.h>
@@ -122,6 +123,17 @@ nir_num_components_valid(unsigned num_components)
            num_components <= 5) ||
           num_components == 8 ||
           num_components == 16;
+}
+
+/*
+ * Round up a vector size to a vector size that's valid in NIR. At present, NIR
+ * supports only vec2-5, vec8, and vec16. Attempting to generate other sizes
+ * will fail validation.
+ */
+static inline unsigned
+nir_round_up_components(unsigned n)
+{
+   return (n > 5) ? util_next_power_of_two(n) : n;
 }
 
 static inline nir_component_mask_t
@@ -748,8 +760,11 @@ typedef struct nir_variable {
        */
       unsigned descriptor_set : 5;
 
+#define NIR_VARIABLE_NO_INDEX ~0
+
       /**
-       * output index for dual source blending.
+       * Output index for dual source blending or input attachment index. If
+       * it is not declared it is NIR_VARIABLE_NO_INDEX.
        */
       unsigned index;
 
@@ -3741,6 +3756,8 @@ typedef enum {
    nir_divergence_multiple_workgroup_per_compute_subgroup = (1 << 5),
    nir_divergence_shader_record_ptr_uniform = (1 << 6),
    nir_divergence_uniform_load_tears = (1 << 7),
+   /* If used, this allows phis for divergent merges with undef and a uniform source to be considered uniform */
+   nir_divergence_ignore_undef_if_phi_srcs = (1 << 8),
 } nir_divergence_options;
 
 typedef enum {
@@ -5054,6 +5071,12 @@ nir_component_mask_t nir_src_components_read(const nir_src *src);
 nir_component_mask_t nir_def_components_read(const nir_def *def);
 bool nir_def_all_uses_are_fsat(const nir_def *def);
 
+static inline int
+nir_def_last_component_read(nir_def *def)
+{
+    return (int)util_last_bit(nir_def_components_read(def)) - 1;
+}
+
 static inline bool
 nir_def_is_unused(nir_def *ssa)
 {
@@ -5876,6 +5899,9 @@ typedef bool (*nir_should_vectorize_mem_func)(unsigned align_mul,
                                               unsigned align_offset,
                                               unsigned bit_size,
                                               unsigned num_components,
+                                              /* The hole between low and
+                                               * high if they are not adjacent. */
+                                              unsigned hole_size,
                                               nir_intrinsic_instr *low,
                                               nir_intrinsic_instr *high,
                                               void *data);
@@ -6423,6 +6449,7 @@ typedef struct nir_input_attachment_options {
    bool use_fragcoord_sysval;
    bool use_layer_id_sysval;
    bool use_view_id_for_layer;
+   bool unscaled_depth_stencil_ir3;
    uint32_t unscaled_input_attachment_ir3;
 } nir_input_attachment_options;
 
@@ -6642,6 +6669,7 @@ bool nir_repair_ssa(nir_shader *shader);
 
 void nir_convert_loop_to_lcssa(nir_loop *loop);
 bool nir_convert_to_lcssa(nir_shader *shader, bool skip_invariants, bool skip_bool_invariants);
+void nir_divergence_analysis_impl(nir_function_impl *impl, nir_divergence_options options);
 void nir_divergence_analysis(nir_shader *shader);
 void nir_vertex_divergence_analysis(nir_shader *shader);
 bool nir_update_instr_divergence(nir_shader *shader, nir_instr *instr);

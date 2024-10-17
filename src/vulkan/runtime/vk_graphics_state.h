@@ -115,6 +115,11 @@ enum mesa_vk_dynamic_graphics_state {
 
 #define MESA_VK_ATTACHMENT_UNUSED (0xff)
 
+/* This means that input attachments without an index map to this attachment.
+ * It is only used for depth and stencil attachments.
+ */
+#define MESA_VK_ATTACHMENT_NO_INDEX (0xfe)
+
 /** Populate a bitset with dynamic states
  *
  * This function maps a VkPipelineDynamicStateCreateInfo to a bitset indexed
@@ -427,6 +432,15 @@ struct vk_fragment_shading_rate_state {
    VkFragmentShadingRateCombinerOpKHR combiner_ops[2];
 };
 
+static inline bool
+vk_fragment_shading_rate_is_disabled(const struct vk_fragment_shading_rate_state *fsr)
+{
+   return fsr->fragment_size.width == 1 &&
+          fsr->fragment_size.height == 1 &&
+          fsr->combiner_ops[0] == VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR &&
+          fsr->combiner_ops[1] == VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+}
+
 /***/
 struct vk_sample_locations_state {
    /** VkSampleLocationsInfoEXT::sampleLocationsPerPixel */
@@ -707,6 +721,8 @@ static_assert(MESA_VK_MAX_COLOR_ATTACHMENTS == 8,
 #define MESA_VK_RP_ATTACHMENT_COLOR_BIT(n) \
    ((enum vk_rp_attachment_flags)(MESA_VK_RP_ATTACHMENT_COLOR_0_BIT << (n)))
 
+#define MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN 0xff
+
 /***/
 struct vk_input_attachment_location_state {
    /** VkRenderingInputAttachmentIndexInfoKHR::pColorAttachmentLocations
@@ -714,6 +730,18 @@ struct vk_input_attachment_location_state {
     * MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP
     */
    uint8_t color_map[MESA_VK_MAX_COLOR_ATTACHMENTS];
+
+   /** VkRenderingInputAttachmentIndexInfoKHR::colorAttachmentCount
+    *
+    * This must match vk_render_pass_state::color_attachment_count or be equal
+    * to MESA_VK_COLOR_ATTACHMENT_COUNT_UNKNOWN, in which case it can be
+    * assumed that there is an identity mapping and every input attachment
+    * with an index is a color attachment. Unlike vk_render_pass_state this
+    * state is available when compiling the fragment shader.
+    *
+    * MESA_VK_DYNAMIC_INPUT_ATTACHMENT_MAP
+    */
+   uint8_t color_attachment_count;
 
    /** VkRenderingInputAttachmentIndexInfoKHR::pDepthInputAttachmentIndex
     *

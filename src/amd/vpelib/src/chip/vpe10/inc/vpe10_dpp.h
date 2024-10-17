@@ -870,7 +870,11 @@ void vpe10_dpp_cnv_program_pre_dgam(struct dpp *dpp, enum color_transfer_func tr
 
 void vpe10_dpp_program_cnv_bias_scale(struct dpp *dpp, struct bias_and_scale *bias_and_scale);
 
-void vpe10_dpp_cnv_program_alpha_keyer(struct dpp *dpp, struct cnv_color_keyer_params *color_keyer);
+void vpe10_dpp_build_keyer_params(
+    struct dpp *dpp, const struct stream_ctx *stream_ctx, struct cnv_keyer_params *keyer_params);
+
+void vpe10_dpp_cnv_program_alpha_keyer(
+    struct dpp *dpp, const struct cnv_keyer_params *keyer_params);
 
 void vpe10_dpp_program_input_transfer_func(struct dpp *dpp, struct transfer_func *input_tf);
 
@@ -886,6 +890,69 @@ void vpe10_dpp_set_hdr_multiplier(struct dpp *dpp, uint32_t multiplier);
 void vpe10_dpp_set_segment_scaler(struct dpp *dpp, const struct scaler_data *scl_data);
 
 void vpe10_dpp_set_frame_scaler(struct dpp *dpp, const struct scaler_data *scl_data);
+
+/*Scalar helper functions*/
+enum vpe10_coef_filter_type_sel {
+    SCL_COEF_LUMA_VERT_FILTER   = 0,
+    SCL_COEF_LUMA_HORZ_FILTER   = 1,
+    SCL_COEF_CHROMA_VERT_FILTER = 2,
+    SCL_COEF_CHROMA_HORZ_FILTER = 3,
+    SCL_COEF_ALPHA_VERT_FILTER  = 4,
+    SCL_COEF_ALPHA_HORZ_FILTER  = 5,
+};
+
+enum vpe10_dscl_autocal_mode {
+    AUTOCAL_MODE_OFF = 0,
+
+    /* Autocal calculate the scaling ratio and initial phase and the
+     * DSCL_MODE_SEL must be set to 1
+     */
+    AUTOCAL_MODE_AUTOSCALE = 1,
+    /* Autocal perform auto centering without replication and the
+     * DSCL_MODE_SEL must be set to 0
+     */
+    AUTOCAL_MODE_AUTOCENTER = 2,
+    /* Autocal perform auto centering and auto replication and the
+     * DSCL_MODE_SEL must be set to 0
+     */
+    AUTOCAL_MODE_AUTOREPLICATE = 3
+};
+
+enum vpe10_dscl_mode_sel {
+    DSCL_MODE_SCALING_444_BYPASS        = 0,
+    DSCL_MODE_SCALING_444_RGB_ENABLE    = 1,
+    DSCL_MODE_SCALING_444_YCBCR_ENABLE  = 2,
+    DSCL_MODE_SCALING_420_YCBCR_ENABLE  = 3,
+    DSCL_MODE_SCALING_420_LUMA_BYPASS   = 4,
+    DSCL_MODE_SCALING_420_CHROMA_BYPASS = 5,
+    DSCL_MODE_DSCL_BYPASS               = 6
+};
+void vpe10_dpp_dscl_set_h_blank(struct dpp *dpp, uint16_t start, uint16_t end);
+
+void vpe10_dpp_dscl_set_v_blank(struct dpp *dpp, uint16_t start, uint16_t end);
+
+void vpe10_dpp_power_on_dscl(struct dpp *dpp, bool power_on);
+
+void vpe10_dpp_dscl_set_lb(struct dpp *dpp, const struct line_buffer_params *lb_params,
+    enum lb_memory_config mem_size_config);
+
+void vpe10_dpp_dscl_set_scale_ratio(struct dpp *dpp, const struct scaler_data *data);
+
+void vpe10_dpp_dscl_set_taps(struct dpp *dpp, const struct scaler_data *scl_data);
+
+void vpe10_dpp_dscl_set_scl_filter(struct dpp *dpp, const struct scaler_data *scl_data,
+    enum vpe10_dscl_mode_sel scl_mode, bool chroma_coef_mode);
+
+void vpe10_dpp_dscl_set_dscl_mode(struct dpp *dpp, enum vpe10_dscl_mode_sel dscl_mode);
+
+enum vpe10_dscl_mode_sel vpe10_dpp_dscl_get_dscl_mode(const struct scaler_data *data);
+
+void vpe10_dpp_dscl_set_scaler_filter(struct dpp *dpp, uint32_t taps,
+    enum vpe10_coef_filter_type_sel filter_type, const uint16_t *filter);
+
+bool vpe10_dpp_dscl_is_ycbcr(const enum vpe_surface_pixel_format format);
+
+void vpe10_dpp_program_gamcor_lut(struct dpp *dpp, const struct pwl_params *params);
 
 uint32_t vpe10_get_line_buffer_size(void);
 

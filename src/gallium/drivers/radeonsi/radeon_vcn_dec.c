@@ -175,10 +175,10 @@ static rvcn_dec_message_avc_t get_h264_msg(struct radeon_decoder *dec,
    }
 
    for (i = 0; i < ARRAY_SIZE(dec->render_pic_list); i++) {
-      for (j = 0; (pic->ref[j] != NULL) && (j < ARRAY_SIZE(dec->render_pic_list)); j++) {
+      for (j = 0; (j < ARRAY_SIZE(pic->ref) && (pic->ref[j] != NULL)); j++) {
          if (dec->render_pic_list[i] == pic->ref[j])
             break;
-         if (j == ARRAY_SIZE(dec->render_pic_list) - 1)
+         if (j == ARRAY_SIZE(pic->ref) - 1)
             dec->render_pic_list[i] = NULL;
          else if (pic->ref[j + 1] == NULL)
             dec->render_pic_list[i] = NULL;
@@ -390,11 +390,11 @@ static rvcn_dec_message_hevc_t get_h265_msg(struct radeon_decoder *dec,
 
    for (i = 0; i < ARRAY_SIZE(dec->render_pic_list); i++) {
       for (j = 0;
-           (pic->ref[j] != NULL) && (j < ARRAY_SIZE(dec->render_pic_list));
+           (j < ARRAY_SIZE(pic->ref) && (pic->ref[j] != NULL));
            j++) {
          if (dec->render_pic_list[i] == pic->ref[j])
             break;
-         if (j == ARRAY_SIZE(dec->render_pic_list) - 1)
+         if (j == ARRAY_SIZE(pic->ref) - 1)
             dec->render_pic_list[i] = NULL;
          else if (pic->ref[j + 1] == NULL)
             dec->render_pic_list[i] = NULL;
@@ -541,7 +541,7 @@ static rvcn_dec_message_vp9_t get_vp9_msg(struct radeon_decoder *dec,
 
       prbs->seg.abs_delta = pic->picture_parameter.abs_delta;
    } else
-      memset(&prbs->seg, 0, 256);
+      memset(prbs->segment_data, 0, sizeof(prbs->segment_data));
 
    result.frame_header_flags = (pic->picture_parameter.pic_fields.frame_type
                                 << RDECODE_FRAME_HDR_INFO_VP9_FRAME_TYPE_SHIFT) &

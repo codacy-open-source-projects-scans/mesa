@@ -230,12 +230,7 @@ unsigned int radeon_enc_write_sps(struct radeon_encoder *enc, uint8_t nal_byte, 
    radeon_enc_code_fixed_bits(enc, sps->gaps_in_frame_num_value_allowed_flag, 1);
    radeon_enc_code_ue(enc, (pic->session_init.aligned_picture_width / 16 - 1));
    radeon_enc_code_ue(enc, (pic->session_init.aligned_picture_height / 16 - 1));
-   bool frame_mbs_only_flag = true;
-   radeon_enc_code_fixed_bits(enc, frame_mbs_only_flag ? 0x1 : 0x0, 1);
-
-   if (!frame_mbs_only_flag)
-      radeon_enc_code_fixed_bits(enc, 0x0, 1); /* mb_adaptive_frame_field_flag */
-
+   radeon_enc_code_fixed_bits(enc, 0x1, 1); /* frame_mbs_only_flag */
    radeon_enc_code_fixed_bits(enc, 0x1, 1); /* direct_8x8_inference_flag */
 
    radeon_enc_code_fixed_bits(enc, sps->enc_frame_cropping_flag, 1);
@@ -380,7 +375,7 @@ unsigned int radeon_enc_write_sps_hevc(struct radeon_encoder *enc, uint8_t *out)
 
    radeon_enc_code_ue(enc, sps->num_short_term_ref_pic_sets);
    for (i = 0; i < sps->num_short_term_ref_pic_sets; i++)
-      radeon_enc_hevc_st_ref_pic_set(enc, i, sps->num_short_term_ref_pic_sets, &sps->st_ref_pic_set[i]);
+      radeon_enc_hevc_st_ref_pic_set(enc, i, sps->num_short_term_ref_pic_sets, sps->st_ref_pic_set);
 
    radeon_enc_code_fixed_bits(enc, sps->long_term_ref_pics_present_flag, 1);
    if (sps->long_term_ref_pics_present_flag) {
@@ -845,7 +840,7 @@ static void radeon_enc_slice_header_hevc(struct radeon_encoder *enc)
       if (!slice->short_term_ref_pic_set_sps_flag) {
          num_pic_total_curr =
             radeon_enc_hevc_st_ref_pic_set(enc, sps->num_short_term_ref_pic_sets,
-                                           sps->num_short_term_ref_pic_sets, &slice->st_ref_pic_set);
+                                           sps->num_short_term_ref_pic_sets, sps->st_ref_pic_set);
       } else if (sps->num_short_term_ref_pic_sets > 1) {
          radeon_enc_code_fixed_bits(enc, slice->short_term_ref_pic_set_idx,
                                     util_logbase2_ceil(sps->num_short_term_ref_pic_sets));
@@ -1442,6 +1437,9 @@ static void encode(struct radeon_encoder *enc)
          }
       } while (++i < enc->enc_pic.num_temporal_layers);
    }
+
+   enc->enc_pic.layer_sel.temporal_layer_index = enc->enc_pic.temporal_id;
+   enc->layer_select(enc);
 
    enc->encode_headers(enc);
    enc->ctx(enc);

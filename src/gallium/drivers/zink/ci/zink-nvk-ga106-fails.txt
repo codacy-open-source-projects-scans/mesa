@@ -44,6 +44,10 @@ dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.n
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_singlesample_rbo,Fail
 dEQP-GLES31.functional.shaders.multisample_interpolation.interpolate_at_sample.non_multisample_buffer.sample_n_singlesample_texture,Fail
 
+# Regression from a commit in the range c06a55fd...2fb4aed9
+# Probably https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/31585
+KHR-GL46.multi_bind.dispatch_bind_textures,Fail
+
 spec@!opengl 1.0@gl-1.0-no-op-paths,Fail
 spec@!opengl 1.0@rasterpos,Fail
 spec@!opengl 1.0@rasterpos@glsl_vs_gs_linked,Fail
@@ -428,7 +432,6 @@ spec@arb_texture_buffer_object@formats (vs- arb)@GL_LUMINANCE_ALPHA8UI_EXT,Fail
 spec@arb_texture_cube_map_array@texsubimage cube_map_array,Fail
 spec@arb_viewport_array@display-list,Fail
 spec@egl 1.4@eglterminate then unbind context,Fail
-spec@egl_ext_surface_compression@create,Crash
 spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 spec@ext_external_objects@vk-image-overwrite,Crash
