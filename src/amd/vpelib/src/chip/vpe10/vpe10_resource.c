@@ -869,7 +869,7 @@ int32_t vpe10_program_backend(
         vpe_priv->be_cb_ctx.share = true;
 
         cdc_be->funcs->program_p2b_config(
-            cdc_be, surface_info->format, surface_info->swizzle, &output_ctx->target_rect);
+            cdc_be, surface_info->format, surface_info->swizzle, &output_ctx->target_rect, NULL);
         cdc_be->funcs->program_global_sync(cdc_be, VPE10_CDC_VUPDATE_OFFSET_DEFAULT,
             VPE10_CDC_VUPDATE_WIDTH_DEFAULT, VPE10_CDC_VREADY_OFFSET_DEFAULT);
 
@@ -951,7 +951,7 @@ enum vpe_status vpe10_populate_cmd_info(struct vpe_priv *vpe_priv)
             cmd_info.tm_enabled         = tm_enabled;
             cmd_info.insert_start_csync = false;
             cmd_info.insert_end_csync   = false;
-            vpe_vector_push(vpe_priv, vpe_priv->vpe_cmd_vector, &cmd_info);
+            vpe_vector_push(vpe_priv->vpe_cmd_vector, &cmd_info);
 
             // The following codes are only valid if blending is supported
             /*
@@ -979,6 +979,7 @@ void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx
     struct dpp          *dpp      = vpe_priv->resource.dpp[pipe_idx];
     struct mpc          *mpc      = vpe_priv->resource.mpc[pipe_idx];
     enum vpe_cmd_type    cmd_type = VPE_CMD_TYPE_COUNT;
+    struct vpe_vector   *config_vector;
 
     vpe_priv->fe_cb_ctx.stream_op_sharing = true;
     vpe_priv->fe_cb_ctx.stream_sharing    = false;
@@ -995,7 +996,8 @@ void vpe10_create_stream_ops_config(struct vpe_priv *vpe_priv, uint32_t pipe_idx
         return;
 
     // return if already generated
-    if (stream_ctx->num_stream_op_configs[pipe_idx][cmd_type])
+    config_vector = stream_ctx->stream_op_configs[pipe_idx][cmd_type];
+    if (config_vector->num_elements)
         return;
 
     vpe_priv->fe_cb_ctx.cmd_type = cmd_type;

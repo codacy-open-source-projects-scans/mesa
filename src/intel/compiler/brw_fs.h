@@ -221,6 +221,8 @@ struct cs_thread_payload : public thread_payload {
 
    brw_reg local_invocation_id[3];
 
+   brw_reg inline_parameter;
+
 protected:
    brw_reg subgroup_id_;
 };
@@ -230,7 +232,6 @@ struct task_mesh_thread_payload : public cs_thread_payload {
 
    brw_reg extended_parameter_0;
    brw_reg local_index;
-   brw_reg inline_parameter;
 
    brw_reg urb_output;
 
@@ -673,6 +674,7 @@ bool brw_fs_opt_zero_samples(fs_visitor &s);
 
 bool brw_fs_workaround_emit_dummy_mov_instruction(fs_visitor &s);
 bool brw_fs_workaround_memory_fence_before_eot(fs_visitor &s);
+bool brw_fs_workaround_source_arf_before_eot(fs_visitor &s);
 bool brw_fs_workaround_nomask_control_flow(fs_visitor &s);
 
 /* Helpers. */

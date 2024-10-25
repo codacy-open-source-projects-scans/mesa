@@ -24,17 +24,31 @@
 
 #include <initializer_list>
 
+static void
+init_ir3_nir_options(struct ir3_shader_nir_options *options,
+                     const struct tu_shader_key *key)
+{
+   *options = {
+      .robust_modes = (nir_variable_mode)
+         ((key->robust_storage_access2 ? nir_var_mem_ssbo : 0) |
+          (key->robust_uniform_access2 ? nir_var_mem_ubo : 0)),
+   };
+}
+
 nir_shader *
 tu_spirv_to_nir(struct tu_device *dev,
                 void *mem_ctx,
                 VkPipelineCreateFlags2KHR pipeline_flags,
                 const VkPipelineShaderStageCreateInfo *stage_info,
+                const struct tu_shader_key *key,
                 gl_shader_stage stage)
 {
    /* TODO these are made-up */
    const struct spirv_to_nir_options spirv_options = {
       /* ViewID is a sysval in geometry stages and an input in the FS */
-      .view_index_is_input = stage == MESA_SHADER_FRAGMENT,
+      .view_index_is_input =
+         stage == MESA_SHADER_FRAGMENT &&
+         !key->lower_view_index_to_device_index,
 
       /* Use 16-bit math for RelaxedPrecision ALU ops */
       .mediump_16bit_alu = true,
@@ -106,7 +120,12 @@ tu_spirv_to_nir(struct tu_device *dev,
    NIR_PASS_V(nir, nir_lower_system_values);
    NIR_PASS_V(nir, nir_lower_is_helper_invocation);
 
-   ir3_optimize_loop(dev->compiler, nir);
+   if (key->lower_view_index_to_device_index)
+      NIR_PASS_V(nir, nir_lower_view_index_to_device_index);
+
+   struct ir3_shader_nir_options options;
+   init_ir3_nir_options(&options, key);
+   ir3_optimize_loop(dev->compiler, &options, nir);
 
    NIR_PASS_V(nir, nir_opt_conditional_discard);
 
@@ -497,9 +516,9 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
       if (!dev->compiler->load_shader_consts_via_preamble)
          return false;
 
-      enum ir3_driver_param param =
+      unsigned param =
          instr->intrinsic == nir_intrinsic_load_frag_size_ir3 ?
-         IR3_DP_FS_FRAG_SIZE : IR3_DP_FS_FRAG_OFFSET;
+         IR3_DP_FS(frag_size) : IR3_DP_FS(frag_offset);
 
       unsigned offset = param - IR3_DP_FS_DYNAMIC;
 
@@ -517,7 +536,7 @@ lower_intrinsic(nir_builder *b, nir_intrinsic_instr *instr,
 
       nir_def *result =
          ir3_load_driver_ubo(b, 1, &shader->const_state.fdm_ubo,
-                             IR3_DP_FS_FRAG_INVOCATION_COUNT -
+                             IR3_DP_FS(frag_invocation_count) -
                              IR3_DP_FS_DYNAMIC);
 
       nir_def_replace(&instr->def, result);
@@ -2517,7 +2536,10 @@ tu_shader_create(struct tu_device *dev,
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-   ir3_finalize_nir(dev->compiler, nir);
+   struct ir3_shader_nir_options nir_options;
+   init_ir3_nir_options(&nir_options, key);
+
+   ir3_finalize_nir(dev->compiler, &nir_options, nir);
 
    const struct ir3_shader_options options = {
       .num_reserved_user_consts = reserved_consts_vec4,
@@ -2526,6 +2548,7 @@ tu_shader_create(struct tu_device *dev,
       .push_consts_type = shader->const_state.push_consts.type,
       .push_consts_base = shader->const_state.push_consts.lo,
       .push_consts_dwords = shader->const_state.push_consts.dwords,
+      .nir_options = nir_options,
    };
 
    struct ir3_shader *ir3_shader =
@@ -2716,7 +2739,7 @@ tu_compile_shaders(struct tu_device *device,
       int64_t stage_start = os_time_get_nano();
 
       nir[stage] = tu_spirv_to_nir(device, mem_ctx, pipeline_flags,
-                                   stage_info, stage);
+                                   stage_info, &keys[stage], stage);
       if (!nir[stage]) {
          result = VK_ERROR_OUT_OF_HOST_MEMORY;
          goto fail;
@@ -2885,6 +2908,16 @@ tu_shader_key_subgroup_size(struct tu_shader_key *key,
 
    key->api_wavesize = api_wavesize;
    key->real_wavesize = real_wavesize;
+}
+
+void
+tu_shader_key_robustness(struct tu_shader_key *key,
+                         const struct vk_pipeline_robustness_state *rs)
+{
+   key->robust_storage_access2 =
+      (rs->storage_buffers == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT);
+   key->robust_uniform_access2 =
+      (rs->uniform_buffers == VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS_2_EXT);
 }
 
 static VkResult

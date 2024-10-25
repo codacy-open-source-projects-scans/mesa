@@ -112,7 +112,6 @@ static const nir_shader_compiler_options ir3_base_options = {
    .lower_doubles_options = (nir_lower_doubles_options)~0,
 
    .divergence_analysis_options = nir_divergence_uniform_load_tears,
-   .has_ddx_intrinsics = true,
    .scalarize_ddx = true,
 };
 
@@ -176,11 +175,12 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
 
       /* Compute shaders don't share a const file with the FS. Instead they
        * have their own file, which is smaller than the FS one. On a7xx the size
-       * was doubled.
+       * was doubled, although this doesn't work on X1-85.
        *
        * TODO: is this true on earlier gen's?
        */
-      compiler->max_const_compute = compiler->gen >= 7 ? 512 : 256;
+      compiler->max_const_compute =
+         (compiler->gen >= 7 && !dev_info->a7xx.compute_constlen_quirk) ? 512 : 256;
 
       /* TODO: implement clip+cull distances on earlier gen's */
       compiler->has_clip_cull = true;

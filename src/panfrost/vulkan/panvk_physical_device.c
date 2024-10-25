@@ -160,6 +160,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .KHR_external_semaphore = true,
       .KHR_external_semaphore_fd = true,
       .KHR_get_memory_requirements2 = true,
+      .KHR_image_format_list = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
@@ -179,6 +180,7 @@ get_device_extensions(const struct panvk_physical_device *device,
       .EXT_custom_border_color = true,
       .EXT_external_memory_dma_buf = true,
       .EXT_graphics_pipeline_library = true,
+      .EXT_image_drm_format_modifier = true,
       .EXT_index_type_uint8 = true,
       .EXT_physical_device_drm = true,
       .EXT_pipeline_creation_cache_control = true,
@@ -511,7 +513,7 @@ get_device_properties(const struct panvk_instance *instance,
       .maxDrawIndexedIndexValue = UINT32_MAX,
       /* Make it one for now. */
       .maxDrawIndirectCount = 1,
-      .maxSamplerLodBias = 255,
+      .maxSamplerLodBias = (float)INT16_MAX / 256.0f,
       .maxSamplerAnisotropy = 16,
       .maxViewports = 1,
       /* Same as the framebuffer limit. */
@@ -1068,16 +1070,18 @@ panvk_GetPhysicalDeviceFormatProperties2(VkPhysicalDevice physicalDevice,
 
    VkDrmFormatModifierPropertiesListEXT *list = vk_find_struct(
       pFormatProperties->pNext, DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT);
-   if (list) {
+   if (list && pFormatProperties->formatProperties.linearTilingFeatures) {
       VK_OUTARRAY_MAKE_TYPED(VkDrmFormatModifierPropertiesEXT, out,
                              list->pDrmFormatModifierProperties,
                              &list->drmFormatModifierCount);
 
-      vk_outarray_append_typed(VkDrmFormatModifierProperties2EXT, &out,
+      vk_outarray_append_typed(VkDrmFormatModifierPropertiesEXT, &out,
                                mod_props)
       {
          mod_props->drmFormatModifier = DRM_FORMAT_MOD_LINEAR;
          mod_props->drmFormatModifierPlaneCount = 1;
+         mod_props->drmFormatModifierTilingFeatures =
+            pFormatProperties->formatProperties.linearTilingFeatures;
       }
    }
 }
@@ -1102,25 +1106,30 @@ get_image_format_properties(struct panvk_physical_device *physical_device,
    case VK_IMAGE_TILING_LINEAR:
       format_feature_flags = format_props.linearTilingFeatures;
       break;
+   case VK_IMAGE_TILING_OPTIMAL:
+      format_feature_flags = format_props.optimalTilingFeatures;
+      break;
+   case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT: {
+      const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *mod_info =
+         vk_find_struct_const(
+            info->pNext, PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+      if (mod_info->drmFormatModifier != DRM_FORMAT_MOD_LINEAR)
+         goto unsupported;
 
-   case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
       /* The only difference between optimal and linear is currently whether
        * depth/stencil attachments are allowed on depth/stencil formats.
        * There's no reason to allow importing depth/stencil textures, so just
        * disallow it and then this annoying edge case goes away.
-       *
-       * TODO: If anyone cares, we could enable this by looking at the
-       * modifier and checking if it's LINEAR or not.
        */
       if (util_format_is_depth_or_stencil(format))
          goto unsupported;
 
       assert(format_props.optimalTilingFeatures ==
              format_props.linearTilingFeatures);
-      FALLTHROUGH;
-   case VK_IMAGE_TILING_OPTIMAL:
-      format_feature_flags = format_props.optimalTilingFeatures;
+
+      format_feature_flags = format_props.linearTilingFeatures;
       break;
+   }
    default:
       unreachable("bad VkPhysicalDeviceImageFormatInfo2");
    }

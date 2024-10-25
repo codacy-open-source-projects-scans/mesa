@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2086 # we want word splitting
+# shellcheck disable=SC1091 # paths only become valid at runtime
+
+. "${SCRIPTS_DIR}/setup-test-env.sh"
 
 section_start test_setup "deqp: preparing test setup"
 
@@ -120,12 +123,20 @@ if [ -e "$INSTALL/$GPU_VERSION-skips.txt" ]; then
     DEQP_SKIPS="$DEQP_SKIPS $INSTALL/$GPU_VERSION-skips.txt"
 fi
 
+if [ -e "$INSTALL/$GPU_VERSION-merge-skips.txt" ] && [ -n "${IS_MERGE_PIPELINE:-}" ]; then
+    DEQP_SKIPS="$DEQP_SKIPS $INSTALL/$GPU_VERSION-merge-skips.txt"
+fi
+
 if [ "$PIGLIT_PLATFORM" != "gbm" ] ; then
     DEQP_SKIPS="$DEQP_SKIPS $INSTALL/x11-skips.txt"
 fi
 
 if [ "$PIGLIT_PLATFORM" = "gbm" ]; then
     DEQP_SKIPS="$DEQP_SKIPS $INSTALL/gbm-skips.txt"
+fi
+
+if [ -n "$USE_ANGLE" ]; then
+    DEQP_SKIPS="$DEQP_SKIPS $INSTALL/angle-skips.txt"
 fi
 
 if [ -n "$VK_DRIVER" ] && [ -z "$DEQP_SUITE" ]; then
@@ -199,7 +210,7 @@ if [ -z "$DEQP_SUITE" ]; then
         --jobs ${FDO_CI_CONCURRENT:-4} \
         $DEQP_RUNNER_OPTIONS \
         -- \
-        $DEQP_OPTIONS
+        $DEQP_OPTIONS; DEQP_EXITCODE=$?
 else
     # If you change the format of the suite toml filenames or the
     # $GPU_VERSION-{fails,flakes,skips}.txt filenames, look through the rest
@@ -215,18 +226,17 @@ else
         --fraction-start ${CI_NODE_INDEX:-1} \
         --fraction $((CI_NODE_TOTAL * ${DEQP_FRACTION:-1})) \
         --jobs ${FDO_CI_CONCURRENT:-4} \
-        $DEQP_RUNNER_OPTIONS
+        $DEQP_RUNNER_OPTIONS; DEQP_EXITCODE=$?
 fi
 
-DEQP_EXITCODE=$?
+{ set +x; } 2>/dev/null
+
 set -e
-
-set +x
-
-report_load
 
 section_switch test_post_process "deqp: post-processing test results"
 set -x
+
+report_load
 
 # Remove all but the first 50 individual XML files uploaded as artifacts, to
 # save fd.o space when you break everything.
@@ -265,8 +275,9 @@ fi
 # Compress results.csv to save on bandwidth during the upload of artifacts to
 # GitLab. This reduces the size in a VKCTS run from 135 to 7.6MB, and takes
 # 0.17s on a Ryzen 5950X (16 threads, 0.95s when limited to 1 thread).
-zstd --rm -T0 -8q "$RESULTS_DIR/results.csv" -o "$RESULTS_DIR/results.csv.zst"
+zstd --quiet --rm --threads ${FDO_CI_CONCURRENT:-0} -8 "$RESULTS_DIR/results.csv" -o "$RESULTS_DIR/results.csv.zst"
 
+set +x
 section_end test_post_process
 
 exit $DEQP_EXITCODE

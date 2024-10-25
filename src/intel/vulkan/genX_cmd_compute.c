@@ -145,8 +145,20 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
       genX(cmd_buffer_ensure_cfe_state)(cmd_buffer, prog_data->base.total_scratch);
 #endif
 
-      /* The workgroup size of the pipeline affects our push constant layout
-       * so flag push constants as dirty if we change the pipeline.
+      /* Changing the pipeline affects the push constants layout (different
+       * amount of cross/per thread allocations). The allocation is also
+       * bounded to just the amount consummed by the pipeline (see
+       * anv_cmd_buffer_cs_push_constants). So we force the reallocation for
+       * every pipeline change.
+       *
+       * On Gfx12.0 we're also seeing failures in the dEQP-VK.memory_model.*
+       * tests when run in parallel. This is likely a HW issue with push
+       * constants & context save/restore.
+       *
+       * TODO: optimize this on Gfx12.5+ where the shader is not using per
+       * thread allocations and is also pulling the data using SEND messages.
+       * We should be able to limit reallocations only the data actually
+       * changes.
        */
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
       comp_state->base.push_constants_data_dirty = true;
@@ -217,23 +229,58 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 }
 
 static void
-anv_cmd_buffer_push_base_group_id(struct anv_cmd_buffer *cmd_buffer,
-                                  uint32_t baseGroupX,
-                                  uint32_t baseGroupY,
-                                  uint32_t baseGroupZ)
+anv_cmd_buffer_push_workgroups(struct anv_cmd_buffer *cmd_buffer,
+                               const struct brw_cs_prog_data *prog_data,
+                               uint32_t baseGroupX,
+                               uint32_t baseGroupY,
+                               uint32_t baseGroupZ,
+                               uint32_t groupCountX,
+                               uint32_t groupCountY,
+                               uint32_t groupCountZ,
+                               struct anv_address indirect_group)
 {
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
 
    struct anv_push_constants *push =
       &cmd_buffer->state.compute.base.push_constants;
+   bool updated = false;
    if (push->cs.base_work_group_id[0] != baseGroupX ||
        push->cs.base_work_group_id[1] != baseGroupY ||
        push->cs.base_work_group_id[2] != baseGroupZ) {
       push->cs.base_work_group_id[0] = baseGroupX;
       push->cs.base_work_group_id[1] = baseGroupY;
       push->cs.base_work_group_id[2] = baseGroupZ;
+      updated = true;
+   }
 
+   /* On Gfx12.5+ this value goes into the inline parameter register */
+   if (GFX_VERx10 < 125 && prog_data->uses_num_work_groups) {
+      if (anv_address_is_null(indirect_group)) {
+         if (push->cs.num_work_groups[0] != groupCountX ||
+             push->cs.num_work_groups[1] != groupCountY ||
+             push->cs.num_work_groups[2] != groupCountZ) {
+            push->cs.num_work_groups[0] = groupCountX;
+            push->cs.num_work_groups[1] = groupCountY;
+            push->cs.num_work_groups[2] = groupCountZ;
+            updated = true;
+         }
+      } else {
+         uint64_t addr64 = anv_address_physical(indirect_group);
+         uint32_t lower_addr32 = addr64 & 0xffffffff;
+         uint32_t upper_addr32 = addr64 >> 32;
+         if (push->cs.num_work_groups[0] != UINT32_MAX ||
+             push->cs.num_work_groups[1] != lower_addr32 ||
+             push->cs.num_work_groups[2] != upper_addr32) {
+            push->cs.num_work_groups[0] = UINT32_MAX;
+            push->cs.num_work_groups[1] = lower_addr32;
+            push->cs.num_work_groups[2] = upper_addr32;
+            updated = true;
+         }
+      }
+   }
+
+   if (updated) {
       cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
       cmd_buffer->state.compute.base.push_constants_data_dirty = true;
    }
@@ -293,7 +340,7 @@ get_interface_descriptor_data(struct anv_cmd_buffer *cmd_buffer,
       .BindingTablePointer = cmd_buffer->state.binding_tables[MESA_SHADER_COMPUTE].offset,
       /* Typically set to 0 to avoid prefetching on every thread dispatch. */
       .BindingTableEntryCount = devinfo->verx10 == 125 ?
-         0 : 1 + MIN2(shader->bind_map.surface_count, 30),
+         0 : MIN2(shader->bind_map.surface_count, 30),
       .NumberofThreadsinGPGPUThreadGroup = dispatch->threads,
       .SharedLocalMemorySize = intel_compute_slm_encode_size(GFX_VER, prog_data->base.total_shared),
       .PreferredSLMAllocationSize =
@@ -321,6 +368,8 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       brw_cs_get_dispatch_info(devinfo, prog_data, NULL);
    const int dispatch_size = dispatch.simd_size / 16;
 
+   uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
+
    struct GENX(COMPUTE_WALKER_BODY) body =  {
       .SIMDSize                 = dispatch_size,
       .MessageSIMD              = dispatch_size,
@@ -339,6 +388,12 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
       .InterfaceDescriptor =
          get_interface_descriptor_data(cmd_buffer, shader, prog_data,
                                        &dispatch),
+      .EmitInlineParameter      = prog_data->uses_inline_data,
+      .InlineData               = {
+         [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 0] = UINT32_MAX,
+         [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 1] = indirect_addr64 & 0xffffffff,
+         [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 2] = indirect_addr64 >> 32,
+      },
    };
 
    cmd_buffer->state.last_indirect_dispatch =
@@ -357,7 +412,8 @@ emit_indirect_compute_walker(struct anv_cmd_buffer *cmd_buffer,
 
 static inline void
 emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
-                    const struct anv_compute_pipeline *pipeline, bool indirect,
+                    const struct anv_compute_pipeline *pipeline,
+                    struct anv_address indirect_addr,
                     const struct brw_cs_prog_data *prog_data,
                     uint32_t groupCountX, uint32_t groupCountY,
                     uint32_t groupCountZ)
@@ -369,12 +425,24 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
    const struct intel_cs_dispatch_info dispatch =
       brw_cs_get_dispatch_info(devinfo, prog_data, NULL);
 
+   uint32_t num_workgroup_data[3];
+   if (!anv_address_is_null(indirect_addr)) {
+      uint64_t indirect_addr64 = anv_address_physical(indirect_addr);
+      num_workgroup_data[0] = UINT32_MAX;
+      num_workgroup_data[1] = indirect_addr64 & 0xffffffff;
+      num_workgroup_data[2] = indirect_addr64 >> 32;
+   } else {
+      num_workgroup_data[0] = groupCountX;
+      num_workgroup_data[1] = groupCountY;
+      num_workgroup_data[2] = groupCountZ;
+   }
+
    cmd_buffer->state.last_compute_walker =
       anv_batch_emitn(
          &cmd_buffer->batch,
          GENX(COMPUTE_WALKER_length),
          GENX(COMPUTE_WALKER),
-         .IndirectParameterEnable        = indirect,
+         .IndirectParameterEnable        = !anv_address_is_null(indirect_addr),
          .PredicateEnable                = predicate,
          .SIMDSize                       = dispatch.simd_size / 16,
          .MessageSIMD                    = dispatch.simd_size / 16,
@@ -401,7 +469,13 @@ emit_compute_walker(struct anv_cmd_buffer *cmd_buffer,
          .InterfaceDescriptor =
             get_interface_descriptor_data(cmd_buffer, pipeline->cs,
                                           prog_data, &dispatch),
-      );
+         .EmitInlineParameter            = prog_data->uses_inline_data,
+         .InlineData                     = {
+            [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 0] = num_workgroup_data[0],
+            [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 1] = num_workgroup_data[1],
+            [ANV_INLINE_PARAM_NUM_WORKGROUPS_OFFSET / 4 + 2] = num_workgroup_data[2],
+         });
+
 }
 
 #else /* #if GFX_VERx10 >= 125 */
@@ -459,7 +533,7 @@ emit_cs_walker(struct anv_cmd_buffer *cmd_buffer,
       compute_load_indirect_params(cmd_buffer, indirect_addr);
 
 #if GFX_VERx10 >= 125
-   emit_compute_walker(cmd_buffer, pipeline, is_indirect, prog_data,
+   emit_compute_walker(cmd_buffer, pipeline, indirect_addr, prog_data,
                        groupCountX, groupCountY, groupCountZ);
 #else
    emit_gpgpu_walker(cmd_buffer, pipeline, is_indirect, prog_data,
@@ -481,11 +555,13 @@ void genX(CmdDispatchBase)(
       anv_pipeline_to_compute(cmd_buffer->state.compute.base.pipeline);
    const struct brw_cs_prog_data *prog_data = get_cs_prog_data(pipeline);
 
-   anv_cmd_buffer_push_base_group_id(cmd_buffer, baseGroupX,
-                                     baseGroupY, baseGroupZ);
-
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
+
+   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
+                                  baseGroupX, baseGroupY, baseGroupZ,
+                                  groupCountX, groupCountY, groupCountZ,
+                                  ANV_NULL_ADDRESS);
 
    anv_measure_snapshot(cmd_buffer,
                         INTEL_SNAPSHOT_COMPUTE,
@@ -495,20 +571,6 @@ void genX(CmdDispatchBase)(
                         prog_data->local_size[2]);
 
    trace_intel_begin_compute(&cmd_buffer->trace);
-
-   if (prog_data->uses_num_work_groups) {
-      struct anv_state state =
-         anv_cmd_buffer_alloc_temporary_state(cmd_buffer, 12, 4);
-      uint32_t *sizes = state.map;
-      sizes[0] = groupCountX;
-      sizes[1] = groupCountY;
-      sizes[2] = groupCountZ;
-      cmd_buffer->state.compute.num_workgroups =
-         anv_cmd_buffer_temporary_state_address(cmd_buffer, state);
-
-      /* The num_workgroups buffer goes in the binding table */
-      cmd_buffer->state.descriptors_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
-   }
 
    genX(cmd_buffer_flush_compute_state)(cmd_buffer);
 
@@ -536,20 +598,17 @@ void genX(CmdDispatchIndirect)(
    struct anv_address addr = anv_address_add(buffer->address, offset);
    UNUSED struct anv_batch *batch = &cmd_buffer->batch;
 
-   anv_cmd_buffer_push_base_group_id(cmd_buffer, 0, 0, 0);
+   if (anv_batch_has_error(&cmd_buffer->batch))
+      return;
+
+   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
+                                  0, 0, 0, 0, 0, 0, addr);
 
    anv_measure_snapshot(cmd_buffer,
                         INTEL_SNAPSHOT_COMPUTE,
                         "compute indirect",
                         0);
    trace_intel_begin_compute_indirect(&cmd_buffer->trace);
-
-   if (prog_data->uses_num_work_groups) {
-      cmd_buffer->state.compute.num_workgroups = addr;
-
-      /* The num_workgroups buffer goes in the binding table */
-      cmd_buffer->state.descriptors_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
-   }
 
    genX(cmd_buffer_flush_compute_state)(cmd_buffer);
 

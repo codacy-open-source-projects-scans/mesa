@@ -792,9 +792,9 @@ anv_sparse_bind_trtt(struct anv_device *device,
          goto out_dynarrays;
    }
 
-   for (int b = 0; b < sparse_submit->binds_len && result == VK_SUCCESS; b++) {
+   for (int b = 0; b < sparse_submit->binds_len; b++) {
       struct anv_vm_bind *vm_bind = &sparse_submit->binds[b];
-      for (size_t i = 0; i < vm_bind->size && result == VK_SUCCESS; i += 64 * 1024) {
+      for (uint64_t i = 0; i < vm_bind->size; i += 64 * 1024) {
          uint64_t trtt_addr = vm_bind->address + i;
          uint64_t dest_addr =
             (vm_bind->op == ANV_VM_BIND && vm_bind->bo) ?
@@ -1376,7 +1376,7 @@ anv_sparse_bind_image_memory(struct anv_queue *queue,
    assert(!(bind->flags & VK_SPARSE_MEMORY_BIND_METADATA_BIT));
 
    struct anv_image_binding *img_binding = image->disjoint ?
-      anv_image_aspect_to_binding(image, aspect) :
+      &image->bindings[anv_image_aspect_to_binding(image, aspect)] :
       &image->bindings[ANV_IMAGE_MEMORY_BINDING_MAIN];
    struct anv_sparse_binding_data *sparse_data = &img_binding->sparse_data;
 
