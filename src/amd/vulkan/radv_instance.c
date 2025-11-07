@@ -197,6 +197,7 @@ static const driOptionDescription radv_dri_options[] = {
       DRI_CONF_RADV_ENABLE_FLOAT16_GFX8(false)
       DRI_CONF_RADV_COOPERATIVE_MATRIX2_NV(false)
       DRI_CONF_RADV_WAIT_FOR_VM_MAP_UPDATES(false)
+      DRI_CONF_RADV_NO_IMPLICIT_VARYING_SUBGROUP_SIZE(false)
    DRI_CONF_SECTION_END
 };
 // clang-format on
@@ -234,6 +235,8 @@ radv_init_dri_debug_options(struct radv_instance *instance)
    drirc->debug.tex_non_uniform = driQueryOptionb(&drirc->options, "radv_tex_non_uniform");
    drirc->debug.wait_for_vm_map_updates = driQueryOptionb(&drirc->options, "radv_wait_for_vm_map_updates");
    drirc->debug.zero_vram = driQueryOptionb(&drirc->options, "radv_zero_vram");
+   drirc->debug.no_implicit_varying_subgroup_size =
+      driQueryOptionb(&drirc->options, "radv_no_implicit_varying_subgroup_size");
    drirc->debug.app_layer = driQueryOptionstr(&drirc->options, "radv_app_layer");
 
    drirc->debug.override_uniform_offset_alignment =
@@ -386,9 +389,9 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
 
    simple_mtx_init(&instance->shader_dump_mtx, mtx_plain);
 
-   instance->debug_flags = parse_debug_string(getenv("RADV_DEBUG"), radv_debug_options);
-   instance->perftest_flags = parse_debug_string(getenv("RADV_PERFTEST"), radv_perftest_options);
-   instance->trap_excp_flags = parse_debug_string(getenv("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
+   instance->debug_flags = parse_debug_string(os_get_option("RADV_DEBUG"), radv_debug_options);
+   instance->perftest_flags = parse_debug_string(os_get_option("RADV_PERFTEST"), radv_perftest_options);
+   instance->trap_excp_flags = parse_debug_string(os_get_option("RADV_TRAP_HANDLER_EXCP"), radv_trap_excp_options);
    instance->profile_pstate = radv_parse_pstate(debug_get_option("RADV_PROFILE_PSTATE", "peak"));
 
    const uint64_t shader_stage_flags = RADV_DEBUG_DUMP_VS | RADV_DEBUG_DUMP_TCS | RADV_DEBUG_DUMP_TES |
@@ -422,7 +425,7 @@ radv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo, const VkAllocationC
     * device that allows to test the compiler without having an
     * AMDGPU instance.
     */
-   if (getenv("RADV_FORCE_FAMILY"))
+   if (os_get_option("RADV_FORCE_FAMILY"))
       instance->vk.physical_devices.enumerate = create_null_physical_device;
    else
       instance->vk.physical_devices.try_create_for_drm = create_drm_physical_device;

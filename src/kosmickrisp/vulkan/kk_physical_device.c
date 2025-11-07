@@ -117,6 +117,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
       /* Vulkan 1.4 */
       .KHR_push_descriptor = true,
       .KHR_shader_expect_assume = true,
+      .KHR_vertex_attribute_divisor = true,
+      .EXT_vertex_attribute_divisor = true,
 
       /* Optional extensions */
       .KHR_shader_maximal_reconvergence = true,
@@ -126,6 +128,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_swapchain = true,
       .KHR_swapchain_mutable_format = true,
 #endif
+      .KHR_workgroup_memory_explicit_layout = true,
 
       .EXT_external_memory_metal = true,
       .EXT_mutable_descriptor_type = true,
@@ -156,6 +159,7 @@ kk_get_device_features(
        */
       .fragmentStoresAndAtomics = false,
       .imageCubeArray = true,
+      .independentBlend = true,
       .logicOp = true,
       .robustBufferAccess = true,
       .samplerAnisotropy = true,
@@ -259,6 +263,10 @@ kk_get_device_features(
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
 
+      /* Vulkan 1.4 */
+      .vertexAttributeInstanceRateDivisor = true,
+      .vertexAttributeInstanceRateZeroDivisor = true,
+
       /* VK_EXT_mutable_descriptor_type */
       .mutableDescriptorType = true,
 
@@ -270,6 +278,12 @@ kk_get_device_features(
 
       /* VK_KHR_shader_relaxed_extended_instruction */
       .shaderRelaxedExtendedInstruction = true,
+
+      /* VK_KHR_workgroup_memory_explicit_layout */
+      .workgroupMemoryExplicitLayout = true,
+      .workgroupMemoryExplicitLayoutScalarBlockLayout = true,
+      .workgroupMemoryExplicitLayout8BitAccess = true,
+      .workgroupMemoryExplicitLayout16BitAccess = true,
 
       /* VK_EXT_shader_replicated_composites */
       .shaderReplicatedComposites = true,
@@ -457,7 +471,7 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
                                       VK_RESOLVE_MODE_MAX_BIT,
       .independentResolveNone = true,
       .independentResolve = true,
-      .driverID = VK_DRIVER_ID_MESA_HONEYKRISP, // TODO_KOSMICKRISP Have our own
+      .driverID = VK_DRIVER_ID_MESA_KOSMICKRISP,
       .conformanceVersion = (VkConformanceVersion){1, 4, 3, 2},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_NONE,

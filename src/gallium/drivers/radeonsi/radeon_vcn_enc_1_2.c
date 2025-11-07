@@ -1184,13 +1184,9 @@ static void begin(struct radeon_encoder *enc)
    enc->op_init(enc);
 
    enc->session_init(enc);
-   enc->slice_control(enc);
-   enc->spec_misc(enc);
-   enc->deblocking_filter(enc);
 
    enc->layer_control(enc);
    enc->rc_session_init(enc);
-   enc->quality_params(enc);
    enc->encode_latency(enc);
 
    i = 0;
@@ -1225,13 +1221,13 @@ static void encode(struct radeon_encoder *enc)
 {
    unsigned i;
 
-   enc->before_encode(enc);
    enc->session_info(enc);
    enc->total_task_size = 0;
    enc->task_info(enc, enc->need_feedback);
 
    if (enc->need_rate_control || enc->need_rc_per_pic) {
       i = 0;
+      enc->layer_control(enc);
       do {
          enc->enc_pic.layer_sel.temporal_layer_index = i;
          if (enc->need_rate_control) {
@@ -1248,12 +1244,21 @@ static void encode(struct radeon_encoder *enc)
    enc->enc_pic.layer_sel.temporal_layer_index = enc->enc_pic.temporal_id;
    enc->layer_select(enc);
 
+   enc->quality_params(enc);
+   enc->slice_control(enc);
+   enc->spec_misc(enc);
+   enc->deblocking_filter(enc);
    enc->encode_headers(enc);
    enc->ctx(enc);
+   enc->ctx_override(enc);
    enc->bitstream(enc);
    enc->feedback(enc);
+   enc->metadata(enc);
+   enc->encode_statistics(enc);
    enc->intra_refresh(enc);
    enc->qp_map(enc);
+   enc->input_format(enc);
+   enc->output_format(enc);
 
    enc->op_preset(enc);
    enc->op_enc(enc);
@@ -1274,7 +1279,6 @@ void radeon_enc_1_2_init(struct radeon_encoder *enc)
    struct si_screen *sscreen = (struct si_screen *)enc->screen;
    uint32_t minor_version;
 
-   enc->before_encode = radeon_enc_dummy;
    enc->begin = begin;
    enc->encode = encode;
    enc->destroy = destroy;
@@ -1304,6 +1308,10 @@ void radeon_enc_1_2_init(struct radeon_encoder *enc)
    enc->encode_statistics = radeon_enc_encode_statistics;
    enc->qp_map = radeon_enc_qp_map;
    enc->encode_latency = radeon_enc_encode_latency;
+   enc->input_format = radeon_enc_dummy;
+   enc->output_format = radeon_enc_dummy;
+   enc->ctx_override = radeon_enc_dummy;
+   enc->metadata = radeon_enc_dummy;
 
    if (u_reduce_video_profile(enc->base.profile) == PIPE_VIDEO_FORMAT_MPEG4_AVC) {
       enc->slice_control = radeon_enc_slice_control;

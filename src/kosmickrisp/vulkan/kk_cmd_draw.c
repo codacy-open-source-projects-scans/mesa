@@ -304,9 +304,15 @@ kk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       kk_fill_common_attachment_description(
          attachment_descriptor, render->depth_att.iview,
          pRenderingInfo->pDepthAttachment, force_attachment_load);
-      mtl_render_pass_attachment_descriptor_set_clear_depth(
-         attachment_descriptor,
-         pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth);
+
+      /* clearValue.depthStencil.depth could have invalid values such as NaN
+       * which will trigger a Metal validation error. Ensure we only use this
+       * value if the attachment is actually cleared. */
+      if (pRenderingInfo->pDepthAttachment->loadOp ==
+          VK_ATTACHMENT_LOAD_OP_CLEAR)
+         mtl_render_pass_attachment_descriptor_set_clear_depth(
+            attachment_descriptor,
+            pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth);
    }
    if (render->stencil_att.iview) {
       const struct kk_image_view *iview = render->stencil_att.iview;
@@ -849,6 +855,10 @@ VKAPI_ATTR void VKAPI_CALL
 kk_CmdDraw(VkCommandBuffer commandBuffer, uint32_t vertexCount,
            uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance)
 {
+   /* Metal validation dislikes empty calls */
+   if (instanceCount == 0 || vertexCount == 0)
+      return;
+
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
    kk_flush_draw_state(cmd);
@@ -891,6 +901,10 @@ kk_CmdDrawIndexed(VkCommandBuffer commandBuffer, uint32_t indexCount,
                   uint32_t instanceCount, uint32_t firstIndex,
                   int32_t vertexOffset, uint32_t firstInstance)
 {
+   /* Metal validation dislikes empty calls */
+   if (instanceCount == 0 || indexCount == 0)
+      return;
+
    VK_FROM_HANDLE(kk_cmd_buffer, cmd, commandBuffer);
 
    kk_flush_draw_state(cmd);

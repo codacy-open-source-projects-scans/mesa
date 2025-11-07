@@ -9,6 +9,9 @@
  */
 
 #include <fcntl.h>
+#include "util/os_misc.h"
+#include "vulkan/vulkan_core.h"
+#include "vk_sync_dummy.h"
 
 #ifdef MAJOR_IN_SYSMACROS
 #include <sys/sysmacros.h>
@@ -17,6 +20,7 @@
 #include "vk_log.h"
 #include "vk_shader_module.h"
 
+#include "common/ac_null_device.h"
 #include "util/disk_cache.h"
 #include "util/hex.h"
 #include "util/u_debug.h"
@@ -37,7 +41,6 @@ typedef void *drmDevicePtr;
 #include "util/os_drm.h"
 #include "winsys/amdgpu/radv_amdgpu_winsys_public.h"
 #endif
-#include "winsys/null/radv_null_winsys_public.h"
 #include "git_sha1.h"
 
 #if AMD_LLVM_AVAILABLE
@@ -72,7 +75,7 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
           pdev->info.has_gang_submit;
 }
 
-static bool
+bool
 radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -252,6 +255,7 @@ radv_physical_device_init_cache_key(struct radv_physical_device *pdev)
    key->use_llvm = pdev->use_llvm;
    key->use_ngg = pdev->use_ngg;
    key->use_ngg_culling = pdev->use_ngg_culling;
+   key->no_implicit_varying_subgroup_size = instance->drirc.debug.no_implicit_varying_subgroup_size;
 }
 
 static int
@@ -603,6 +607,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
+      .KHR_maintenance10 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = radv_perf_query_supported(pdev),
@@ -1420,6 +1425,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_shader_uniform_buffer_unsized_array */
       .shaderUniformBufferUnsizedArray = true,
+
+      /* VK_KHR_maintenance10 */
+      .maintenance10 = true,
    };
 }
 
@@ -2091,6 +2099,11 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* VK_NV_cooperative_matrix2 */
       .cooperativeMatrixFlexibleDimensionsMaxDimension = 1024,
+
+      /* VK_KHR_maintenance10 */
+      .rgba4OpaqueBlackSwizzled = true,
+      .resolveSrgbFormatAppliesTransferFunction = true,
+      .resolveSrgbFormatSupportsTransferFunctionControl = true,
    };
 
    struct vk_properties *p = &pdev->vk.properties;
@@ -2196,6 +2209,23 @@ radv_is_gpu_supported(const struct radeon_info *info)
    return true;
 }
 
+static const struct vk_sync_type *const dummy_types[2] = {
+   &vk_sync_dummy_type,
+   NULL,
+};
+
+static VkResult
+radv_create_null_device(struct radv_instance *instance, struct radv_physical_device *pdev)
+{
+   const char *family = os_get_option("RADV_FORCE_FAMILY");
+
+   if (!ac_null_device_create(&pdev->info, family))
+      return vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED, "Unknown family: %s\n", family);
+
+   pdev->vk.supported_sync_types = dummy_types;
+   return VK_SUCCESS;
+}
+
 static VkResult
 radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm_device,
                                 struct radv_physical_device **pdev_out)
@@ -2270,67 +2300,64 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
 
 #ifdef _WIN32
-   pdev->ws = radv_null_winsys_create();
-   if (!pdev->ws)
-      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+   result = radv_create_null_device(instance, pdev);
+   if (result != VK_SUCCESS)
+      goto fail_base;
 #else
    if (drm_device) {
       bool reserve_vmid = instance->vk.trace_mode & RADV_TRACE_MODE_RGP;
 
       result = radv_amdgpu_winsys_create(fd, instance->debug_flags, instance->perftest_flags, reserve_vmid, is_virtio,
                                          &pdev->ws);
-   } else {
-      pdev->ws = radv_null_winsys_create();
-      if (!pdev->ws)
-         result = VK_ERROR_OUT_OF_HOST_MEMORY;
-   }
-#endif
 
-   if (result != VK_SUCCESS) {
-      result = vk_errorf(instance, result, "failed to initialize winsys");
-      goto fail_base;
-   }
+      if (result != VK_SUCCESS) {
+         result = vk_errorf(instance, result, "failed to initialize winsys");
+         goto fail_base;
+      }
 
-   pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
+      pdev->vk.supported_sync_types = pdev->ws->get_sync_types(pdev->ws);
+      pdev->ws->query_info(pdev->ws, &pdev->info);
 
-#ifndef _WIN32
-   if (drm_device && instance->vk.enabled_extensions.KHR_display) {
-      master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
-      if (master_fd >= 0) {
-         uint32_t accel_working = 0;
-         struct drm_amdgpu_info request = {.return_pointer = (uintptr_t)&accel_working,
-                                           .return_size = sizeof(accel_working),
-                                           .query = AMDGPU_INFO_ACCEL_WORKING};
+      if (instance->vk.enabled_extensions.KHR_display) {
+         master_fd = open(drm_device->nodes[DRM_NODE_PRIMARY], O_RDWR | O_CLOEXEC);
+         if (master_fd >= 0) {
+            uint32_t accel_working = 0;
+            struct drm_amdgpu_info request = {.return_pointer = (uintptr_t)&accel_working,
+                                              .return_size = sizeof(accel_working),
+                                              .query = AMDGPU_INFO_ACCEL_WORKING};
 
-         if (drm_ioctl_write(master_fd, DRM_AMDGPU_INFO, &request, sizeof(struct drm_amdgpu_info)) < 0 ||
-             !accel_working) {
-            close(master_fd);
-            master_fd = -1;
+            if (drm_ioctl_write(master_fd, DRM_AMDGPU_INFO, &request, sizeof(struct drm_amdgpu_info)) < 0 ||
+                !accel_working) {
+               close(master_fd);
+               master_fd = -1;
+            }
          }
       }
-   }
-#endif
 
-   pdev->master_fd = master_fd;
-   pdev->local_fd = fd;
-   pdev->ws->query_info(pdev->ws, &pdev->info);
-   pdev->info.family_overridden = drm_device == NULL;
+      /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
+      if (!radv_is_gpu_supported(&pdev->info)) {
+         if (instance->debug_flags & RADV_DEBUG_STARTUP)
+            fprintf(stderr, "radv: info: device '%s' is not supported by RADV.\n", pdev->info.name);
+         result = VK_ERROR_INCOMPATIBLE_DRIVER;
+         goto fail_wsi;
+      }
 
-   /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
-   if (!radv_is_gpu_supported(&pdev->info) && drm_device) {
-      if (instance->debug_flags & RADV_DEBUG_STARTUP)
-         fprintf(stderr, "radv: info: device '%s' is not supported by RADV.\n", pdev->info.name);
-      result = VK_ERROR_INCOMPATIBLE_DRIVER;
-      goto fail_wsi;
-   }
-
-   if (drm_device) {
       pdev->addrlib = ac_addrlib_create(&pdev->info, &pdev->info.max_alignment);
       if (!pdev->addrlib) {
          result = VK_ERROR_INITIALIZATION_FAILED;
          goto fail_wsi;
       }
+
+   } else {
+      /* Create NULL device if no DRM device was provided. */
+      result = radv_create_null_device(instance, pdev);
+      if (result != VK_SUCCESS)
+         goto fail_base;
    }
+#endif
+
+   pdev->master_fd = master_fd;
+   pdev->local_fd = fd;
 
    pdev->use_llvm = instance->debug_flags & RADV_DEBUG_LLVM;
 #if !AMD_LLVM_AVAILABLE
@@ -2350,10 +2377,9 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 #endif
 
    snprintf(pdev->name, sizeof(pdev->name), "AMD RADV %s%s", pdev->info.name, radv_get_compiler_string(pdev));
-
-   const char *marketing_name = pdev->ws->get_chip_name(pdev->ws);
-   snprintf(pdev->marketing_name, sizeof(pdev->name), "%s (RADV %s%s)", marketing_name ? marketing_name : "AMD Unknown",
-            pdev->info.name, radv_get_compiler_string(pdev));
+   snprintf(pdev->marketing_name, sizeof(pdev->name), "%s (RADV %s%s)",
+            pdev->info.marketing_name ? pdev->info.marketing_name : "AMD Unknown", pdev->info.name,
+            radv_get_compiler_string(pdev));
 
    if (pdev->info.gfx_level >= GFX12)
       vk_warn_non_conformant_implementation("radv");
@@ -2533,7 +2559,8 @@ fail_perfcounters:
 fail_wsi:
    if (pdev->addrlib)
       ac_addrlib_destroy(pdev->addrlib);
-   pdev->ws->destroy(pdev->ws);
+   if (pdev->ws)
+      pdev->ws->destroy(pdev->ws);
 fail_base:
    vk_physical_device_finish(&pdev->vk);
 fail_alloc:
@@ -2596,7 +2623,8 @@ radv_physical_device_destroy(struct vk_physical_device *vk_device)
    ac_destroy_perfcounters(&pdev->ac_perfcounters);
    if (pdev->addrlib)
       ac_addrlib_destroy(pdev->addrlib);
-   pdev->ws->destroy(pdev->ws);
+   if (pdev->ws)
+      pdev->ws->destroy(pdev->ws);
    disk_cache_destroy(pdev->vk.disk_cache);
    disk_cache_destroy(pdev->disk_cache_meta);
    if (pdev->local_fd != -1)

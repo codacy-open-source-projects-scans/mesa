@@ -360,8 +360,8 @@ anv_block_pool_init(struct anv_block_pool *pool,
    VkResult result;
 
    /* Make sure VMA addresses are aligned for the block pool */
-   assert(anv_is_aligned(start_address, device->info->mem_alignment));
-   assert(anv_is_aligned(initial_size, device->info->mem_alignment));
+   assert(util_is_aligned(start_address, device->info->mem_alignment));
+   assert(util_is_aligned(initial_size, device->info->mem_alignment));
    assert(max_size > 0);
    assert(max_size > initial_size);
 
@@ -1034,7 +1034,7 @@ anv_state_stream_init(struct anv_state_stream *stream,
    stream->next = block_size;
 
    stream->total_size = 0;
-   util_dynarray_init(&stream->all_blocks, NULL);
+   stream->all_blocks = UTIL_DYNARRAY_INIT;
 
    VG(VALGRIND_CREATE_MEMPOOL(stream, 0, false));
 }

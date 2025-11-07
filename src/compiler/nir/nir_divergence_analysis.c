@@ -620,6 +620,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    }
 
    case nir_intrinsic_get_ssbo_size:
+   case nir_intrinsic_ssbo_descriptor_amd:
    case nir_intrinsic_deref_buffer_array_length:
       is_divergent = src_divergent(instr->src[0], state) &&
                      (nir_intrinsic_access(instr) & ACCESS_NON_UNIFORM);
@@ -1214,7 +1215,6 @@ instr_is_loop_invariant(nir_instr *instr, struct divergence_state *state)
    case nir_instr_type_call:
       return false;
    case nir_instr_type_phi:
-   case nir_instr_type_parallel_copy:
    default:
       UNREACHABLE("NIR divergence analysis: Unsupported instruction type.");
    }
@@ -1240,7 +1240,6 @@ update_instr_divergence(nir_instr *instr, struct divergence_state *state)
       return false;
    case nir_instr_type_jump:
    case nir_instr_type_phi:
-   case nir_instr_type_parallel_copy:
    default:
       UNREACHABLE("NIR divergence analysis: Unsupported instruction type.");
    }

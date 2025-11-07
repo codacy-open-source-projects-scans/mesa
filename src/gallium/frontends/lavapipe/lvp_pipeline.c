@@ -86,7 +86,7 @@ lvp_pipeline_destroy(struct lvp_device *device, struct lvp_pipeline *pipeline, b
       vk_pipeline_layout_unref(&device->vk, &pipeline->layout->vk);
 
    for (unsigned i = 0; i < pipeline->num_groups; i++) {
-      LVP_FROM_HANDLE(lvp_pipeline, p, pipeline->groups[i]);
+      VK_FROM_HANDLE(lvp_pipeline, p, pipeline->groups[i]);
       lvp_pipeline_destroy(device, p, locked);
    }
 
@@ -108,8 +108,8 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyPipeline(
    VkPipeline                                  _pipeline,
    const VkAllocationCallbacks*                pAllocator)
 {
-   LVP_FROM_HANDLE(lvp_device, device, _device);
-   LVP_FROM_HANDLE(lvp_pipeline, pipeline, _pipeline);
+   VK_FROM_HANDLE(lvp_device, device, _device);
+   VK_FROM_HANDLE(lvp_pipeline, pipeline, _pipeline);
 
    if (!_pipeline)
       return;
@@ -303,7 +303,7 @@ compile_spirv(struct lvp_device *pdevice,
    };
 
    result = vk_pipeline_shader_stage_to_nir(&pdevice->vk, pipeline_flags, sinfo,
-                                            &spirv_options, pdevice->physical_device->drv_options[stage],
+                                            &spirv_options, lvp_device_physical(pdevice)->drv_options[stage],
                                             NULL, nir);
    return result;
 }
@@ -452,15 +452,16 @@ VkResult
 lvp_spirv_to_nir(struct lvp_pipeline *pipeline, const void *pipeline_pNext,
                  const VkPipelineShaderStageCreateInfo *sinfo, nir_shader **out_nir)
 {
-   VkResult result = compile_spirv(pipeline->device, pipeline->flags, sinfo, out_nir);
+   struct lvp_device *device = lvp_pipeline_device(pipeline);
+   VkResult result = compile_spirv(device, pipeline->flags, sinfo, out_nir);
    if (result == VK_SUCCESS) {
       if (pipeline->type == LVP_PIPELINE_EXEC_GRAPH)
          lvp_lower_exec_graph(pipeline, *out_nir);
 
       struct vk_pipeline_robustness_state robustness;
-      vk_pipeline_robustness_state_fill(&pipeline->device->vk, &robustness, pipeline_pNext, sinfo->pNext);
+      vk_pipeline_robustness_state_fill(&device->vk, &robustness, pipeline_pNext, sinfo->pNext);
 
-      lvp_shader_lower(pipeline->device, *out_nir, pipeline->layout, &robustness);
+      lvp_shader_lower(device, *out_nir, pipeline->layout, &robustness);
    }
 
    return result;
@@ -614,7 +615,8 @@ lvp_shader_compile_stage(struct lvp_device *device, struct lvp_shader *shader, n
 void *
 lvp_shader_compile(struct lvp_device *device, struct lvp_shader *shader, nir_shader *nir, bool locked)
 {
-   device->physical_device->pscreen->finalize_nir(device->physical_device->pscreen, nir);
+   const struct lvp_physical_device *pdev = lvp_device_physical(device);
+   pdev->pscreen->finalize_nir(pdev->pscreen, nir);
 
    if (!locked)
       simple_mtx_lock(&device->queue.lock);
@@ -787,7 +789,7 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
 
    if (libstate) {
       for (unsigned i = 0; i < libstate->libraryCount; i++) {
-         LVP_FROM_HANDLE(lvp_pipeline, p, libstate->pLibraries[i]);
+         VK_FROM_HANDLE(lvp_pipeline, p, libstate->pLibraries[i]);
          vk_graphics_pipeline_state_merge(&pipeline->graphics_state,
                                           &p->graphics_state);
          if (p->stages & VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT) {
@@ -830,8 +832,6 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
                                                    VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
                                                    VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT));
 
-   pipeline->device = device;
-
    for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
       const VkPipelineShaderStageCreateInfo *sinfo = &pCreateInfo->pStages[i];
       mesa_shader_stage stage = vk_to_mesa_shader_stage(sinfo->stage);
@@ -868,7 +868,7 @@ lvp_graphics_pipeline_init(struct lvp_pipeline *pipeline,
    }
    if (libstate) {
        for (unsigned i = 0; i < libstate->libraryCount; i++) {
-          LVP_FROM_HANDLE(lvp_pipeline, p, libstate->pLibraries[i]);
+          VK_FROM_HANDLE(lvp_pipeline, p, libstate->pLibraries[i]);
           if (p->stages & VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
              if (p->shaders[MESA_SHADER_FRAGMENT].pipeline_nir)
                 lvp_pipeline_nir_ref(&pipeline->shaders[MESA_SHADER_FRAGMENT].pipeline_nir, p->shaders[MESA_SHADER_FRAGMENT].pipeline_nir);
@@ -913,6 +913,7 @@ fail:
 void
 lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline, bool locked)
 {
+   struct lvp_device *device = lvp_pipeline_device(pipeline);
    if (pipeline->compiled)
       return;
    for (uint32_t i = 0; i < ARRAY_SIZE(pipeline->shaders); i++) {
@@ -922,10 +923,10 @@ lvp_pipeline_shaders_compile(struct lvp_pipeline *pipeline, bool locked)
       mesa_shader_stage stage = i;
       assert(stage == pipeline->shaders[i].pipeline_nir->nir->info.stage);
 
-      pipeline->shaders[stage].shader_cso = lvp_shader_compile(pipeline->device, &pipeline->shaders[stage],
+      pipeline->shaders[stage].shader_cso = lvp_shader_compile(device, &pipeline->shaders[stage],
          nir_shader_clone(NULL, pipeline->shaders[stage].pipeline_nir->nir), locked);
       if (pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw)
-         pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw_cso = lvp_shader_compile(pipeline->device, &pipeline->shaders[stage],
+         pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw_cso = lvp_shader_compile(device, &pipeline->shaders[stage],
             nir_shader_clone(NULL, pipeline->shaders[MESA_SHADER_TESS_EVAL].tess_ccw->nir), locked);
    }
    pipeline->compiled = true;
@@ -940,8 +941,8 @@ lvp_graphics_pipeline_create(
    VkPipeline *pPipeline,
    bool group)
 {
-   LVP_FROM_HANDLE(lvp_device, device, _device);
-   LVP_FROM_HANDLE(lvp_pipeline_cache, cache, _cache);
+   VK_FROM_HANDLE(lvp_device, device, _device);
+   VK_FROM_HANDLE(lvp_pipeline_cache, cache, _cache);
    struct lvp_pipeline *pipeline;
    VkResult result;
 
@@ -1018,7 +1019,6 @@ lvp_compute_pipeline_init(struct lvp_pipeline *pipeline,
                           VkPipelineCreateFlagBits2KHR flags)
 {
    pipeline->flags = flags;
-   pipeline->device = device;
    pipeline->layout = lvp_pipeline_layout_from_handle(pCreateInfo->layout);
    vk_pipeline_layout_ref(&pipeline->layout->vk);
    pipeline->force_min_sample = false;
@@ -1030,7 +1030,7 @@ lvp_compute_pipeline_init(struct lvp_pipeline *pipeline,
       return result;
 
    struct lvp_shader *shader = &pipeline->shaders[MESA_SHADER_COMPUTE];
-   shader->shader_cso = lvp_shader_compile(pipeline->device, shader, nir_shader_clone(NULL, shader->pipeline_nir->nir), false);
+   shader->shader_cso = lvp_shader_compile(device, shader, nir_shader_clone(NULL, shader->pipeline_nir->nir), false);
    pipeline->compiled = true;
    if (pipeline->layout)
       shader->push_constant_size = pipeline->layout->push_constant_size;
@@ -1045,8 +1045,8 @@ lvp_compute_pipeline_create(
    VkPipelineCreateFlagBits2KHR flags,
    VkPipeline *pPipeline)
 {
-   LVP_FROM_HANDLE(lvp_device, device, _device);
-   LVP_FROM_HANDLE(lvp_pipeline_cache, cache, _cache);
+   VK_FROM_HANDLE(lvp_device, device, _device);
+   VK_FROM_HANDLE(lvp_pipeline_cache, cache, _cache);
    struct lvp_pipeline *pipeline;
    VkResult result;
 
@@ -1120,8 +1120,8 @@ VKAPI_ATTR void VKAPI_CALL lvp_DestroyShaderEXT(
     VkShaderEXT                                 _shader,
     const VkAllocationCallbacks*                pAllocator)
 {
-   LVP_FROM_HANDLE(lvp_device, device, _device);
-   LVP_FROM_HANDLE(lvp_shader, shader, _shader);
+   VK_FROM_HANDLE(lvp_device, device, _device);
+   VK_FROM_HANDLE(lvp_shader, shader, _shader);
 
    if (!shader)
       return;
@@ -1244,7 +1244,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateShadersEXT(
     const VkAllocationCallbacks*                pAllocator,
     VkShaderEXT*                                pShaders)
 {
-   LVP_FROM_HANDLE(lvp_device, device, _device);
+   VK_FROM_HANDLE(lvp_device, device, _device);
    unsigned i;
    for (i = 0; i < createInfoCount; i++) {
       pShaders[i] = create_shader_object(device, &pCreateInfos[i], pAllocator);
@@ -1267,7 +1267,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_GetShaderBinaryDataEXT(
     size_t*                                     pDataSize,
     void*                                       pData)
 {
-   LVP_FROM_HANDLE(lvp_shader, shader, _shader);
+   VK_FROM_HANDLE(lvp_shader, shader, _shader);
    VkResult ret = VK_SUCCESS;
    if (pData) {
       if (*pDataSize < shader->blob.size + SHA1_DIGEST_LENGTH + VK_UUID_SIZE) {
@@ -1296,7 +1296,7 @@ lvp_exec_graph_pipeline_create(VkDevice _device, VkPipelineCache _cache,
                                VkPipelineCreateFlagBits2KHR flags,
                                VkPipeline *out_pipeline)
 {
-   LVP_FROM_HANDLE(lvp_device, device, _device);
+   VK_FROM_HANDLE(lvp_device, device, _device);
    struct lvp_pipeline *pipeline;
    VkResult result;
 

@@ -21,6 +21,7 @@ radv_entrypoints_gen_command += [
   '--device-prefix', 'metro_exodus',
   '--device-prefix', 'rage2',
   '--device-prefix', 'quantic_dream',
+  '--device-prefix', 'no_mans_sky',
 
   # Command buffer annotation layer entrypoints
   '--device-prefix', 'annotate',
@@ -40,6 +41,7 @@ libradv_files = files(
   'layers/radv_metro_exodus.c',
   'layers/radv_rage2.c',
   'layers/radv_quantic_dream.c',
+  'layers/radv_no_mans_sky.c',
   'layers/radv_rmv_layer.c',
   'layers/radv_rra_layer.c',
   'layers/radv_sqtt_layer.c',
@@ -87,12 +89,6 @@ libradv_files = files(
   'nir/radv_nir_remap_color_attachment.c',
   'nir/radv_nir_rt_common.c',
   'nir/radv_nir_rt_shader.c',
-  'winsys/null/radv_null_bo.c',
-  'winsys/null/radv_null_bo.h',
-  'winsys/null/radv_null_cs.c',
-  'winsys/null/radv_null_cs.h',
-  'winsys/null/radv_null_winsys.c',
-  'winsys/null/radv_null_winsys_public.h',
   'radv_acceleration_structure.c',
   'radv_android.c',
   'radv_android.h',

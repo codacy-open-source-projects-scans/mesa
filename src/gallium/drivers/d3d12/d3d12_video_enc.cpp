@@ -2484,7 +2484,7 @@ UINT d3d12_video_encoder_calculate_max_output_compressed_bitstream_size(
          (uiWidth > 16) &&
          (format != DXGI_FORMAT_UNKNOWN));
 
-   const UINT MIN_BUFFER_SIZE = 128 * 128 * 2; // Minimum buffer size for very small frames: 128x128 pixels at 2 bytes/pixel
+   const UINT MIN_BUFFER_SIZE = 256 * 1024; // 256KB minimum buffer size
    const UINT MAX_BUFFER_SIZE = 20 * 1024 * 1024; // Maximum buffer size of 20MB
    const float EXPECTED_COMPRESSION_FACTOR = 2.0f; // Assume 50% of calculated size after compression of raw pixel sizes
 
@@ -2633,6 +2633,10 @@ d3d12_video_encoder_create_encoder(struct pipe_context *context, const struct pi
 
    }
 
+   // Cache max slices cap
+   pD3D12Enc->screen_max_slices_per_frame = context->screen->get_video_param(context->screen, codec->profile,
+                                                                             codec->entrypoint,
+                                                                             PIPE_VIDEO_CAP_ENC_MAX_SLICES_PER_FRAME);
    return &pD3D12Enc->base;
 
 failed:
@@ -3150,9 +3154,28 @@ d3d12_video_encoder_get_slice_bitstream_data(struct pipe_video_codec *codec,
             pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pSubregionBitstreamsBaseOffsets[slice_idx]);
 
          uint64_t nal_placing_offset = pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionOffsets[slice_idx] - nal_byte_size;
+
+         // Buffer size check before buffer_subdata
+         struct pipe_resource *dst_buffer = pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].comp_bit_destinations[slice_idx];
+         if (dst_buffer->width0 < (nal_placing_offset + nal_byte_size)) {
+            assert (false);
+            debug_printf("Error: d3d12_video_encoder_get_slice_bitstream_data buffer_subdata would overflow destination buffer. "
+                        "Buffer size: %u, required: %" PRIu64 " (offset: %" PRIu64 " + size: %" PRIu64 ")\n",
+                        dst_buffer->width0, nal_placing_offset + nal_byte_size, nal_placing_offset, nal_byte_size);
+            if (codec_unit_metadata_count) {
+               *codec_unit_metadata_count = 1u;
+               if (codec_unit_metadata) {
+                  codec_unit_metadata[0].flags = PIPE_VIDEO_CODEC_UNIT_LOCATION_FLAG_MAX_SLICE_SIZE_OVERFLOW;
+                  codec_unit_metadata[0].size = 0;
+                  codec_unit_metadata[0].offset = 0;
+               }
+            }
+            return;
+         }
+
          // We upload it here since for single buffer case, we don't know the exact absolute ppSubregionOffsets of the slice in the buffer until slice fence is signaled
          pD3D12Enc->base.context->buffer_subdata(pD3D12Enc->base.context,                                                                                            // context
-                                                 pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].comp_bit_destinations[slice_idx],                        // dst buffer
+                                                 dst_buffer,                                                                                                         // dst buffer
                                                  PIPE_MAP_WRITE,                                                                                                     // usage PIPE_MAP_x
                                                  static_cast<unsigned int>(nal_placing_offset),                                                                      // offset
                                                  static_cast<unsigned int>(nal_byte_size),                                                                           // src size
@@ -3175,6 +3198,27 @@ d3d12_video_encoder_get_slice_bitstream_data(struct pipe_video_codec *codec,
                                                          &pUploadGPUCompletionFence,
                                                          NULL);
       }
+   }
+
+   // Buffer size check for resolved subregion
+   uint64_t subregion_end_offset = pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionOffsets[slice_idx] +
+                                   pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionSizes[slice_idx];
+   if (pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].comp_bit_destinations[slice_idx]->width0 < subregion_end_offset) {
+      debug_printf("Error: d3d12_video_encoder_get_slice_bitstream_data resolved subregion extends beyond buffer boundary. "
+                  "Buffer size: %u, subregion end offset: %" PRIu64 " (offset: %" PRIu64 " + size: %" PRIu64 ")\n",
+                  pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].comp_bit_destinations[slice_idx]->width0,
+                  subregion_end_offset,
+                  pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionOffsets[slice_idx],
+                  pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].ppResolvedSubregionSizes[slice_idx]);
+      if (codec_unit_metadata_count) {
+         *codec_unit_metadata_count = 1u;
+         if (codec_unit_metadata) {
+            codec_unit_metadata[0].flags = PIPE_VIDEO_CODEC_UNIT_LOCATION_FLAG_MAX_SLICE_SIZE_OVERFLOW;
+            codec_unit_metadata[0].size = 0;
+            codec_unit_metadata[0].offset = 0;
+         }
+      }
+      return;
    }
 
    *codec_unit_metadata_count = 1u; // one slice
@@ -4445,12 +4489,22 @@ d3d12_video_encoder_get_feedback(struct pipe_video_codec *codec,
    // Extract encode metadata
    D3D12_VIDEO_ENCODER_OUTPUT_METADATA                       encoderMetadata;
    std::vector<D3D12_VIDEO_ENCODER_FRAME_SUBREGION_METADATA> pSubregionsMetadata;
-   d3d12_video_encoder_extract_encode_metadata(
-      pD3D12Enc,
-      feedback,
-      pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot],
-      encoderMetadata,
-      pSubregionsMetadata);
+   bool bSuccess = d3d12_video_encoder_extract_encode_metadata(
+                     pD3D12Enc,
+                     feedback,
+                     pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot],
+                     encoderMetadata,
+                     pSubregionsMetadata);
+
+   if (!bSuccess) {
+      opt_metadata.encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+      debug_printf("[d3d12_video_encoder] Encode GPU command for fence %" PRIu64 " failed - could not extract encode metadata\n",
+                     requested_metadata_fence);
+      assert(false);
+      if(pMetadata)
+         *pMetadata = opt_metadata;
+      return;
+   }
 
    // Validate encoder output metadata
    if ((encoderMetadata.EncodeErrorFlags != D3D12_VIDEO_ENCODER_ENCODE_ERROR_FLAG_NO_ERROR) || (encoderMetadata.EncodedBitstreamWrittenBytesCount == 0)) {
@@ -4520,6 +4574,17 @@ d3d12_video_encoder_get_feedback(struct pipe_video_codec *codec,
                   uint64_t slice_nal_size = static_cast<uint64_t>(pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pSliceHeaders[cur_slice_idx][slice_nal_idx].buffer.size());
                   void* slice_nal_buffer = pD3D12Enc->m_spEncodedFrameMetadata[current_metadata_slot].pSliceHeaders[cur_slice_idx][slice_nal_idx].buffer.data();
 
+                  // Ensure we have enough space
+                  assert((dst_tmp_buffer_written_bytes + slice_nal_size) <= pD3D12Enc->m_SliceHeaderRepackBuffer->width0);
+                  if ((dst_tmp_buffer_written_bytes + slice_nal_size) > pD3D12Enc->m_SliceHeaderRepackBuffer->width0) {
+                     opt_metadata.encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+                     debug_printf("[d3d12_video_encoder] Insufficient compressed buffer size passed from frontend while repacking slice headers.\n");
+                     assert(false);
+                     if(pMetadata)
+                        *pMetadata = opt_metadata;
+                     return;
+                  }
+
                   // Upload slice header to m_SliceHeaderRepackBuffer
                   pD3D12Enc->base.context->buffer_subdata(pD3D12Enc->base.context,               // context
                                                           pD3D12Enc->m_SliceHeaderRepackBuffer,  // dst buffer
@@ -4539,6 +4604,17 @@ d3d12_video_encoder_get_feedback(struct pipe_video_codec *codec,
                            1,                                              // depth
                            &src_box
                   );
+
+                  // Ensure we have enough space
+                  assert((dst_tmp_buffer_written_bytes + src_box.width) <= pD3D12Enc->m_SliceHeaderRepackBuffer->width0);
+                  if ((dst_tmp_buffer_written_bytes + src_box.width) > pD3D12Enc->m_SliceHeaderRepackBuffer->width0) {
+                     opt_metadata.encode_result = PIPE_VIDEO_FEEDBACK_METADATA_ENCODE_FLAG_FAILED;
+                     debug_printf("[d3d12_video_encoder] Insufficient compressed buffer size passed from frontend while repacking slice headers.\n");
+                     assert(false);
+                     if(pMetadata)
+                        *pMetadata = opt_metadata;
+                     return;
+                  }
 
                   pD3D12Enc->base.context->resource_copy_region(pD3D12Enc->base.context,                                                                              //  ctx
                                                                 pD3D12Enc->m_SliceHeaderRepackBuffer,                                                                 //  dst
@@ -4735,7 +4811,7 @@ d3d12_video_encoder_build_post_encode_codec_bitstream(struct d3d12_video_encoder
    }
 }
 
-void
+bool
 d3d12_video_encoder_extract_encode_metadata(
    struct d3d12_video_encoder *                               pD3D12Enc,
    void                                                       *feedback,                 // input
@@ -4761,7 +4837,7 @@ d3d12_video_encoder_extract_encode_metadata(
    HRESULT hr = pResolvedMetadataBuffer->Map(0, &readRange, &pMetadataBufferSrc);
    if (FAILED(hr)) {
       debug_printf("Error: d3d12_video_encoder_extract_encode_metadata failed to map metadata buffer with HR %x\n", (unsigned)hr);
-      return;
+      return false;
    }
 
    // Clear output
@@ -4794,7 +4870,54 @@ d3d12_video_encoder_extract_encode_metadata(
    else if (raw_metadata.SubregionNotificationMode == D3D12_VIDEO_ENCODER_COMPRESSED_BITSTREAM_NOTIFICATION_MODE_SUBREGIONS) {
       // Driver metadata doesn't have the subregions nor EncodedBitstreamWrittenBytesCount info on this case, let's get them from d3d12_video_encoder_get_slice_bitstream_data instead
       parsedMetadata.EncodedBitstreamWrittenBytesCount = 0u;
-      parsedMetadata.WrittenSubregionsCount = static_cast<UINT64>(raw_metadata.pspSubregionFences.size());
+
+      // We need to be careful when dealing with AUTO slice layout mode
+      // as the number of subregions may not match the number of slices raw_metadata.pspSubregionFences.size()
+      if (raw_metadata.m_associatedEncodeConfig.m_encoderSliceConfigMode == D3D12_VIDEO_ENCODER_FRAME_SUBREGION_LAYOUT_MODE_AUTO)
+      {
+         // Wait on the last slice fence to ensure all slices are completed
+         bool bLastSliceWaitResult = d3d12_fence_finish(raw_metadata.m_LastSliceFence.get(), OS_TIMEOUT_INFINITE);
+         assert(bLastSliceWaitResult);
+         if (!bLastSliceWaitResult)
+         {
+            debug_printf("Error: d3d12_video_encoder_extract_encode_metadata failed to wait on last slice fence\n");
+            pResolvedMetadataBuffer->Unmap(0, nullptr);
+            return false;
+         }
+
+         // Count how many pSliceFences are actually signaled -> this is the actual number of slices actually produced
+         // and save that into parsedMetadata.WrittenSubregionsCount
+         uint32_t max_potential_slice_count = static_cast<uint32_t>(raw_metadata.pspSubregionFences.size());
+         parsedMetadata.WrittenSubregionsCount = 0;
+         bool bSliceSignaled = false;
+         uint32_t slice_idx = 0;
+         do
+         {
+            bSliceSignaled = d3d12_fence_finish(raw_metadata.pSubregionPipeFences[slice_idx].get(),  0 /* No wait, just see if signaled */ );
+
+            if(bSliceSignaled)
+            {
+               parsedMetadata.WrittenSubregionsCount++;
+            }
+
+            slice_idx++;
+         } while ((slice_idx < max_potential_slice_count) &&
+                  bSliceSignaled);
+
+         if( parsedMetadata.WrittenSubregionsCount != max_potential_slice_count)
+         {
+            debug_printf("Info: d3d12_video_encoder_extract_encode_metadata AUTO slice layout mode detected %"
+                         PRIu32 " signaled slices out of max potential %"
+                         PRIu32 " slices.\n",
+                         static_cast<UINT32>(parsedMetadata.WrittenSubregionsCount),
+                         max_potential_slice_count);
+         }
+      }
+      else
+      {
+         parsedMetadata.WrittenSubregionsCount = static_cast<UINT64>(raw_metadata.pspSubregionFences.size());
+      }
+
       pSubregionsMetadata.resize(static_cast<size_t>(parsedMetadata.WrittenSubregionsCount));
       std::vector<struct codec_unit_location_t> slice_codec_units(4u);
       for (uint32_t sliceIdx = 0; sliceIdx < parsedMetadata.WrittenSubregionsCount; sliceIdx++) {
@@ -4804,13 +4927,29 @@ d3d12_video_encoder_extract_encode_metadata(
                                                       sliceIdx,
                                                       NULL /*get count in first call*/,
                                                       &codec_unit_metadata_count);
-         assert(codec_unit_metadata_count > 0);
+
+         if (codec_unit_metadata_count == 0) {
+            assert(false);
+            debug_printf("Error: d3d12_video_encoder_extract_encode_metadata slice %u has zero codec units\n", sliceIdx);
+            pResolvedMetadataBuffer->Unmap(0, nullptr);
+            return false;
+         }
+
          slice_codec_units.resize(codec_unit_metadata_count);
          d3d12_video_encoder_get_slice_bitstream_data(&pD3D12Enc->base,
                                                       feedback,
                                                       sliceIdx,
                                                       slice_codec_units.data(),
                                                       &codec_unit_metadata_count);
+
+         // Check for slice size overflow flag
+         for (unsigned unit_idx = 0; unit_idx < codec_unit_metadata_count; unit_idx++) {
+            if (slice_codec_units[unit_idx].flags & PIPE_VIDEO_CODEC_UNIT_LOCATION_FLAG_MAX_SLICE_SIZE_OVERFLOW) {
+               debug_printf("Error: d3d12_video_encoder_extract_encode_metadata slice %u unit %u has size overflow flag set\n", sliceIdx, unit_idx);
+               pResolvedMetadataBuffer->Unmap(0, nullptr);
+               return false;
+            }
+         }
 
          // In some cases the slice buffer will contain packed codec units like SPS, PPS for H264, etc
          // In here we only want the slice NAL, and it's safe to assume this is always the latest NAL
@@ -4824,6 +4963,7 @@ d3d12_video_encoder_extract_encode_metadata(
 
    // Unmap the buffer using native D3D12 API
    pResolvedMetadataBuffer->Unmap(0, nullptr);
+   return true;
 }
 
 /**

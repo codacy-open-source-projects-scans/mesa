@@ -185,7 +185,7 @@ radv_meta_blit2d_normal_dst(struct radv_cmd_buffer *cmd_buffer, struct radv_meta
 
       VkRenderingInfo rendering_info = {
          .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-         .flags = VK_RENDERING_INPUT_ATTACHMENT_NO_CONCURRENT_WRITES_BIT_MESA,
+         .flags = VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR,
          .renderArea =
             {
                .offset = {rect->dst_x, rect->dst_y},
@@ -259,7 +259,11 @@ radv_meta_blit2d_normal_dst(struct radv_cmd_buffer *cmd_buffer, struct radv_meta
 
       radv_CmdDraw(radv_cmd_buffer_to_handle(cmd_buffer), 3, 1, 0, 0);
 
-      radv_CmdEndRendering(radv_cmd_buffer_to_handle(cmd_buffer));
+      const VkRenderingEndInfoKHR end_info = {
+         .sType = VK_STRUCTURE_TYPE_RENDERING_END_INFO_KHR,
+      };
+
+      radv_CmdEndRendering2KHR(radv_cmd_buffer_to_handle(cmd_buffer), &end_info);
 
    fail_pipeline:
 

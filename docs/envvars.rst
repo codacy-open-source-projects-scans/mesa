@@ -98,6 +98,10 @@ Core Mesa environment variables
    specifies a file name for logging all errors, warnings, etc., rather
    than stderr
 
+.. envvar:: MESA_LOG_PREFIX
+
+   specifies what to to include in the log prefix (linux only) - default is ``tag,level``
+
 .. envvar:: MESA_EXTENSION_OVERRIDE
 
    can be used to enable/disable extensions. A value such as
@@ -352,6 +356,11 @@ Core Mesa environment variables
    causes the Vulkan driver to call abort() immediately after detecting a
    lost device.  This is extremely useful when testing as it prevents the
    test suite from continuing on with a lost device.
+
+.. envvar:: MESA_VK_VALIDATE_SHADER_BINARIES
+
+   enables extra validation of shader and pipeline binaries to ensure
+   consistency of driver binaries.
 
 .. envvar:: MESA_VK_ENABLE_SUBMIT_THREAD
 

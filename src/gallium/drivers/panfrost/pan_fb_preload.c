@@ -551,9 +551,7 @@ pan_preload_get_shader(struct pan_fb_preload_cache *cache,
       .is_blit = true,
       .no_idvs = true,
    };
-   struct util_dynarray binary;
-
-   util_dynarray_init(&binary, NULL);
+   struct util_dynarray binary = UTIL_DYNARRAY_INIT;
 
    shader = rzalloc(cache->shaders.preload, struct pan_preload_shader_data);
 
@@ -564,7 +562,6 @@ pan_preload_get_shader(struct pan_fb_preload_cache *cache,
 
    pan_shader_preprocess(b.shader, inputs.gpu_id);
    pan_shader_lower_texture_early(b.shader, inputs.gpu_id);
-   pan_shader_lower_texture(b.shader, inputs.gpu_id);
    pan_shader_postprocess(b.shader, inputs.gpu_id);
 
    if (PAN_ARCH == 4) {

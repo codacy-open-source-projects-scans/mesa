@@ -565,6 +565,7 @@ struct d3d12_video_encoder
    struct d3d12_screen *   m_pD3D12Screen = nullptr;
    UINT max_quality_levels = 1;
    UINT max_num_ltr_frames = 0;
+   UINT screen_max_slices_per_frame = 0;
 
    union pipe_enc_cap_sliced_notifications supports_sliced_fences = {};
 
@@ -725,7 +726,7 @@ d3d12_video_encoder_build_pre_encode_codec_headers(struct d3d12_video_encoder *p
                                                    bool &postEncodeHeadersNeeded,
                                                    uint64_t &preEncodeGeneratedHeadersByteSize,
                                                    std::vector<uint64_t> &pWrittenCodecUnitsSizes);
-void
+bool
 d3d12_video_encoder_extract_encode_metadata(
    struct d3d12_video_encoder *                               pD3D12Dec,
    void                                                       *feedback,

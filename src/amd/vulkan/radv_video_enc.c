@@ -41,7 +41,7 @@
 #define ENC_ALIGNMENT 256
 
 #define RENCODE_V5_FW_INTERFACE_MAJOR_VERSION 1
-#define RENCODE_V5_FW_INTERFACE_MINOR_VERSION 3
+#define RENCODE_V5_FW_INTERFACE_MINOR_VERSION 10
 
 #define RENCODE_V4_FW_INTERFACE_MAJOR_VERSION 1
 #define RENCODE_V4_FW_INTERFACE_MINOR_VERSION 11
@@ -66,31 +66,6 @@ radv_probe_video_encode(struct radv_physical_device *pdev)
 
    if (instance->debug_flags & RADV_DEBUG_NO_VIDEO)
       return;
-
-   if (pdev->info.vcn_ip_version >= VCN_5_0_0) {
-      pdev->video_encode_enabled = true;
-      return;
-   } else if (pdev->info.vcn_ip_version >= VCN_4_0_0) {
-      if (pdev->info.vcn_enc_major_version != RENCODE_V4_FW_INTERFACE_MAJOR_VERSION)
-         return;
-      if (pdev->info.vcn_enc_minor_version < RENCODE_V4_FW_INTERFACE_MINOR_VERSION)
-         return;
-   } else if (pdev->info.vcn_ip_version >= VCN_3_0_0) {
-      if (pdev->info.vcn_enc_major_version != RENCODE_V3_FW_INTERFACE_MAJOR_VERSION)
-         return;
-      if (pdev->info.vcn_enc_minor_version < RENCODE_V3_FW_INTERFACE_MINOR_VERSION)
-         return;
-   } else if (pdev->info.vcn_ip_version >= VCN_2_0_0) {
-      if (pdev->info.vcn_enc_major_version != RENCODE_V2_FW_INTERFACE_MAJOR_VERSION)
-         return;
-      if (pdev->info.vcn_enc_minor_version < RENCODE_V2_FW_INTERFACE_MINOR_VERSION)
-         return;
-   } else {
-      if (pdev->info.vcn_enc_major_version != RENCODE_FW_INTERFACE_MAJOR_VERSION)
-         return;
-      if (pdev->info.vcn_enc_minor_version < RENCODE_FW_INTERFACE_MINOR_VERSION)
-         return;
-   }
 
    /* WRITE_MEMORY is needed for SetEvent and is required to pass CTS */
    if (radv_video_write_memory_supported(pdev)) {
@@ -495,10 +470,10 @@ radv_enc_session_init(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoEn
    if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3)
       RADEON_ENC_CS(vid->enc_session.slice_output_enabled);
    RADEON_ENC_CS(vid->enc_session.display_remote);
-   if (pdev->enc_hw_ver == RADV_VIDEO_ENC_HW_4) {
+   if (pdev->enc_hw_ver == RADV_VIDEO_ENC_HW_4)
       RADEON_ENC_CS(vid->enc_session.WA_flags);
+   if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_4)
       RADEON_ENC_CS(0);
-   }
    RADEON_ENC_END();
 }
 
@@ -1077,6 +1052,9 @@ radv_enc_hevc_st_ref_pic_set(struct radv_cmd_buffer *cmd_buffer, const StdVideoH
    unsigned int num_short_term_ref_pic_sets = sps->num_short_term_ref_pic_sets;
    unsigned int index = num_short_term_ref_pic_sets;
 
+   if (!rps)
+      return 0;
+
    if (index != 0)
       radv_enc_code_fixed_bits(cmd_buffer, rps->flags.inter_ref_pic_set_prediction_flag, 0x1);
 
@@ -1399,15 +1377,13 @@ radv_enc_ctx(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *inf
       }
    }
 
+   dpb = dpb_iv ? dpb_iv->image : vid->intra_only_dpb;
+   assert(dpb);
+
    uint32_t luma_size = 0, chroma_size = 0, colloc_bytes = 0;
-   if (dpb_iv) {
-      dpb = dpb_iv->image;
-
-      dpb_image_sizes(dpb, &luma_pitch, &luma_size, &chroma_size, &colloc_bytes);
-
-      radv_cs_add_buffer(device->ws, cs->b, dpb->bindings[0].bo);
-      va = dpb->bindings[0].addr;
-   }
+   dpb_image_sizes(dpb, &luma_pitch, &luma_size, &chroma_size, &colloc_bytes);
+   radv_cs_add_buffer(device->ws, cs->b, dpb->bindings[0].bo);
+   va = dpb->bindings[0].addr;
 
    uint32_t swizzle_mode = 0;
 
@@ -1519,11 +1495,20 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
    int max_ref_slot_idx = 0;
    const VkVideoPictureResourceInfoKHR *slots[RENCODE_MAX_NUM_RECONSTRUCTED_PICTURES] = {NULL};
    struct radv_cmd_stream *cs = cmd_buffer->cs;
+   bool intra_only_dpb = false;
 
    if (info->pSetupReferenceSlot) {
       max_ref_slot_idx = info->pSetupReferenceSlot->slotIndex;
       slots[info->pSetupReferenceSlot->slotIndex] = info->pSetupReferenceSlot->pPictureResource;
+   } else if (vid->vk.max_dpb_slots == 0) {
+      intra_only_dpb = true;
+      slots[0] = &info->srcPictureResource;
    } else {
+      /* Workaround for CTS bug dEQP-VK.video.encode.h264.i_p_b_13_layered_src_general_layout:
+       *   VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08377
+       *    pEncodeInfo->pSetupReferenceSlot must not be NULL unless the bound video session
+       *    was created with VkVideoSessionCreateInfoKHR::maxDpbSlots equal to zero
+       */
       slots[0] = info->pReferenceSlots[0].pPictureResource;
    }
 
@@ -1554,9 +1539,9 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
 
       struct radv_image_view *dpb_iv = radv_image_view_from_handle(res->imageViewBinding);
       assert(dpb_iv != NULL);
-      struct radv_image *dpb_img = dpb_iv->image;
+      struct radv_image *dpb_img = intra_only_dpb ? vid->intra_only_dpb : dpb_iv->image;
       radv_cs_add_buffer(device->ws, cs->b, dpb_img->bindings[0].bo);
-      dpb_image_sizes(dpb_iv->image, &luma_pitch, &luma_size, &chroma_size, &colloc_bytes);
+      dpb_image_sizes(dpb_img, &luma_pitch, &luma_size, &chroma_size, &colloc_bytes);
 
       uint32_t metadata_size = RENCODE_MAX_METADATA_BUFFER_SIZE_PER_FRAME;
       if (vid->vk.op == VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR) {
@@ -1566,7 +1551,7 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
          metadata_size += RENCODE_AV1_CDEF_ALGORITHM_FRAME_CONTEXT_SIZE;
       }
 
-      uint32_t dpb_array_idx = res->baseArrayLayer + dpb_iv->vk.base_array_layer;
+      uint32_t dpb_array_idx = !intra_only_dpb ? res->baseArrayLayer + dpb_iv->vk.base_array_layer : 0;
       uint64_t luma_va = dpb_img->bindings[0].addr + dpb_array_idx * (luma_size + chroma_size + metadata_size);
       uint64_t chroma_va = luma_va + luma_size;
       uint64_t fcb_va = chroma_va + chroma_size;
@@ -2272,6 +2257,7 @@ radv_enc_params_av1(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoK
       RADEON_ENC_CS(av1_picture_info->referenceNameSlotIndices[i]);
    RADEON_ENC_CS(slot_idx_0);
    RADEON_ENC_CS(slot_idx_1);
+   RADEON_ENC_CS(av1_picture_info->pStdPictureInfo->order_hint);
    RADEON_ENC_END();
 }
 
@@ -2789,7 +2775,7 @@ radv_vcn_encode_video(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInf
    cmd_buffer->video.enc.total_task_size = 0;
 
    // task info
-   radv_enc_task_info(cmd_buffer, true);
+   radv_enc_task_info(cmd_buffer, feedback_query_va);
 
    if (vid->enc_need_begin) {
       begin(cmd_buffer, enc_info);
@@ -2858,7 +2844,8 @@ radv_vcn_encode_video(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInf
 
    if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_2) {
       radv_vcn_sq_tail(cs, &cmd_buffer->video.sq);
-      radv_vcn_write_memory(cmd_buffer, feedback_query_va + RADV_ENC_FEEDBACK_STATUS_IDX * sizeof(uint32_t), 1);
+      if (feedback_query_va && radv_video_write_memory_supported(pdev) == RADV_VIDEO_WRITE_MEMORY_SUPPORT_FULL)
+         radv_vcn_write_memory(cmd_buffer, feedback_query_va + RADV_ENC_FEEDBACK_STATUS_IDX * sizeof(uint32_t), 1);
    }
 }
 
@@ -3386,6 +3373,16 @@ radv_video_get_encode_session_memory_requirements(struct radv_device *device, st
       }
    }
 
+   if (vid->intra_only_dpb) {
+      vk_outarray_append_typed(VkVideoSessionMemoryRequirementsKHR, &out, m)
+      {
+         m->memoryBindIndex = RADV_BIND_INTRA_ONLY;
+         m->memoryRequirements.size = vid->intra_only_dpb->size;
+         m->memoryRequirements.alignment = vid->intra_only_dpb->alignment;
+         m->memoryRequirements.memoryTypeBits = memory_type_bits;
+      }
+   }
+
    return vk_outarray_status(&out);
 }
 
@@ -3456,17 +3453,20 @@ radv_video_encode_qp_map_supported(const struct radv_physical_device *pdev)
    return true;
 }
 
-bool
+enum radv_video_write_memory_support
 radv_video_write_memory_supported(const struct radv_physical_device *pdev)
 {
-   if (pdev->info.vcn_ip_version >= VCN_5_0_0)
-      return true;
-   else if (pdev->info.vcn_ip_version >= VCN_4_0_0)
-      return pdev->info.vcn_enc_minor_version >= 22;
-   else if (pdev->info.vcn_ip_version >= VCN_3_0_0)
-      return pdev->info.vcn_enc_minor_version >= 33;
-   else if (pdev->info.vcn_ip_version >= VCN_2_0_0)
-      return pdev->info.vcn_enc_minor_version >= 24;
-   else /* VCN 1 and UVD */
-      return false;
+   if (pdev->info.vcn_ip_version >= VCN_5_0_0) {
+      return RADV_VIDEO_WRITE_MEMORY_SUPPORT_PCIE_ATOMICS;
+   } else if (pdev->info.vcn_ip_version >= VCN_4_0_0) {
+      if (pdev->info.vcn_enc_minor_version >= 22)
+         return RADV_VIDEO_WRITE_MEMORY_SUPPORT_PCIE_ATOMICS;
+   } else if (pdev->info.vcn_ip_version >= VCN_3_0_0) {
+      if (pdev->info.vcn_enc_minor_version >= 33)
+         return RADV_VIDEO_WRITE_MEMORY_SUPPORT_PCIE_ATOMICS;
+   } else if (pdev->info.vcn_ip_version >= VCN_2_0_0) {
+      if (pdev->info.vcn_enc_minor_version >= 24)
+         return RADV_VIDEO_WRITE_MEMORY_SUPPORT_PCIE_ATOMICS;
+   }
+   return RADV_VIDEO_WRITE_MEMORY_SUPPORT_NONE;
 }

@@ -929,7 +929,7 @@ cs_render_desc_ringbuf_reserve(struct cs_builder *b, uint32_t size)
    assert(size <= RENDER_DESC_RINGBUF_SIZE);
 
    /* Make sure the allocation is 64-byte aligned. */
-   assert(ALIGN_POT(size, 64) == size);
+   assert(util_is_aligned(size, 64));
 
    struct cs_index ringbuf_sync = cs_scratch_reg64(b, 0);
    struct cs_index sz_reg = cs_scratch_reg32(b, 2);
@@ -2044,8 +2044,16 @@ prepare_dcd(struct panvk_cmd_buffer *cmdbuf,
 
             cfg.pixel_kill_operation = (enum mali_pixel_kill)earlyzs->kill;
             cfg.zs_update_operation = (enum mali_pixel_kill)earlyzs->update;
-            cfg.evaluate_per_sample = fs->info.fs.sample_shading &&
-                                      (dyns->ms.rasterization_samples > 1);
+
+            /* Use per-sample shading if required by API. Also use it when a
+             * blend shader is used with multisampling, as this is handled by a
+             * single ST_TILE in the blend shader with the current sample ID,
+             * requiring per-sample shading.
+             */
+            cfg.evaluate_per_sample =
+               (fs->info.fs.sample_shading ||
+                cmdbuf->state.gfx.cb.info.needs_shader) &&
+               (dyns->ms.rasterization_samples > 1);
 
             cfg.shader_modifies_coverage = fs->info.fs.writes_coverage ||
                                            fs->info.fs.can_discard ||

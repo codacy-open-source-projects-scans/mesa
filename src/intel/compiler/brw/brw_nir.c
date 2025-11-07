@@ -28,6 +28,7 @@
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir_builder.h"
 #include "dev/intel_debug.h"
+#include "util/sparse_bitset.h"
 
 /**
  * Returns the minimum number of vec4 elements needed to pack a type.
@@ -381,6 +382,12 @@ remap_patch_urb_offsets_instr(nir_builder *b, nir_intrinsic_instr *intrin, void 
       }
 
       nir_src_rewrite(offset, total_offset);
+
+      /* Putting an address into offset_src requires that NIR validation of
+       * IO intrinsics is disabled.
+       */
+      io_sem.no_validate = 1;
+      nir_intrinsic_set_io_semantics(intrin, io_sem);
    }
 
    return true;
@@ -426,7 +433,11 @@ lower_per_view_outputs(nir_builder *b,
    nir_intrinsic_set_write_mask(new, nir_intrinsic_write_mask(intrin));
    nir_intrinsic_set_component(new, nir_intrinsic_component(intrin));
    nir_intrinsic_set_src_type(new, nir_intrinsic_src_type(intrin));
-   nir_intrinsic_set_io_semantics(new, nir_intrinsic_io_semantics(intrin));
+
+   nir_io_semantics sem = nir_intrinsic_io_semantics(intrin);
+   /* the meaning of the offset src is different for brw */
+   sem.no_validate = 1;
+   nir_intrinsic_set_io_semantics(new, sem);
 
    if (intrin->intrinsic == nir_intrinsic_load_per_view_output)
       nir_def_rewrite_uses(&intrin->def, &new->def);
@@ -3026,7 +3037,7 @@ brw_nir_find_complete_variable_with_location(nir_shader *shader,
 struct brw_quick_pressure_state {
    uint8_t *convergent_size;
    uint8_t *divergent_size;
-   BITSET_WORD *live;
+   struct u_sparse_bitset live;
    unsigned curr_convergent_size;
    unsigned curr_divergent_size;
 };
@@ -3076,8 +3087,8 @@ set_src_live(nir_src *src, void *v_state)
    if (nir_src_is_undef(*src))
       return true;
 
-   if (!BITSET_TEST(state->live, src->ssa->index)) {
-      BITSET_SET(state->live, src->ssa->index);
+   if (!u_sparse_bitset_test(&state->live, src->ssa->index)) {
+      u_sparse_bitset_set(&state->live, src->ssa->index);
 
       /* This value just became live, add its size */
       state->curr_convergent_size += state->convergent_size[src->ssa->index];
@@ -3091,8 +3102,8 @@ static bool
 set_def_dead(nir_def *def, void *v_state)
 {
    struct brw_quick_pressure_state *state = v_state;
-   if (BITSET_TEST(state->live, def->index)) {
-      BITSET_CLEAR(state->live, def->index);
+   if (u_sparse_bitset_test(&state->live, def->index)) {
+      u_sparse_bitset_clear(&state->live, def->index);
 
       /* This value just became dead, subtract its size */
       state->curr_convergent_size -= state->convergent_size[def->index];
@@ -3111,14 +3122,12 @@ quick_pressure_estimate(nir_shader *nir,
    nir_metadata_require(impl, nir_metadata_divergence |
                               nir_metadata_live_defs);
 
-   const unsigned bitset_words = BITSET_WORDS(impl->ssa_alloc);
-
    struct brw_quick_pressure_state state = {
       .convergent_size = calloc(impl->ssa_alloc, sizeof(uint8_t)),
       .divergent_size  = calloc(impl->ssa_alloc, sizeof(uint8_t)),
-      .live = calloc(bitset_words, sizeof(BITSET_WORD)),
    };
 
+   u_sparse_bitset_init(&state.live, impl->ssa_alloc, NULL);
    unsigned max_convergent_size = 0, max_divergent_size = 0;
 
    nir_foreach_block(block, impl) {
@@ -3130,16 +3139,13 @@ quick_pressure_estimate(nir_shader *nir,
       state.curr_divergent_size = 0;
 
       /* Start with sizes for anything live-out from the block */
-
-      unsigned i;
-      BITSET_FOREACH_SET(i, block->live_out, impl->ssa_alloc) {
+      U_SPARSE_BITSET_FOREACH_SET(&block->live_out, i) {
          state.curr_convergent_size += state.convergent_size[i];
          state.curr_divergent_size  += state.divergent_size[i];
       }
 
       /* Walk backwards, add source sizes on first sight, subtract on def */
-      for (i = 0; i < bitset_words; i++)
-         state.live[i] = block->live_out[i];
+      u_sparse_bitset_dup(&state.live, &block->live_out);
 
       nir_foreach_instr_reverse(instr, block) {
          if (instr->type == nir_instr_type_phi)
@@ -3160,7 +3166,7 @@ quick_pressure_estimate(nir_shader *nir,
 
    free(state.convergent_size);
    free(state.divergent_size);
-   free(state.live);
+   u_sparse_bitset_free(&state.live);
 }
 
 /**

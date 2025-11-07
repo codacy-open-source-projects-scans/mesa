@@ -64,8 +64,9 @@ struct radv_physical_device_cache_key {
    uint32_t use_llvm : 1;
    uint32_t use_ngg : 1;
    uint32_t use_ngg_culling : 1;
+   uint32_t no_implicit_varying_subgroup_size : 1;
 
-   uint32_t reserved : 10;
+   uint32_t reserved : 9;
 };
 
 enum radv_video_enc_hw_ver {
@@ -303,6 +304,8 @@ VkResult create_drm_physical_device(struct vk_instance *vk_instance, struct _drm
                                     struct vk_physical_device **out);
 
 void radv_physical_device_destroy(struct vk_physical_device *vk_pdev);
+
+bool radv_transfer_queue_enabled(const struct radv_physical_device *pdev);
 
 bool radv_compute_queue_enabled(const struct radv_physical_device *pdev);
 

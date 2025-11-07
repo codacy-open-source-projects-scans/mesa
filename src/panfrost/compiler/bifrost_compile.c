@@ -5095,6 +5095,7 @@ bi_gather_stats(bi_context *ctx, unsigned size, struct bifrost_stats *out)
       .loops = ctx->loop_count,
       .spills = ctx->spills,
       .fills = ctx->fills,
+      .spill_cost = ctx->spill_cost,
    };
 
    out->cycles = MAX2(out->arith, MAX3(out->t, out->v, out->ldst));
@@ -5134,6 +5135,7 @@ va_gather_stats(bi_context *ctx, unsigned size, struct valhall_stats *out)
       .loops = ctx->loop_count,
       .spills = ctx->spills,
       .fills = ctx->fills,
+      .spill_cost = ctx->spill_cost,
    };
    struct valhall_stats stats = stats_abs;
    stats.fma /= model->rates.fma;
@@ -5944,9 +5946,6 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
       if (pan_arch(gpu_id) <= 7)
          NIR_PASS(_, nir, pan_nir_lower_vertex_id);
 
-      NIR_PASS(_, nir, nir_lower_viewport_transform);
-      NIR_PASS(_, nir, nir_lower_point_size, 1.0, 0.0);
-
       nir_variable *psiz = nir_find_variable_with_location(
          nir, nir_var_shader_out, VARYING_SLOT_PSIZ);
       if (psiz != NULL)
@@ -5995,7 +5994,11 @@ bifrost_postprocess_nir(nir_shader *nir, unsigned gpu_id)
 {
    MESA_TRACE_FUNC();
 
+   bifrost_lower_texture_nir(nir, gpu_id);
+
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(_, nir, pan_nir_lower_noperspective_fs);
+
       NIR_PASS(_, nir, nir_lower_mediump_io,
                nir_var_shader_in | nir_var_shader_out,
                ~bi_fp32_varying_mask(nir), false);
@@ -6005,11 +6008,20 @@ bifrost_postprocess_nir(nir_shader *nir, unsigned gpu_id)
 
       NIR_PASS(_, nir, bifrost_nir_lower_load_output);
    } else if (nir->info.stage == MESA_SHADER_VERTEX) {
+      NIR_PASS(_, nir, nir_lower_viewport_transform);
+      NIR_PASS(_, nir, nir_lower_point_size, 1.0, 0.0);
+      NIR_PASS(_, nir, pan_nir_lower_noperspective_vs);
+
       if (pan_arch(gpu_id) >= 9) {
          NIR_PASS(_, nir, nir_lower_mediump_io, nir_var_shader_out,
                   VARYING_BIT_PSIZ, false);
       }
 
+      /* nir_lower[_explicit]_io is lazy and emits mul+add chains even
+       * for offsets it could figure out are constant.  Do some
+       * constant folding before pan_nir_lower_store_component below.
+       */
+      NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, pan_nir_lower_store_component);
    }
 
@@ -6614,4 +6626,46 @@ bifrost_compile_shader_nir(nir_shader *nir,
    }
 
    info->ubo_mask &= (1 << nir->info.num_ubos) - 1;
+}
+
+bool *
+bi_find_loop_blocks(const bi_context *ctx, bi_block *header)
+{
+   /* A block is in the loop if it has the header both as the predecessor and
+    * the successor. */
+
+   bool *h_as_suc = (bool *)calloc(ctx->num_blocks, sizeof(bool));
+   bool *h_as_pred = (bool *)calloc(ctx->num_blocks, sizeof(bool));
+   h_as_suc[header->index] = true;
+   h_as_pred[header->index] = true;
+
+   /* If the CFG was one long chain, we would require |blocks|-1 iters to
+    * propagate the in_loop info all the way through.
+    */
+   for (uint32_t iter = 0; iter < ctx->num_blocks - 1; ++iter) {
+      bi_foreach_block(ctx, block) {
+
+         bi_foreach_successor(block, succ) {
+            if (h_as_suc[succ->index]) {
+               h_as_suc[block->index] = true;
+               break;
+            }
+         }
+
+         bi_foreach_predecessor(block, pred) {
+            if (h_as_pred[(*pred)->index]) {
+               h_as_pred[block->index] = true;
+               break;
+            }
+         }
+      }
+   }
+
+   for (uint32_t bidx = 0; bidx < ctx->num_blocks - 1; ++bidx) {
+      h_as_suc[bidx] &= h_as_pred[bidx];
+   }
+
+   free(h_as_pred);
+
+   return h_as_suc;
 }

@@ -669,11 +669,13 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
                   VK_FORMAT_FEATURE_2_BLIT_SRC_BIT |
                   VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
                   VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
-                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
+                  VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
       } else if (vk_tiling == VK_IMAGE_TILING_LINEAR) {
          /* Images used for transfers */
          flags |= VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
-                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+                  VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
+                  VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
       }
       return flags;
    }
@@ -765,6 +767,8 @@ anv_get_image_format_features2(const struct anv_physical_device *physical_device
        * compressed format to an uncompressed one.
        *
        * We handle modifier tilings further down in this function.
+       *
+       * TODO: check if we could enable HOST copies in that non emulated case.
        */
       if (vk_tiling == VK_IMAGE_TILING_LINEAR &&
           isl_format_get_layout(plane_format.isl_format)->txc == ISL_TXC_ASTC)
@@ -2257,7 +2261,7 @@ void anv_GetPhysicalDeviceExternalBufferProperties(
          pExternalBufferProperties->externalMemoryProperties = android_buffer_props;
          return;
       }
-      FALLTHROUGH; /* If ahw not supported */
+      FALLTHROUGH; /* If ahb not supported */
    default:
       goto unsupported;
    }

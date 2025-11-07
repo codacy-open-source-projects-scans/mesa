@@ -139,7 +139,6 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
    if (mesa_shader_stage_is_compute(s->info.stage)) {
       pan_shader_preprocess(s, panfrost_device_gpu_id(dev));
       pan_shader_lower_texture_early(s, panfrost_device_gpu_id(dev));
-      pan_shader_lower_texture(s, panfrost_device_gpu_id(dev));
       pan_shader_postprocess(s, panfrost_device_gpu_id(dev));
    }
 
@@ -166,7 +165,7 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
       }
    }
 
-   util_dynarray_init(&out->binary, NULL);
+   out->binary = UTIL_DYNARRAY_INIT;
 
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (key->fs.nr_cbufs_for_fragcolor) {
@@ -515,18 +514,6 @@ panfrost_create_shader_state(struct pipe_context *pctx,
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
 
-   if (dev->arch >= 6 && nir->info.stage == MESA_SHADER_VERTEX)
-      NIR_PASS(_, nir, pan_nir_lower_noperspective_vs);
-   if (dev->arch >= 6 && nir->info.stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS(_, nir, pan_nir_lower_noperspective_fs);
-
-   /* nir_lower[_explicit]_io is lazy and emits mul+add chains even for
-    * offsets it could figure out are constant.  Do some constant folding
-    * before bifrost_nir_lower_store_component below.
-    */
-   NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   pan_shader_lower_texture(nir, panfrost_device_gpu_id(dev));
    pan_shader_postprocess(nir, panfrost_device_gpu_id(dev));
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)

@@ -393,6 +393,7 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
                                                         width0,
                                                         height0,
                                                         format,
+                                                        1,
                                                         ( m_bLowLatency ? MFT_STAT_POOL_MIN_SIZE : MFT_INPUT_QUEUE_DEPTH ),
                                                         m_spSatdStatsBufferPool.GetAddressOf() ),
                           done );
@@ -419,6 +420,7 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
                                                         width0,
                                                         height0,
                                                         format,
+                                                        1,
                                                         ( m_bLowLatency ? MFT_STAT_POOL_MIN_SIZE : MFT_INPUT_QUEUE_DEPTH ),
                                                         m_spBitsUsedStatsBufferPool.GetAddressOf() ),
                           done );
@@ -443,6 +445,7 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
                                                         width0,
                                                         height0,
                                                         format,
+                                                        1,
                                                         ( m_bLowLatency ? MFT_STAT_POOL_MIN_SIZE : MFT_INPUT_QUEUE_DEPTH ),
                                                         m_spQPMapStatsBufferPool.GetAddressOf() ),
                           done );
@@ -556,6 +559,7 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
                                                      pDX12EncodeContext->pPipeVideoBuffer->width,
                                                      static_cast<uint16_t>( pDX12EncodeContext->pPipeVideoBuffer->height ),
                                                      pDX12EncodeContext->pPipeVideoBuffer->buffer_format,
+                                                     1,
                                                      ( m_bLowLatency ? MFT_STAT_POOL_MIN_SIZE : MFT_INPUT_QUEUE_DEPTH ),
                                                      m_spReconstructedPictureBufferPool.GetAddressOf() ),
                        done );
@@ -587,6 +591,17 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
          std::max( 1u, pDX12EncodeContext->encoderPicInfo.av1enc.tile_rows * pDX12EncodeContext->encoderPicInfo.av1enc.tile_cols );
 #endif
 
+      if( m_bSliceGenerationModeSet && pDX12EncodeContext->IsSliceAutoModeEnabled() )
+      {
+         num_output_buffers = m_EncoderCapabilities.m_uiMaxHWSupportedMaxSlices;
+      }
+
+      // Minimum per-slice buffer size to prevent excessively small allocations.
+      // This is especially important in PIPE_SLICE_MODE_AUTO where num_output_buffers
+      // can be set to the maximum possible slices, leading to very small per-slice
+      // buffer sizes that may be insufficient for actual bitstream data.
+      const uint32_t min_slice_buffer_size = 256 * 1024;   // 256KB
+
       pDX12EncodeContext->sliceNotificationMode = D3D12_VIDEO_ENCODER_COMPRESSED_BITSTREAM_NOTIFICATION_MODE_FULL_FRAME;
       if( m_bSliceGenerationModeSet && ( m_uiSliceGenerationMode > 0 ) &&
           ( num_output_buffers > 1 ) /* IHV driver requires > 1 slices */ )
@@ -599,7 +614,7 @@ CDX12EncHMFT::PrepareForEncode( IMFSample *pSample, LPDX12EncodeContext *ppDX12E
             // Be careful with the allocation size of slice buffers, when the number of slices is high
             // and we run in LowLatency = 0, we can start thrashing when trying to MakeResident lots
             // of big allocations in short amounts of time (num slices x num in flight frames)
-            templ.width0 = ( m_uiMaxOutputBitstreamSize / num_output_buffers );
+            templ.width0 = std::max( ( m_uiMaxOutputBitstreamSize / num_output_buffers ), min_slice_buffer_size );
          }
          else
          {

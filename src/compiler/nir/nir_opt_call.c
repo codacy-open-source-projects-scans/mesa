@@ -10,7 +10,7 @@
 struct call_liveness_entry {
    struct list_head list;
    nir_call_instr *instr;
-   const BITSET_WORD *live_set;
+   struct u_sparse_bitset *live_set;
 };
 
 static bool
@@ -50,7 +50,7 @@ remat_ssa_def(nir_builder *b, nir_def *def, struct hash_table *remap_table,
               struct hash_table *phi_value_table,
               struct nir_phi_builder *phi_builder, BITSET_WORD *def_blocks)
 {
-   memset(def_blocks, 0, BITSET_WORDS(b->impl->num_blocks) * sizeof(BITSET_WORD));
+   memset(def_blocks, 0, BITSET_BYTES(b->impl->num_blocks));
    BITSET_SET(def_blocks, nir_def_block(def)->index);
    BITSET_SET(def_blocks, nir_cursor_current_block(b->cursor)->index);
    struct nir_phi_builder_value *val =
@@ -188,8 +188,6 @@ nir_minimize_call_live_states_impl(nir_function_impl *impl)
    BITSET_WORD *def_blocks = ralloc_array(mem_ctx, BITSET_WORD, block_words);
 
    list_for_each_entry(struct call_liveness_entry, entry, &call_list, list) {
-      unsigned i;
-
       nir_builder b = nir_builder_at(nir_after_instr(&entry->instr->instr));
 
       struct nir_phi_builder *builder = nir_phi_builder_create(impl);
@@ -198,7 +196,7 @@ nir_minimize_call_live_states_impl(nir_function_impl *impl)
       struct hash_table *remap_table =
          _mesa_pointer_hash_table_create(mem_ctx);
 
-      BITSET_FOREACH_SET(i, entry->live_set, num_defs) {
+      U_SPARSE_BITSET_FOREACH_SET(entry->live_set, i) {
          if (!rematerializable[i] ||
              _mesa_hash_table_search(remap_table, rematerializable[i]))
             continue;

@@ -367,6 +367,10 @@ radv_shader_choose_subgroup_size(struct radv_device *device, nir_shader *nir,
       .requiredSubgroupSize = stage_key->subgroup_required_size * 32,
    };
 
+   /* Do not allow for the SPIR-V 1.6 varying subgroup size rules. */
+   if (pdev->cache_key.no_implicit_varying_subgroup_size)
+      spirv_version = 0x10000;
+
    vk_set_subgroup_size(&device->vk, nir, spirv_version, rss_info.requiredSubgroupSize ? &rss_info : NULL,
                         stage_key->subgroup_allow_varying, stage_key->subgroup_require_full);
 
@@ -1249,6 +1253,9 @@ get_hole(struct radv_shader_arena *arena, struct list_head *head)
 void
 radv_free_shader_memory(struct radv_device *device, union radv_shader_arena_block *alloc)
 {
+   if (!alloc)
+      return;
+
    mtx_lock(&device->shader_arena_mutex);
 
    union radv_shader_arena_block *hole_prev = get_hole(alloc->arena, alloc->list.prev);
@@ -1627,14 +1634,14 @@ radv_precompute_registers_hw_gs(struct radv_device *device, struct radv_shader_b
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_shader_info *info = &binary->info;
 
-   info->regs.gs.vgt_esgs_ring_itemsize = info->gs_ring_info.esgs_itemsize;
+   info->regs.gs.vgt_esgs_ring_itemsize = info->legacy_gs_info.esgs_itemsize;
 
    info->regs.gs.vgt_gs_max_prims_per_subgroup =
-      S_028A94_MAX_PRIMS_PER_SUBGROUP(info->gs_ring_info.gs_inst_prims_in_subgroup);
+      S_028A94_MAX_PRIMS_PER_SUBGROUP(info->legacy_gs_info.gs_inst_prims_in_subgroup);
 
-   info->regs.vgt_gs_onchip_cntl = S_028A44_ES_VERTS_PER_SUBGRP(info->gs_ring_info.es_verts_per_subgroup) |
-                                   S_028A44_GS_PRIMS_PER_SUBGRP(info->gs_ring_info.gs_prims_per_subgroup) |
-                                   S_028A44_GS_INST_PRIMS_IN_SUBGRP(info->gs_ring_info.gs_inst_prims_in_subgroup);
+   info->regs.vgt_gs_onchip_cntl = S_028A44_ES_VERTS_PER_SUBGRP(info->legacy_gs_info.es_verts_per_subgroup) |
+                                   S_028A44_GS_PRIMS_PER_SUBGRP(info->legacy_gs_info.gs_prims_per_subgroup) |
+                                   S_028A44_GS_INST_PRIMS_IN_SUBGRP(info->legacy_gs_info.gs_inst_prims_in_subgroup);
 
    const uint32_t gs_max_out_vertices = info->gs.vertices_out;
    const uint8_t max_stream = info->gs.num_components_per_stream[3]   ? 3
@@ -1805,18 +1812,18 @@ radv_precompute_registers_hw_ms(struct radv_device *device, struct radv_shader_b
 
    info->regs.vgt_gs_max_vert_out = pdev->info.mesh_fast_launch_2 ? info->ngg_info.max_out_verts : info->workgroup_size;
 
-   info->regs.ms.spi_shader_gs_meshlet_dim = S_00B2B0_MESHLET_NUM_THREAD_X(info->cs.block_size[0] - 1) |
-                                             S_00B2B0_MESHLET_NUM_THREAD_Y(info->cs.block_size[1] - 1) |
-                                             S_00B2B0_MESHLET_NUM_THREAD_Z(info->cs.block_size[2] - 1) |
-                                             S_00B2B0_MESHLET_THREADGROUP_SIZE(info->workgroup_size - 1);
+   info->regs.ngg.ms.spi_shader_gs_meshlet_dim = S_00B2B0_MESHLET_NUM_THREAD_X(info->cs.block_size[0] - 1) |
+                                                 S_00B2B0_MESHLET_NUM_THREAD_Y(info->cs.block_size[1] - 1) |
+                                                 S_00B2B0_MESHLET_NUM_THREAD_Z(info->cs.block_size[2] - 1) |
+                                                 S_00B2B0_MESHLET_THREADGROUP_SIZE(info->workgroup_size - 1);
 
-   info->regs.ms.spi_shader_gs_meshlet_exp_alloc =
+   info->regs.ngg.ms.spi_shader_gs_meshlet_exp_alloc =
       S_00B2B4_MAX_EXP_VERTS(info->ngg_info.max_out_verts) | S_00B2B4_MAX_EXP_PRIMS(info->ngg_info.prim_amp_factor);
 
    if (pdev->info.gfx_level >= GFX12) {
       const bool derivative_group_quads = info->cs.derivative_group == DERIVATIVE_GROUP_QUADS;
 
-      info->regs.ms.spi_shader_gs_meshlet_ctrl =
+      info->regs.ngg.ms.spi_shader_gs_meshlet_ctrl =
          S_00B2B8_INTERLEAVE_BITS_X(derivative_group_quads) | S_00B2B8_INTERLEAVE_BITS_Y(derivative_group_quads);
    }
 }
@@ -2454,7 +2461,7 @@ radv_shader_combine_cfg_vs_gs(const struct radv_device *device, const struct rad
       if (gs->info.is_ngg) {
          lds_size = gs->info.ngg_info.lds_size;
       } else {
-         lds_size = gs->info.gs_ring_info.lds_size;
+         lds_size = gs->info.legacy_gs_info.lds_size;
       }
 
       rsrc2 |= S_00B22C_LDS_SIZE(ac_shader_encode_lds_size(lds_size, pdev->info.gfx_level, MESA_SHADER_VERTEX));
@@ -2856,6 +2863,11 @@ radv_shader_create_uncached(struct radv_device *device, const struct radv_shader
       }
    }
 
+   if (radv_device_physical(device)->info.family_overridden) {
+      *out_shader = shader;
+      return VK_SUCCESS;
+   }
+
    if (replay_block) {
       shader->alloc = radv_replay_shader_arena_block(device, replay_block, shader);
       if (!shader->alloc) {
@@ -2957,6 +2969,9 @@ radv_shader_part_create(struct radv_device *device, struct radv_shader_part_bina
    shader_part->spi_shader_col_format = binary->info.spi_shader_col_format;
    shader_part->cb_shader_mask = binary->info.cb_shader_mask;
    shader_part->spi_shader_z_format = binary->info.spi_shader_z_format;
+
+   if (radv_device_physical(device)->info.family_overridden)
+      return shader_part;
 
    /* Allocate memory and upload. */
    shader_part->alloc = radv_alloc_shader_memory(device, shader_part->code_size, false, NULL);
@@ -3558,8 +3573,7 @@ radv_shader_part_destroy(struct radv_device *device, struct radv_shader_part *sh
       radv_shader_wait_for_upload(device, shader_part->upload_seq);
    }
 
-   if (shader_part->alloc)
-      radv_free_shader_memory(device, shader_part->alloc);
+   radv_free_shader_memory(device, shader_part->alloc);
    free(shader_part->disasm_string);
    free(shader_part);
 }

@@ -39,6 +39,7 @@
 #include "lp_bld_coro.h"
 #include "lp_bld_printf.h"
 #include "lp_bld_intr.h"
+#include "lp_bld_tgsi.h"
 
 #include "util/u_cpu_detect.h"
 #include "util/u_math.h"
@@ -361,7 +362,7 @@ group_op_mask_vec(struct lp_build_nir_soa_context *bld)
 {
    if (bld->shader->info.fs.require_full_quads)
       return mask_vec_with_helpers(bld);
-   
+
    return mask_vec(bld);
 }
 
@@ -2892,7 +2893,7 @@ get_instr_src_vec(struct lp_build_nir_soa_context *bld, nir_instr *instr, uint32
    struct gallivm_state *gallivm = bld->base.gallivm;
    LLVMBuilderRef builder = gallivm->builder;
 
-   nir_src *src = NULL; 
+   nir_src *src = NULL;
    switch (instr->type) {
    case nir_instr_type_alu: {
       nir_alu_instr *alu = nir_instr_as_alu(instr);
@@ -3163,7 +3164,7 @@ do_int_divide(struct lp_build_nir_soa_context *bld,
 
 static LLVMValueRef
 do_int_mod(struct lp_build_nir_soa_context *bld,
-           bool is_unsigned, unsigned src_bit_size,
+           bool is_unsigned, bool use_src2_sign, unsigned src_bit_size,
            LLVMValueRef src, LLVMValueRef src2)
 {
    struct gallivm_state *gallivm = bld->base.gallivm;
@@ -3180,8 +3181,18 @@ do_int_mod(struct lp_build_nir_soa_context *bld,
       divisor = get_signed_divisor(gallivm, int_bld, mask_bld,
                                    src_bit_size, src, divisor);
    }
-   LLVMValueRef result = lp_build_mod(int_bld, src, divisor);
-   return LLVMBuildOr(builder, div_mask, result, "");
+   LLVMValueRef rem = lp_build_mod(int_bld, src, divisor);
+   rem = LLVMBuildOr(builder, div_mask, rem, "");
+
+   if (use_src2_sign) {
+      LLVMValueRef add_src2 = LLVMBuildICmp(builder, LLVMIntNE, rem, int_bld->zero, "");
+      LLVMValueRef signs_different = LLVMBuildXor(builder, LLVMBuildICmp(builder, LLVMIntSLT, src, int_bld->zero, ""),
+                                                  LLVMBuildICmp(builder, LLVMIntSLT, src2, int_bld->zero, ""), "");
+      add_src2 = LLVMBuildAnd(builder, add_src2, signs_different, "");
+      rem = LLVMBuildSelect(builder, add_src2, LLVMBuildAdd(builder, rem, src2, ""), rem, "");
+   }
+
+   return rem;
 }
 
 static LLVMValueRef
@@ -3493,7 +3504,7 @@ do_alu_action(struct lp_build_nir_soa_context *bld,
       break;
    case nir_op_imod:
    case nir_op_irem:
-      result = do_int_mod(bld, false, src_bit_size[0], src[0], src[1]);
+      result = do_int_mod(bld, false, instr->op == nir_op_imod, src_bit_size[0], src[0], src[1]);
       break;
    case nir_op_ishl: {
       if (src_bit_size[0] == 64)
@@ -3592,7 +3603,7 @@ do_alu_action(struct lp_build_nir_soa_context *bld,
       result = lp_build_min(uint_bld, src[0], src[1]);
       break;
    case nir_op_umod:
-      result = do_int_mod(bld, true, src_bit_size[0], src[0], src[1]);
+      result = do_int_mod(bld, true, false, src_bit_size[0], src[0], src[1]);
       break;
    case nir_op_umul_high: {
       LLVMValueRef hi_bits;
@@ -4249,7 +4260,7 @@ img_params_init_resource(struct lp_build_nir_soa_context *bld, struct lp_img_par
          params->image_index = nir_src_as_int(*src);
       else
          params->image_index_offset = get_src(bld, src, 0);
-   
+
       return;
    }
 
@@ -4264,7 +4275,7 @@ sampler_size_params_init_resource(struct lp_build_nir_soa_context *bld, struct l
          params->texture_unit = nir_src_as_int(*src);
       else
          params->texture_unit_offset = get_src(bld, src, 0);
-   
+
       return;
    }
 

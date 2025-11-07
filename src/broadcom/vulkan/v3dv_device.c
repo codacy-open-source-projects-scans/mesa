@@ -586,7 +586,7 @@ v3dv_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    instance->pipeline_cache_enabled = true;
    instance->default_pipeline_cache_enabled = true;
    instance->meta_cache_enabled = true;
-   const char *pipeline_cache_str = getenv("V3DV_ENABLE_PIPELINE_CACHE");
+   const char *pipeline_cache_str = os_get_option("V3DV_ENABLE_PIPELINE_CACHE");
    if (pipeline_cache_str != NULL) {
       if (strncmp(pipeline_cache_str, "full", 4) == 0) {
          /* nothing to do, just to filter correct values */
@@ -1582,9 +1582,7 @@ enumerate_devices(struct vk_instance *vk_instance)
          break;
    }
 
-   assert(primary_fd >= 0);
-
-   if (render_fd < 0)
+   if (render_fd < 0 || primary_fd < 0)
       result = VK_ERROR_INCOMPATIBLE_DRIVER;
    else
       result = create_physical_device(instance, primary_fd, render_fd, display_fd);

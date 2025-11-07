@@ -207,6 +207,7 @@ get_device_extensions(const struct anv_physical_device *device,
          (intel_perf_has_hold_preemption(device->perf) ||
           INTEL_DEBUG(DEBUG_NO_OACONFIG)) &&
          !(device->instance->debug & ANV_DEBUG_NO_SECONDARY_CALL),
+      .KHR_pipeline_binary                   = true,
       .KHR_pipeline_executable_properties    = true,
       .KHR_pipeline_library                  = true,
 #ifdef ANV_USE_WSI_PLATFORM
@@ -309,7 +310,7 @@ get_device_extensions(const struct anv_physical_device *device,
                                                VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR,
       .EXT_graphics_pipeline_library         = !(device->instance->debug & ANV_DEBUG_NO_GPL),
       .EXT_hdr_metadata = true,
-      .EXT_host_image_copy                   = !device->emu_astc_ldr,
+      .EXT_host_image_copy                   = true,
       .EXT_host_query_reset                  = true,
       .EXT_image_2d_view_of_3d               = true,
       /* Because of Xe2 PAT selected compression and the Vulkan spec
@@ -573,7 +574,7 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_acceleration_structure */
       .accelerationStructure = rt_enabled,
-      .accelerationStructureCaptureReplay = false, /* TODO */
+      .accelerationStructureCaptureReplay = true,
       .accelerationStructureIndirectBuild = false, /* TODO */
       .accelerationStructureHostCommands = false,
       .descriptorBindingAccelerationStructureUpdateAfterBind = rt_enabled,
@@ -996,6 +997,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_maintenance10 */
       .maintenance10 = true,
+
+      /* VK_KHR_pipeline_binary */
+      .pipelineBinaries = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1562,6 +1566,16 @@ get_properties(const struct anv_physical_device *pdevice,
    {
       props->allowCommandBufferQueryCopies = false;
    }
+
+   /* VK_KHR_pipeline_binary */
+   {
+      const bool has_disk_cache = pdevice->vk.disk_cache != NULL;
+      props->pipelineBinaryInternalCache = has_disk_cache;
+      props->pipelineBinaryInternalCacheControl = has_disk_cache;
+      props->pipelineBinaryPrefersInternalCache = has_disk_cache;
+      props->pipelineBinaryPrecompiledInternalCache = has_disk_cache;
+      props->pipelineBinaryCompressedData = false;
+    }
 
    /* VK_KHR_push_descriptor */
    {

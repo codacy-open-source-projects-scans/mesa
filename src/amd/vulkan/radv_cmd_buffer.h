@@ -199,6 +199,7 @@ struct radv_streamout_state {
 struct radv_attachment {
    VkFormat format;
    struct radv_image_view *iview;
+   VkRenderingAttachmentFlagsKHR flags;
    VkImageLayout layout;
    VkImageLayout stencil_layout;
 
@@ -217,7 +218,7 @@ struct radv_attachment {
 struct radv_rendering_state {
    bool active;
    bool has_image_views;
-   bool has_input_attachment_no_concurrent_writes;
+   bool has_input_attachment_concurrent_writes;
    VkRect2D area;
    uint32_t layer_count;
    uint32_t view_mask;

@@ -922,18 +922,6 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
 
-   if (nir->info.stage == MESA_SHADER_VERTEX)
-      NIR_PASS(_, nir, pan_nir_lower_noperspective_vs);
-   if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      NIR_PASS(_, nir, pan_nir_lower_noperspective_fs);
-
-   /* nir_lower[_explicit]_io is lazy and emits mul+add chains even for
-    * offsets it could figure out are constant.  Do some constant folding
-    * before bifrost_nir_lower_store_component below.
-    */
-   NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   pan_shader_lower_texture(nir, compile_input->gpu_id);
    pan_shader_postprocess(nir, compile_input->gpu_id);
 
    if (stage == MESA_SHADER_VERTEX)
@@ -975,8 +963,7 @@ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
    const bool dump_asm =
       shader_flags & VK_SHADER_CREATE_CAPTURE_INTERNAL_REPRESENTATIONS_BIT_MESA;
 
-   struct util_dynarray binary;
-   util_dynarray_init(&binary, NULL);
+   struct util_dynarray binary = UTIL_DYNARRAY_INIT;
    pan_shader_compile(nir, compile_input, &binary, &shader->info);
 
    /* Propagate potential additional FAU values into the panvk info struct. */

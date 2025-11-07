@@ -882,6 +882,9 @@ emit_alu(struct ir3_context *ctx, nir_alu_instr *alu)
    case nir_op_imul24:
       dst = ir3_MUL_S24_rpt(b, dst_sz, src[0], 0, src[1], 0);
       break;
+   case nir_op_umul24:
+      dst = ir3_MUL_U24_rpt(b, dst_sz, src[0], 0, src[1], 0);
+      break;
    case nir_op_ineg:
       dst = ir3_ABSNEG_S_rpt(b, dst_sz, src[0], IR3_REG_SNEG);
       break;
@@ -4296,7 +4299,6 @@ emit_instr(struct ir3_context *ctx, nir_instr *instr)
       emit_phi(ctx, nir_instr_as_phi(instr));
       break;
    case nir_instr_type_call:
-   case nir_instr_type_parallel_copy:
       ir3_context_error(ctx, "Unhandled NIR instruction type: %d\n",
                         instr->type);
       break;
@@ -4466,7 +4468,6 @@ instr_can_be_predicated(nir_instr *instr)
    case nir_instr_type_load_const:
    case nir_instr_type_undef:
    case nir_instr_type_phi:
-   case nir_instr_type_parallel_copy:
       return true;
    case nir_instr_type_call:
    case nir_instr_type_jump:

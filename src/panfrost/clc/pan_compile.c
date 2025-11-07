@@ -425,7 +425,6 @@ main(int argc, const char **argv)
 
          pan_shader_preprocess(s, inputs.gpu_id);
          pan_shader_lower_texture_early(s, inputs.gpu_id);
-         pan_shader_lower_texture(s, inputs.gpu_id);
          pan_shader_postprocess(s, inputs.gpu_id);
 
          NIR_PASS(_, s, nir_opt_deref);
@@ -442,7 +441,7 @@ main(int argc, const char **argv)
 
          struct util_dynarray shader_binary;
          struct pan_shader_info shader_info = {0};
-         util_dynarray_init(&shader_binary, NULL);
+         shader_binary = UTIL_DYNARRAY_INIT;
          pan_shader_compile(clone, &inputs, &shader_binary, &shader_info);
 
          assert(shader_info.push.count * 4 <=

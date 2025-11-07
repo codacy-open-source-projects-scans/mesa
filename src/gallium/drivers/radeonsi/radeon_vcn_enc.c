@@ -32,11 +32,13 @@ static void radeon_vcn_enc_quality_modes(struct radeon_encoder *enc,
        p->preset_mode == RENCODE_PRESET_MODE_HIGH_QUALITY)
       p->preset_mode = RENCODE_PRESET_MODE_QUALITY;
 
-   p->pre_encode_mode = in->pre_encode_mode ? RENCODE_PREENCODE_MODE_4X
-                                            : RENCODE_PREENCODE_MODE_NONE;
+   if (enc->first_frame) {
+      p->pre_encode_mode = in->pre_encode_mode ? RENCODE_PREENCODE_MODE_4X
+                                               : RENCODE_PREENCODE_MODE_NONE;
 
-   if (enc->enc_pic.rc_session_init.rate_control_method == RENCODE_RATE_CONTROL_METHOD_QUALITY_VBR)
-      p->pre_encode_mode = RENCODE_PREENCODE_MODE_4X;
+      if (enc->enc_pic.rc_session_init.rate_control_method == RENCODE_RATE_CONTROL_METHOD_QUALITY_VBR)
+         p->pre_encode_mode = RENCODE_PREENCODE_MODE_4X;
+   }
 
    p->vbaq_mode = in->vbaq_mode ? RENCODE_VBAQ_AUTO : RENCODE_VBAQ_NONE;
 
@@ -1029,6 +1031,7 @@ static void radeon_vcn_enc_av1_get_param(struct radeon_encoder *enc,
    enc_pic->force_integer_mv = pic->force_integer_mv;
    enc_pic->disable_screen_content_tools = !pic->allow_screen_content_tools;
    enc_pic->is_obu_frame = pic->enable_frame_obu;
+   enc_pic->av1_enc_params.cur_order_hint = pic->order_hint;
 
    enc_pic->enc_params.reference_picture_index =
       pic->ref_list0[0] == PIPE_H2645_LIST_REF_INVALID_ENTRY ?
@@ -1047,7 +1050,7 @@ static void radeon_vcn_enc_av1_get_param(struct radeon_encoder *enc,
       enc_pic->av1.primary_ref_frame = pic->ref_list0[0];
 
    if (sscreen->info.vcn_ip_version >= VCN_5_0_0) {
-      bool allow_unidir =
+      bool allow_unidir = enc_pic->av1_unidir_rc_available ||
          pic->rc[0].rate_ctrl_method == PIPE_H2645_ENC_RATE_CONTROL_METHOD_DISABLE;
 
       for (uint32_t i = 0; i < RENCODE_AV1_REFS_PER_FRAME; i++)
@@ -1070,7 +1073,6 @@ static void radeon_vcn_enc_av1_get_param(struct radeon_encoder *enc,
       enc_pic->av1.skip_mode_allowed = radeon_enc_av1_skip_mode_allowed(enc, skip_frames);
 
       if (enc_pic->av1.compound) {
-         bool disallow_skip_mode = enc_pic->av1_spec_misc.disallow_skip_mode;
          enc_pic->av1_spec_misc.disallow_skip_mode = !enc_pic->av1.skip_mode_allowed;
          /* Skip mode frames must match reference frames */
          if (enc_pic->av1.skip_mode_allowed) {
@@ -1078,9 +1080,6 @@ static void radeon_vcn_enc_av1_get_param(struct radeon_encoder *enc,
                skip_frames[0] != enc_pic->av1_enc_params.lsm_reference_frame_index[0] ||
                skip_frames[1] != enc_pic->av1_enc_params.lsm_reference_frame_index[1];
          }
-         enc->need_spec_misc = disallow_skip_mode != enc_pic->av1_spec_misc.disallow_skip_mode;
-      } else {
-         enc->need_spec_misc = false;
       }
    }
 
@@ -1565,7 +1564,7 @@ static void radeon_enc_begin_frame(struct pipe_video_codec *encoder,
       dpb_slots = 0;
 
    radeon_vcn_enc_get_param(enc, picture);
-   if (dpb_slots && !enc->dpb && setup_dpb(enc, dpb_slots)) {
+   if (enc->first_frame && setup_dpb(enc, dpb_slots)) {
       enc->dpb = si_resource(pipe_buffer_create(enc->screen, 0, PIPE_USAGE_DEFAULT, enc->dpb_size));
       if (!enc->dpb) {
          RADEON_ENC_ERR("Can't create DPB buffer.\n");
@@ -1935,6 +1934,8 @@ static int radeon_enc_end_frame(struct pipe_video_codec *encoder, struct pipe_vi
    if (enc->error)
       return -1;
 
+   enc->first_frame = false;
+
    return flush(enc, picture->flush_flags, picture->out_fence);
 }
 
@@ -2177,6 +2178,10 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
       }
       if (sscreen->info.vcn_enc_minor_version >= 8)
          enc->enc_pic.has_dependent_slice_instructions = true;
+      if (sscreen->info.vcn_enc_minor_version > 8 ||
+          (sscreen->info.vcn_enc_minor_version == 8 &&
+           sscreen->info.vcn_fw_revision >= 6))
+         enc->enc_pic.av1_unidir_rc_available = true;
    }
    else if (sscreen->info.vcn_ip_version >= VCN_4_0_0) {
       if (sscreen->info.vcn_enc_minor_version >= 1)
@@ -2200,6 +2205,8 @@ struct pipe_video_codec *radeon_create_encoder(struct pipe_context *context,
          enc->enc_pic.use_rc_per_pic_ex = true;
       radeon_enc_1_2_init(enc);
    }
+
+   enc->first_frame = true;
 
    return &enc->base;
 

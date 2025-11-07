@@ -43,6 +43,7 @@
 #include "util/ralloc.h"
 #include "util/range_minimum_query.h"
 #include "util/set.h"
+#include "util/sparse_bitset.h"
 #include "util/u_math.h"
 #include "nir_defines.h"
 #include "nir_shader_compiler_options.h"
@@ -946,7 +947,6 @@ typedef enum ENUM_PACKED {
    nir_instr_type_jump,
    nir_instr_type_undef,
    nir_instr_type_phi,
-   nir_instr_type_parallel_copy,
 } nir_instr_type;
 
 typedef struct nir_instr {
@@ -1995,7 +1995,8 @@ typedef struct nir_io_semantics {
    unsigned no_sysval_output : 1; /* whether this system value output has no
                                      effect due to current pipeline states */
    unsigned interp_explicit_strict : 1; /* preserve original vertex order */
-   unsigned _pad : 1;
+   /* Skip nir_validate of the intrinsic. Any new code that sets it will ba NAK'd. */
+   unsigned no_validate : 1;
 } nir_io_semantics;
 
 /* Transform feedback info for 2 outputs. nir_intrinsic_store_output contains
@@ -2778,31 +2779,6 @@ nir_phi_get_src_from_block(nir_phi_instr *phi, nir_block *block)
    return NULL;
 }
 
-typedef struct nir_parallel_copy_entry {
-   struct exec_node node;
-   bool src_is_reg;
-   bool dest_is_reg;
-   nir_src src;
-   union {
-      nir_def def;
-      nir_src reg;
-   } dest;
-} nir_parallel_copy_entry;
-
-#define nir_foreach_parallel_copy_entry(entry, pcopy) \
-   foreach_list_typed(nir_parallel_copy_entry, entry, node, &(pcopy)->entries)
-
-typedef struct nir_parallel_copy_instr {
-   nir_instr instr;
-
-   /* A list of nir_parallel_copy_entrys.  The sources of all of the
-    * entries are copied to the corresponding destinations "in parallel".
-    * In other words, if we have two entries: a -> b and b -> a, the values
-    * get swapped.
-    */
-   struct exec_list entries;
-} nir_parallel_copy_instr;
-
 /* This struct contains metadata for correlating the final nir shader
  * (after many lowering and optimization passes) with the source spir-v
  * or glsl. To avoid adding unnecessary overhead when the driver does not
@@ -2855,9 +2831,6 @@ NIR_DEFINE_CAST(nir_instr_as_undef, nir_instr, nir_undef_instr, instr,
                 type, nir_instr_type_undef)
 NIR_DEFINE_CAST(nir_instr_as_phi, nir_instr, nir_phi_instr, instr,
                 type, nir_instr_type_phi)
-NIR_DEFINE_CAST(nir_instr_as_parallel_copy, nir_instr,
-                nir_parallel_copy_instr, instr,
-                type, nir_instr_type_parallel_copy)
 
 #define NIR_DEFINE_DEF_AS_INSTR(type, suffix)                  \
    static inline type *nir_def_as_##suffix(const nir_def *def) \
@@ -3134,8 +3107,8 @@ typedef struct nir_block {
    /* SSA def live in and out for this block; used for liveness analysis.
     * Indexed by ssa_def->index
     */
-   BITSET_WORD *live_in;
-   BITSET_WORD *live_out;
+   struct u_sparse_bitset live_in;
+   struct u_sparse_bitset live_out;
 } nir_block;
 
 static inline bool
@@ -4120,8 +4093,6 @@ nir_phi_instr *nir_phi_instr_create(nir_shader *shader);
 nir_phi_src *nir_phi_instr_add_src(nir_phi_instr *instr,
                                    nir_block *pred, nir_def *src);
 
-nir_parallel_copy_instr *nir_parallel_copy_instr_create(nir_shader *shader);
-
 nir_undef_instr *nir_undef_instr_create(nir_shader *shader,
                                         unsigned num_components,
                                         unsigned bit_size);
@@ -4738,7 +4709,7 @@ should_skip_nir(const char *name)
    static const char *list = NULL;
    if (!list) {
       /* Comma separated list of names to skip. */
-      list = getenv("NIR_SKIP");
+      list = os_get_option("NIR_SKIP");
       if (!list)
          list = "";
    }
@@ -6161,7 +6132,7 @@ bool nir_shader_supports_implicit_lod(nir_shader *shader);
 
 void nir_live_defs_impl(nir_function_impl *impl);
 
-const BITSET_WORD *nir_get_live_defs(nir_cursor cursor, void *mem_ctx);
+struct u_sparse_bitset *nir_get_live_defs(nir_cursor cursor, void *mem_ctx);
 
 void nir_loop_analyze_impl(nir_function_impl *impl,
                            nir_variable_mode indirect_mask,
@@ -6442,6 +6413,16 @@ bool nir_opt_move_discards_to_top(nir_shader *shader);
 bool nir_opt_ray_queries(nir_shader *shader);
 
 bool nir_opt_ray_query_ranges(nir_shader *shader);
+
+typedef struct {
+   /* Optimize imul to muls with smaller bit sizes if possible. Only set this
+    * after optimizations (e.g., nir_opt_load_store_vectorize) that want to
+    * analyze imuls have run.
+    */
+   bool opt_imul;
+} nir_opt_uub_options;
+
+bool nir_opt_uub(nir_shader *shader, const nir_opt_uub_options *options);
 
 typedef bool (*nir_skip_helpers_instrinsic_cb)(
    nir_intrinsic_instr *intr, void *data);

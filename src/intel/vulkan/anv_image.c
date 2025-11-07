@@ -39,6 +39,7 @@
 #include "av1_tables.h"
 
 #define ANV_OFFSET_IMPLICIT UINT64_MAX
+#define ANV_MAX_PLANES 4
 
 static const enum isl_surf_dim
 vk_to_isl_surf_dim[] = {
@@ -50,7 +51,7 @@ vk_to_isl_surf_dim[] = {
 static uint64_t MUST_CHECK UNUSED
 memory_range_end(struct anv_image_memory_range memory_range)
 {
-   assert(anv_is_aligned(memory_range.offset, memory_range.alignment));
+   assert(util_is_aligned(memory_range.offset, memory_range.alignment));
    return memory_range.offset + memory_range.size;
 }
 
@@ -141,7 +142,7 @@ image_binding_grow(const struct anv_device *device,
       /* Offset must be validated because it comes from
        * VkImageDrmFormatModifierExplicitCreateInfoEXT.
        */
-      if (unlikely(!anv_is_aligned(offset, alignment))) {
+      if (unlikely(!util_is_aligned(offset, alignment))) {
          return vk_errorf(device,
                           VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
                           "VkImageDrmFormatModifierExplicitCreateInfoEXT::"
@@ -196,8 +197,7 @@ memory_range_merge(struct anv_image_memory_range *a,
       return;
 
    assert(a->offset == 0);
-   assert(anv_is_aligned(a->offset, a->alignment));
-   assert(anv_is_aligned(b.offset, b.alignment));
+   assert(util_is_aligned(b.offset, b.alignment));
 
    a->alignment = MAX2(a->alignment, b.alignment);
    a->size = MAX2(a->size, b.offset + b.size);
@@ -1007,7 +1007,7 @@ add_primary_surface(struct anv_device *device,
 static bool MUST_CHECK
 memory_range_is_aligned(struct anv_image_memory_range memory_range)
 {
-   return anv_is_aligned(memory_range.offset, memory_range.alignment);
+   return util_is_aligned(memory_range.offset, memory_range.alignment);
 }
 
 static bool MUST_CHECK
@@ -1814,6 +1814,8 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
       };
    }
 
+   image->n_planes = anv_get_format_planes(device->physical, image->vk.format);
+
    /* In case of AHardwareBuffer import, we don't know the layout yet */
    if (image->vk.external_handle_types &
        VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) {
@@ -1822,8 +1824,6 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
       image->from_ahb = true;
       return VK_SUCCESS;
    }
-
-   image->n_planes = anv_get_format_planes(device->physical, image->vk.format);
 
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
    /* In the case of gralloc-backed swap chain image, we don't know the
@@ -2266,7 +2266,7 @@ VkResult anv_CreateImage(
               __LINE__, pCreateInfo->flags);
 
 #ifndef VK_USE_PLATFORM_ANDROID_KHR
-   /* Skip the WSI common swapchain creation here on Android. Similar to ahw,
+   /* Skip the WSI common swapchain creation here on Android. Similar to ahb,
     * this case is handled by a partial image init and then resolved when the
     * image is bound and gralloc info is passed.
     */
@@ -2358,37 +2358,51 @@ anv_GetImageOpaqueCaptureDescriptorDataEXT(VkDevice device,
  * format and prepare anv_image properly.
  */
 static void
-resolve_ahw_image(struct anv_device *device,
+resolve_ahb_image(struct anv_device *device,
                   struct anv_image *image,
                   struct anv_device_memory *mem)
 {
 #if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
    assert(mem->vk.ahardware_buffer);
-   AHardwareBuffer_Desc desc;
-   AHardwareBuffer_describe(mem->vk.ahardware_buffer, &desc);
    VkResult result;
 
-   /* Check tiling. */
-   enum isl_tiling tiling;
-   const native_handle_t *handle =
-      AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
-   struct u_gralloc_buffer_handle gr_handle = {
-      .handle = handle,
-      .hal_format = desc.format,
-      .pixel_stride = desc.stride,
-   };
-   result = anv_android_get_tiling(device, &gr_handle, &tiling);
-   assert(result == VK_SUCCESS);
-   isl_tiling_flags_t isl_tiling_flags = (1u << tiling);
+   VkImageDrmFormatModifierExplicitCreateInfoEXT mod_explicit_info;
+   VkSubresourceLayout layouts[ANV_MAX_PLANES];
+   result = vk_android_get_ahb_layout(mem->vk.ahardware_buffer,
+                                      &mod_explicit_info,
+                                      layouts,
+                                      ANV_MAX_PLANES);
+   if (result == VK_SUCCESS &&
+       mod_explicit_info.drmFormatModifier != DRM_FORMAT_MOD_INVALID) {
+      const struct isl_drm_modifier_info *isl_mod_info =
+         isl_drm_modifier_get_info(mod_explicit_info.drmFormatModifier);
+      assert(isl_mod_info);
+      isl_tiling_flags_t isl_tiling_flags = (1u << isl_mod_info->tiling);
 
-   /* Now we are able to fill anv_image fields properly and create
-    * isl_surface for it.
-    */
-   image->n_planes = anv_get_format_planes(device->physical, image->vk.format);
+      result = add_all_surfaces_explicit_layout(device, image, NULL, &mod_explicit_info,
+                                                isl_tiling_flags,
+                                                ISL_SURF_USAGE_DISABLE_AUX_BIT);
+   } else {
+      /* Fall back to implicit layout with tiling query. */
+      AHardwareBuffer_Desc desc;
+      AHardwareBuffer_describe(mem->vk.ahardware_buffer, &desc);
+      enum isl_tiling tiling;
+      const native_handle_t *handle =
+         AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
 
-   result = add_all_surfaces_implicit_layout(device, image, NULL, desc.stride,
-                                             isl_tiling_flags,
-                                             ISL_SURF_USAGE_DISABLE_AUX_BIT);
+      struct u_gralloc_buffer_handle gr_handle = {
+         .handle = handle,
+         .hal_format = desc.format,
+         .pixel_stride = desc.stride,
+      };
+      result = anv_android_get_tiling(device, &gr_handle, &tiling);
+      assert(result == VK_SUCCESS);
+      isl_tiling_flags_t isl_tiling_flags = (1u << tiling);
+
+      result = add_all_surfaces_implicit_layout(device, image, NULL, desc.stride,
+                                                isl_tiling_flags,
+                                                ISL_SURF_USAGE_DISABLE_AUX_BIT);
+   }
    assert(result == VK_SUCCESS);
 #endif
 }
@@ -2985,7 +2999,7 @@ anv_bind_image_memory(struct anv_device *device,
 
    /* Resolve will alter the image's aspects, do this first. */
    if (mem && mem->vk.ahardware_buffer)
-      resolve_ahw_image(device, image, mem);
+      resolve_ahb_image(device, image, mem);
 
    vk_foreach_struct_const(s, bind_info->pNext) {
       switch (s->sType) {
@@ -3152,8 +3166,8 @@ anv_bind_image_memory(struct anv_device *device,
        !image->device_registered) {
       pthread_mutex_lock(&device->mutex);
       list_addtail(&image->link, &device->image_private_objects);
-      image->device_registered = true;
       pthread_mutex_unlock(&device->mutex);
+      image->device_registered = true;
    }
 
    if (bind_status)

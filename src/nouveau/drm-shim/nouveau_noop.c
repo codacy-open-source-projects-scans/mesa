@@ -30,7 +30,8 @@
 #include "nouveau/nvif/ioctl.h"
 #include "nouveau/nvif/cl0080.h"
 #include "drm-shim/drm_shim.h"
-#include "util//u_math.h"
+#include "util/os_misc.h"
+#include "util/u_math.h"
 
 #include "../../gallium/drivers/nouveau/nv_object.xml.h"
 bool drm_shim_driver_prefers_first_render_node = true;
@@ -414,7 +415,7 @@ static ioctl_fn_t driver_ioctls[] = {
 static void
 nouveau_driver_get_device_info(void)
 {
-   const char *env = getenv("NOUVEAU_CHIPSET");
+   const char *env = os_get_option("NOUVEAU_CHIPSET");
 
    if (!env) {
       device_info.chip_id = 0xf0;
