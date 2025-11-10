@@ -802,8 +802,7 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
     * number of varying loads, as this number is required during descriptor
     * lowering for v9+. */
    if (stage == MESA_SHADER_FRAGMENT) {
-      nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
-                                  stage);
+      nir_assign_io_var_locations(nir, nir_var_shader_in);
 #if PAN_ARCH >= 9
       shader->desc_info.max_varying_loads = nir->num_inputs;
 #endif
@@ -899,12 +898,10 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
       }
    } else if (stage != MESA_SHADER_FRAGMENT) {
       /* Input varyings in fragment shader have been lowered early. */
-      nir_assign_io_var_locations(nir, nir_var_shader_in, &nir->num_inputs,
-                                  stage);
+      nir_assign_io_var_locations(nir, nir_var_shader_in);
    }
 
-   nir_assign_io_var_locations(nir, nir_var_shader_out, &nir->num_outputs,
-                               stage);
+   nir_assign_io_var_locations(nir, nir_var_shader_out);
 
    /* Needed to turn shader_temp into function_temp since the backend only
     * handles the latter for now.
@@ -923,6 +920,7 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
             glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
 
    pan_shader_postprocess(nir, compile_input->gpu_id);
+   pan_shader_lower_texture_late(nir, compile_input->gpu_id);
 
    if (stage == MESA_SHADER_VERTEX)
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, panvk_lower_load_vs_input,
@@ -1324,6 +1322,7 @@ panvk_compile_shader(struct panvk_device *dev,
       .gpu_variant = phys_dev->kmod.props.gpu_variant,
       .view_mask = (state && state->rp) ? state->rp->view_mask : 0,
       .robust2_modes = robust2_modes,
+      .robust_descriptors = dev->vk.enabled_features.nullDescriptor,
    };
 
    if (info->stage == MESA_SHADER_FRAGMENT && state != NULL &&
