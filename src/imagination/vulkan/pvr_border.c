@@ -34,6 +34,8 @@
 #include "pvr_device_info.h"
 #include "pvr_formats.h"
 #include "pvr_macros.h"
+#include "pvr_physical_device.h"
+#include "pvr_sampler.h"
 #include "util/bitset.h"
 #include "util/format/u_format.h"
 #include "util/format/u_formats.h"
@@ -285,7 +287,7 @@ VkResult pvr_border_color_table_init(struct pvr_border_color_table *const table,
                                      struct pvr_device *const device)
 {
    const struct pvr_device_info *const dev_info = &device->pdevice->dev_info;
-   const uint32_t cache_line_size = rogue_get_slc_cache_line_size(dev_info);
+   const uint32_t cache_line_size = pvr_get_slc_cache_line_size(dev_info);
    const uint32_t table_size = sizeof(struct pvr_border_color_table_entry) *
                                PVR_BORDER_COLOR_TABLE_NR_ENTRIES;
 

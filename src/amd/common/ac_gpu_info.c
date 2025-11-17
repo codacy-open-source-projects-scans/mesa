@@ -729,8 +729,11 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    info->has_eqaa_surface_allocator = info->gfx_level < GFX11;
    /* Disable sparse mappings on GFX6 due to VM faults in CP DMA. Enable them once
     * these faults are mitigated in software.
+    * Disable sparse mappings on GFX7-8 due to GPU hangs in the VK CTS,
+    * except Polaris where it happens to work "well enough".
+    * Enable them when these are investigated and fixed in the driver.
     */
-   info->has_sparse_vm_mappings = info->gfx_level >= GFX7;
+   info->has_sparse_vm_mappings = info->family >= CHIP_POLARIS10;
    info->has_gang_submit = info->drm_minor >= 49;
    info->has_gpuvm_fault_query = info->drm_minor >= 55;
    info->has_tmz_support = device_info.ids_flags & AMDGPU_IDS_FLAGS_TMZ;
@@ -955,8 +958,17 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
 
    /* GFX6 hw bug when the IBO addr is 0 which causes invalid clamping (underflow).
     * Setting the IB addr to 2 or higher solves this issue.
+    * See waMiscNullIb in PAL.
     */
    info->has_null_index_buffer_clamping_bug = info->gfx_level == GFX6;
+
+   /* On GFX6 and GFX7 except Hawaii, the CB doesn't clamp outputs
+    * to the range supported by the type if a channel has less
+    * than 16 bits and the export format is 16_ABGR.
+    * See waCbNoLt16BitIntClamp in PAL.
+    */
+   info->has_cb_lt16bit_int_clamp_bug = info->gfx_level <= GFX7 &&
+                                        info->family != CHIP_HAWAII;
 
    /* Drawing from 0-sized index buffers causes hangs on gfx10. */
    info->has_zero_index_buffer_bug = info->gfx_level == GFX10;
@@ -2317,8 +2329,8 @@ void ac_get_task_info(const struct radeon_info *info,
    /* Ensure that the addresses of each ring are 256 byte aligned. */
    task_info->payload_entry_size = payload_entry_size;
    task_info->num_entries = num_entries;
-   task_info->draw_ring_offset = ALIGN(AC_TASK_CTRLBUF_BYTES, 256);
-   task_info->payload_ring_offset = ALIGN(task_info->draw_ring_offset + draw_ring_bytes, 256);
+   task_info->draw_ring_offset = align(AC_TASK_CTRLBUF_BYTES, 256);
+   task_info->payload_ring_offset = align(task_info->draw_ring_offset + draw_ring_bytes, 256);
    task_info->bo_size_bytes = task_info->payload_ring_offset + payload_ring_bytes;
 }
 

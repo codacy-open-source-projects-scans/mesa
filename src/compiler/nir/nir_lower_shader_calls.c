@@ -170,7 +170,7 @@ can_remat_instr(nir_instr *instr, struct u_sparse_bitset *remat)
 static bool
 can_remat_ssa_def(nir_def *def, struct u_sparse_bitset *remat)
 {
-   return can_remat_instr(def->parent_instr, remat);
+   return can_remat_instr(nir_def_instr(def), remat);
 }
 
 struct add_instr_data {
@@ -186,7 +186,7 @@ add_src_instr(nir_src *src, void *state)
       return true;
 
    util_dynarray_foreach(data->buf, nir_instr *, instr_ptr) {
-      if (*instr_ptr == src->ssa->parent_instr)
+      if (*instr_ptr == nir_def_instr(src->ssa))
          return true;
    }
 
@@ -194,7 +194,7 @@ add_src_instr(nir_src *src, void *state)
    if (data->buf->size >= data->buf->capacity)
       return false;
 
-   util_dynarray_append(data->buf, src->ssa->parent_instr);
+   util_dynarray_append(data->buf, nir_def_instr(src->ssa));
    return true;
 }
 
@@ -215,7 +215,7 @@ can_remat_chain_ssa_def(nir_def *def, struct u_sparse_bitset *remat, struct util
    void *mem_ctx = ralloc_context(NULL);
 
    /* Add all the instructions involved in build this ssa_def */
-   util_dynarray_append(buf, def->parent_instr);
+   util_dynarray_append(buf, nir_def_instr(def));
 
    unsigned idx = 0;
    struct add_instr_data data = {
@@ -271,7 +271,7 @@ fail:
 static nir_def *
 remat_ssa_def(nir_builder *b, nir_def *def, struct hash_table *remap_table)
 {
-   nir_instr *clone = nir_instr_clone_deep(b->shader, def->parent_instr, remap_table);
+   nir_instr *clone = nir_instr_clone_deep(b->shader, nir_def_instr(def), remap_table);
    nir_builder_instr_insert(b, clone);
    return nir_instr_def(clone);
 }
@@ -491,7 +491,7 @@ spill_ssa_defs_and_lower_shader_calls(nir_shader *shader, uint32_t num_calls,
                if (!u_sparse_bitset_test(call_live[c], def->index))
                   continue;
 
-               if (!options->should_remat_callback(def->parent_instr,
+               if (!options->should_remat_callback(nir_def_instr(def),
                                                    options->should_remat_data))
                   continue;
 
@@ -586,7 +586,7 @@ spill_ssa_defs_and_lower_shader_calls(nir_shader *shader, uint32_t num_calls,
                   def = nir_b2b32(&before, def);
 
                const unsigned comp_size = def->bit_size / 8;
-               offset = ALIGN(offset, comp_size);
+               offset = align(offset, comp_size);
 
                new_def = spill_fill(&before, &after, def,
                                     index, call_idx,
@@ -617,7 +617,7 @@ spill_ssa_defs_and_lower_shader_calls(nir_shader *shader, uint32_t num_calls,
 
          nir_builder *b = &before;
 
-         offset = ALIGN(offset, options->stack_alignment);
+         offset = align(offset, options->stack_alignment);
          max_scratch_size = MAX2(max_scratch_size, offset);
 
          /* First thing on the called shader's stack is the resume address
@@ -809,7 +809,7 @@ duplicate_loop_bodies(nir_function_impl *impl, nir_instr *resume_instr)
          /* Initialize resume to true at the start of the shader, right after
           * the register is declared at the start.
           */
-         b.cursor = nir_after_instr(resume_reg->parent_instr);
+         b.cursor = nir_after_def(resume_reg);
          nir_store_reg(&b, nir_imm_true(&b), resume_reg);
 
          /* Set resume to false right after the resume instruction */
@@ -1383,7 +1383,7 @@ opt_remove_respills_instr(struct nir_builder *b,
    if (store_intrin->intrinsic != nir_intrinsic_store_stack)
       return false;
 
-   nir_instr *value_instr = store_intrin->src[0].ssa->parent_instr;
+   nir_instr *value_instr = nir_def_instr(store_intrin->src[0].ssa);
    if (value_instr->type != nir_instr_type_intrinsic)
       return false;
 
@@ -1642,11 +1642,11 @@ nir_opt_sort_and_pack_stack(nir_shader *shader,
 
       unsigned scratch_size = start_call_scratch;
       util_dynarray_foreach(&ops, struct scratch_item, item) {
-         item->new_offset = ALIGN(scratch_size, item->bit_size / 8);
+         item->new_offset = align(scratch_size, item->bit_size / 8);
          scratch_size = item->new_offset + (item->bit_size * item->num_components) / 8;
          _mesa_hash_table_u64_insert(value_id_to_item, item->value, item);
       }
-      shader->scratch_size = ALIGN(scratch_size, stack_alignment);
+      shader->scratch_size = align(scratch_size, stack_alignment);
 
       /* Update offsets in the instructions */
       nir_foreach_block_safe(block, impl) {

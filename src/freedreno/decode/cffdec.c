@@ -875,6 +875,15 @@ cffdec_init(const struct cffdec_options *_options)
    default:
       errx(-1, "unsupported generation: %u", options->info->chip);
    }
+
+   internal_lua_pkt_handler_load();
+   internal_lua_pkt_handler_init_rnn(rnn);
+}
+
+void
+cffdec_finish(void)
+{
+   internal_lua_pkt_handler_finish();
 }
 
 const char *
@@ -1361,17 +1370,6 @@ enum state_t {
    UNKNOWN_DWORDS,
    UNKNOWN_2DWORDS,
    UNKNOWN_4DWORDS,
-};
-
-enum adreno_state_block {
-   SB_VERT_TEX = 0,
-   SB_VERT_MIPADDR = 1,
-   SB_FRAG_TEX = 2,
-   SB_FRAG_MIPADDR = 3,
-   SB_VERT_SHADER = 4,
-   SB_GEOM_SHADER = 5,
-   SB_FRAG_SHADER = 6,
-   SB_COMPUTE_SHADER = 7,
 };
 
 /* TODO there is probably a clever way to let rnndec parse things so
@@ -2169,14 +2167,6 @@ draw_indx_common(uint32_t *dwords, int level)
    return num_indices;
 }
 
-enum pc_di_index_size {
-   INDEX_SIZE_IGN = 0,
-   INDEX_SIZE_16_BIT = 0,
-   INDEX_SIZE_32_BIT = 1,
-   INDEX_SIZE_8_BIT = 2,
-   INDEX_SIZE_INVALID = 0,
-};
-
 static void
 cp_draw_indx(uint32_t *dwords, uint32_t sizedwords, int level)
 {
@@ -2644,15 +2634,18 @@ cp_mem_write(uint32_t *dwords, uint32_t sizedwords, int level)
 static void
 cp_rmw(uint32_t *dwords, uint32_t sizedwords, int level)
 {
-   uint32_t val = dwords[0] & 0xffff;
-   uint32_t and = dwords[1];
-   uint32_t or = dwords[2];
-   printl(3, "%srmw (%s & 0x%08x) | 0x%08x)\n", levels[level], regname(val, 1),
-          and, or);
+   struct rnndomain *domain;
+   const char *str;
+
+   domain = rnn_finddomain(rnn->db, "CP_REG_RMW");
+   str = internal_packet(dwords, sizedwords, rnn, domain);
+
+   
+   printl(3, "%srmw %s", levels[level], str);
    if (needs_wfi)
-      printl(2, "NEEDS WFI: rmw (%s & 0x%08x) | 0x%08x)\n", regname(val, 1),
-             and, or);
-   reg_set(val, (reg_val(val) & and) | or);
+      printl(2, "NEEDS WFI: rmw %s", str);
+
+   free((void *)str);
 }
 
 static void

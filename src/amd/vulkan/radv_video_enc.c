@@ -1550,6 +1550,7 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
          metadata_size += RENCODE_AV1_FRAME_CONTEXT_CDF_TABLE_SIZE;
          metadata_size += RENCODE_AV1_CDEF_ALGORITHM_FRAME_CONTEXT_SIZE;
       }
+      metadata_size = align(metadata_size, ENC_ALIGNMENT);
 
       uint32_t dpb_array_idx = !intra_only_dpb ? res->baseArrayLayer + dpb_iv->vk.base_array_layer : 0;
       uint64_t luma_va = dpb_img->bindings[0].addr + dpb_array_idx * (luma_size + chroma_size + metadata_size);
@@ -1698,7 +1699,7 @@ radv_enc_qp_map_input(struct radv_cmd_buffer *cmd_buffer, const struct VkVideoEn
       radv_buffer_get_va(cmd_buffer->video.vid->qp_map.mem->bo) + cmd_buffer->video.vid->qp_map.offset;
    radv_cs_add_buffer(device->ws, cmd_buffer->cs->b, cmd_buffer->video.vid->qp_map.mem->bo);
 
-   radv_vcn_sq_header(cs, &cmd_buffer->video.sq, RADEON_VCN_ENGINE_TYPE_COMMON, false);
+   radv_vcn_sq_header(cs, &cmd_buffer->video.sq, RADEON_VCN_ENGINE_TYPE_COMMON);
 
    struct rvcn_cmn_engine_ib_package *ib_header = (struct rvcn_cmn_engine_ib_package *)&(cs->b->buf[cs->b->cdw]);
    ib_header->package_size =
@@ -1845,8 +1846,9 @@ radv_enc_params(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *
    uint64_t va = src_img->bindings[0].addr;
    uint64_t luma_va = va + src_img->planes[0].surface.u.gfx9.surf_offset +
                       array_idx * src_img->planes[0].surface.u.gfx9.surf_slice_size;
-   uint64_t chroma_va = va + src_img->planes[1].surface.u.gfx9.surf_offset +
-                        array_idx * src_img->planes[1].surface.u.gfx9.surf_slice_size;
+   uint64_t chroma_va = src_img->plane_count > 1 ? (va + src_img->planes[1].surface.u.gfx9.surf_offset +
+                                                    array_idx * src_img->planes[1].surface.u.gfx9.surf_slice_size)
+                                                  : 0;
    uint32_t pic_type;
    unsigned int slot_idx = 0xffffffff;
    unsigned int max_layers = cmd_buffer->video.vid->rc_layer_control.max_num_temporal_layers;
@@ -1903,7 +1905,7 @@ radv_enc_params(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *
    RADEON_ENC_CS(chroma_va >> 32);
    RADEON_ENC_CS(chroma_va & 0xffffffff);
    RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.surf_pitch);   // luma pitch
-   RADEON_ENC_CS(src_img->planes[1].surface.u.gfx9.surf_pitch);   // chroma pitch
+   RADEON_ENC_CS(src_img->plane_count > 1 ? src_img->planes[1].surface.u.gfx9.surf_pitch : 0); // chroma pitch
    RADEON_ENC_CS(src_img->planes[0].surface.u.gfx9.swizzle_mode); // swizzle mode
 
    if (pdev->enc_hw_ver < RADV_VIDEO_ENC_HW_5)
@@ -2103,35 +2105,109 @@ radv_enc_op_preset(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKH
    RADEON_ENC_END();
 }
 
+static uint32_t
+radv_get_encode_color_volume(VkVideoEncodeRgbModelConversionFlagBitsVALVE model)
+{
+   switch (model) {
+   case VK_VIDEO_ENCODE_RGB_MODEL_CONVERSION_YCBCR_709_BIT_VALVE:
+      return RENCODE_COLOR_VOLUME_G22_BT709;
+   case VK_VIDEO_ENCODE_RGB_MODEL_CONVERSION_YCBCR_2020_BIT_VALVE:
+      return RENCODE_COLOR_VOLUME_G2084_BT2020;
+   default:
+      UNREACHABLE("Unsupported rgb model conversion.");
+   }
+}
+
+static uint32_t
+radv_get_encode_color_range(VkVideoEncodeRgbRangeCompressionFlagBitsVALVE range)
+{
+   switch (range) {
+   case VK_VIDEO_ENCODE_RGB_RANGE_COMPRESSION_FULL_RANGE_BIT_VALVE:
+      return RENCODE_COLOR_RANGE_FULL;
+   case VK_VIDEO_ENCODE_RGB_RANGE_COMPRESSION_NARROW_RANGE_BIT_VALVE:
+      return RENCODE_COLOR_RANGE_STUDIO;
+   default:
+      UNREACHABLE("Unsupported rgb range compression.");
+   }
+}
+
+static uint32_t
+radv_get_encode_chroma_location(VkVideoEncodeRgbChromaOffsetFlagBitsVALVE location)
+{
+   switch (location) {
+   case VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE:
+      return RENCODE_CHROMA_LOCATION_CO_SITE;
+   case VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_MIDPOINT_BIT_VALVE:
+      return RENCODE_CHROMA_LOCATION_INTERSTITIAL;
+   default:
+      UNREACHABLE("Unsupported chroma offset.");
+   }
+}
+
 static void
 radv_enc_input_format(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_video_session *vid = cmd_buffer->video.vid;
+   uint32_t color_space;
    uint32_t color_bit_depth;
    uint32_t color_packing_format;
+   uint32_t chroma_subsampling;
 
    switch (vid->vk.picture_format) {
+   case VK_FORMAT_B8G8R8A8_UNORM:
+      color_bit_depth = RENCODE_COLOR_BIT_DEPTH_8_BIT;
+      color_packing_format = RENCODE_COLOR_PACKING_FORMAT_A8R8G8B8;
+      chroma_subsampling = RENCODE_CHROMA_SUBSAMPLING_4_4_4;
+      color_space = RENCODE_COLOR_SPACE_RGB;
+      break;
+   case VK_FORMAT_R8G8B8A8_UNORM:
+      color_bit_depth = RENCODE_COLOR_BIT_DEPTH_8_BIT;
+      color_packing_format = RENCODE_COLOR_PACKING_FORMAT_A8B8G8R8;
+      chroma_subsampling = RENCODE_CHROMA_SUBSAMPLING_4_4_4;
+      color_space = RENCODE_COLOR_SPACE_RGB;
+      break;
+   case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+      color_bit_depth = RENCODE_COLOR_BIT_DEPTH_10_BIT;
+      color_packing_format = RENCODE_COLOR_PACKING_FORMAT_A2B10G10R10;
+      chroma_subsampling = RENCODE_CHROMA_SUBSAMPLING_4_4_4;
+      color_space = RENCODE_COLOR_SPACE_RGB;
+      break;
+   case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+      color_bit_depth = RENCODE_COLOR_BIT_DEPTH_10_BIT;
+      color_packing_format = RENCODE_COLOR_PACKING_FORMAT_A2R10G10B10;
+      chroma_subsampling = RENCODE_CHROMA_SUBSAMPLING_4_4_4;
+      color_space = RENCODE_COLOR_SPACE_RGB;
+      break;
    case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
       color_bit_depth = RENCODE_COLOR_BIT_DEPTH_8_BIT;
       color_packing_format = RENCODE_COLOR_PACKING_FORMAT_NV12;
+      chroma_subsampling = RENCODE_CHROMA_SUBSAMPLING_4_2_0;
+      color_space = RENCODE_COLOR_SPACE_YUV;
       break;
    case VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16:
       color_bit_depth = RENCODE_COLOR_BIT_DEPTH_10_BIT;
       color_packing_format = RENCODE_COLOR_PACKING_FORMAT_P010;
+      chroma_subsampling = RENCODE_CHROMA_SUBSAMPLING_4_2_0;
+      color_space = RENCODE_COLOR_SPACE_YUV;
       break;
    default:
       assert(0);
       return;
    }
 
+   // Color volume should match between input and output
+   uint32_t color_volume = RENCODE_COLOR_VOLUME_G22_BT709;
+   if (vid->vk.perform_rgb_conversion)
+      color_volume = radv_get_encode_color_volume(vid->vk.rgb_conv.rgb_model);
+
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.input_format);
-   RADEON_ENC_CS(0);                          // input color volume
-   RADEON_ENC_CS(0);                          // input color space
-   RADEON_ENC_CS(RENCODE_COLOR_RANGE_STUDIO); // input color range
-   RADEON_ENC_CS(0);                          // input chroma subsampling
-   RADEON_ENC_CS(0);                          // input chroma location
+   RADEON_ENC_CS(color_volume);               // input color volume
+   RADEON_ENC_CS(color_space);                // input color space
+   RADEON_ENC_CS(0);                          // input color range (ignored)
+   RADEON_ENC_CS(chroma_subsampling);         // input chroma subsampling
+   RADEON_ENC_CS(0);                          // input chroma location (ignored for RGB)
    RADEON_ENC_CS(color_bit_depth);            // input color bit depth
    RADEON_ENC_CS(color_packing_format);       // input color packing format
    RADEON_ENC_END();
@@ -2166,12 +2242,21 @@ radv_enc_output_format(struct radv_cmd_buffer *cmd_buffer)
       return;
    }
 
+   uint32_t color_volume = 0;
+   uint32_t color_range = RENCODE_COLOR_RANGE_STUDIO;
+   uint32_t chroma_location = 0;
+   if (vid->vk.perform_rgb_conversion) {
+      color_volume = radv_get_encode_color_volume(vid->vk.rgb_conv.rgb_model);
+      color_range = radv_get_encode_color_range(vid->vk.rgb_conv.rgb_range);
+      chroma_location = radv_get_encode_chroma_location(vid->vk.rgb_conv.y_chroma_offset);
+   }
+
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.output_format);
-   RADEON_ENC_CS(0);                          // output color volume
-   RADEON_ENC_CS(RENCODE_COLOR_RANGE_STUDIO); // output color range
+   RADEON_ENC_CS(color_volume); // output color volume
+   RADEON_ENC_CS(color_range);  // output color range
    if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_5)
       RADEON_ENC_CS(0);            // output chroma subsampling
-   RADEON_ENC_CS(0);               // output chroma location
+   RADEON_ENC_CS(chroma_location); // output chroma location
    RADEON_ENC_CS(color_bit_depth); // output color bit depth
    RADEON_ENC_END();
 }
@@ -2746,10 +2831,8 @@ radv_vcn_encode_video(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInf
    if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_5)
       radv_enc_qp_map_input(cmd_buffer, enc_info);
 
-   if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_2) {
-      radv_vcn_sq_header(cs, &cmd_buffer->video.sq, RADEON_VCN_ENGINE_TYPE_ENCODE,
-                         pdev->enc_hw_ver < RADV_VIDEO_ENC_HW_4);
-   }
+   if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_2)
+      radv_vcn_sq_header(cs, &cmd_buffer->video.sq, RADEON_VCN_ENGINE_TYPE_ENCODE);
 
    const struct VkVideoInlineQueryInfoKHR *inline_queries = NULL;
    if (vid->vk.flags & VK_VIDEO_SESSION_CREATE_INLINE_QUERIES_BIT_KHR) {
@@ -3418,17 +3501,20 @@ radv_video_get_enc_dpb_image(struct radv_device *device, const struct VkVideoPro
    }
 
    for (unsigned i = 0; i < num_reconstructed_pictures; i++) {
-      image->size += luma_size;
-      image->size += chroma_size;
+      unsigned metadata_size = 0;
       if (is_av1) {
-         image->size += RENCODE_AV1_FRAME_CONTEXT_CDF_TABLE_SIZE;
-         image->size += RENCODE_AV1_CDEF_ALGORITHM_FRAME_CONTEXT_SIZE;
+         metadata_size += RENCODE_AV1_FRAME_CONTEXT_CDF_TABLE_SIZE;
+         metadata_size += RENCODE_AV1_CDEF_ALGORITHM_FRAME_CONTEXT_SIZE;
       }
       if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_5) {
-         image->size += RENCODE_MAX_METADATA_BUFFER_SIZE_PER_FRAME;
+         metadata_size += RENCODE_MAX_METADATA_BUFFER_SIZE_PER_FRAME;
          if (has_h264_b_support)
-            image->size += colloc_bytes;
+            metadata_size += colloc_bytes;
       }
+
+      image->size += luma_size;
+      image->size += chroma_size;
+      image->size += align(metadata_size, ENC_ALIGNMENT);
    }
    image->alignment = ENC_ALIGNMENT;
 }

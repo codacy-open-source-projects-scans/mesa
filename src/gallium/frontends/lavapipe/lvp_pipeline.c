@@ -157,7 +157,7 @@ static bool
 remove_barriers(nir_shader *nir, bool is_compute)
 {
    return nir_shader_intrinsics_pass(nir, remove_barriers_impl,
-                                     nir_metadata_dominance,
+                                     nir_metadata_control_flow,
                                      (void*)is_compute);
 }
 
@@ -209,7 +209,7 @@ optimize(nir_shader *nir)
 
       NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
 
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
 
       nir_opt_peephole_select_options peephole_select_options = {
@@ -231,7 +231,7 @@ optimize(nir_shader *nir)
           * things up if we want any hope of nir_opt_if or nir_opt_loop_unroll
           * to make progress.
           */
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_dce);
          NIR_PASS(progress, nir, nir_opt_remove_phis);
       }

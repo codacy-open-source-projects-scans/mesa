@@ -164,6 +164,8 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
 {
    bool progress;
 
+   NIR_PASS(_, shader, nir_lower_alu_width, vectorize_vec2_16bit, NULL);
+
    struct set *skip = _mesa_pointer_set_create(NULL);
    do {
       progress = false;
@@ -171,23 +173,8 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
       NIR_LOOP_PASS(progress, skip, shader, nir_split_array_vars, nir_var_function_temp);
       NIR_LOOP_PASS(progress, skip, shader, nir_shrink_vec_array_vars, nir_var_function_temp | nir_var_mem_shared);
 
-      if (!shader->info.var_copies_lowered) {
-         /* Only run this pass if nir_lower_var_copies was not called
-          * yet. That would lower away any copy_deref instructions and we
-          * don't want to introduce any more.
-          */
-         NIR_LOOP_PASS(progress, skip, shader, nir_opt_find_array_copies);
-      }
-
-      NIR_LOOP_PASS(progress, skip, shader, nir_opt_memcpy);
-      NIR_LOOP_PASS(progress, skip, shader, nir_opt_copy_prop_vars);
-      NIR_LOOP_PASS(progress, skip, shader, nir_opt_dead_write_vars);
-      NIR_LOOP_PASS(_, skip, shader, nir_lower_vars_to_ssa);
-
-      NIR_LOOP_PASS(_, skip, shader, nir_lower_alu_width, vectorize_vec2_16bit, NULL);
       NIR_LOOP_PASS(_, skip, shader, nir_lower_phis_to_scalar, ac_nir_lower_phis_to_scalar_cb, NULL);
-
-      NIR_LOOP_PASS(progress, skip, shader, nir_copy_prop);
+      NIR_LOOP_PASS(progress, skip, shader, nir_opt_copy_prop);
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_remove_phis);
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_dce);
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_dead_cf);
@@ -195,7 +182,7 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
       NIR_LOOP_PASS_NOT_IDEMPOTENT(opt_loop_progress, skip, shader, nir_opt_loop);
       if (opt_loop_progress) {
          progress = true;
-         NIR_LOOP_PASS(progress, skip, shader, nir_copy_prop);
+         NIR_LOOP_PASS(progress, skip, shader, nir_opt_copy_prop);
          NIR_LOOP_PASS(progress, skip, shader, nir_opt_remove_phis);
          NIR_LOOP_PASS(progress, skip, shader, nir_opt_dce);
       }
@@ -240,7 +227,7 @@ radv_optimize_nir_algebraic_early(nir_shader *nir)
    bool more_algebraic = true;
    while (more_algebraic) {
       more_algebraic = false;
-      NIR_PASS(_, nir, nir_copy_prop);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_cse);
@@ -276,7 +263,7 @@ radv_optimize_nir_algebraic_late(nir_shader *nir)
       more_late_algebraic = false;
       NIR_LOOP_PASS_NOT_IDEMPOTENT(more_late_algebraic, skip, nir, nir_opt_algebraic_late);
       NIR_LOOP_PASS(_, skip, nir, nir_opt_constant_folding);
-      NIR_LOOP_PASS(_, skip, nir, nir_copy_prop);
+      NIR_LOOP_PASS(_, skip, nir, nir_opt_copy_prop);
       NIR_LOOP_PASS(_, skip, nir, nir_opt_dce);
       NIR_LOOP_PASS(_, skip, nir, nir_opt_cse);
    }
@@ -545,7 +532,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
       NIR_PASS(progress, nir, nir_inline_functions);
       if (progress) {
          NIR_PASS(_, nir, nir_opt_copy_prop_vars);
-         NIR_PASS(_, nir, nir_copy_prop);
+         NIR_PASS(_, nir, nir_opt_copy_prop);
       }
       NIR_PASS(_, nir, nir_opt_deref);
 
@@ -677,8 +664,6 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
    NIR_PASS(_, nir, nir_lower_image, &image_options);
 
-   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-
    if (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_GEOMETRY ||
        nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir), true, true);
@@ -725,8 +710,19 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
    };
    NIR_PASS(_, nir, nir_opt_access, &opt_access_options);
 
-   if (!stage->key.optimisations_disabled)
+   if (!stage->key.optimisations_disabled) {
+      /* Only run this pass once before nir_lower_var_copies is called,
+      * so that we don't introduce any new copy_deref instructions later.
+      */
+      NIR_PASS(_, nir, nir_opt_find_array_copies);
+      NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+
       radv_optimize_nir(nir, false);
+
+      NIR_PASS(_, nir, nir_opt_copy_prop_vars);
+      NIR_PASS(_, nir, nir_opt_dead_write_vars);
+      NIR_PASS(_, nir, nir_opt_memcpy);
+   }
 
    /* We call nir_lower_var_copies() after the first radv_optimize_nir()
     * to remove any copies introduced by nir_opt_find_array_copies().
@@ -760,7 +756,7 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
 
       if (nir->info.zero_initialize_shared_memory && nir->info.shared_size > 0) {
          const unsigned chunk_size = 16; /* max single store size */
-         const unsigned shared_size = ALIGN(nir->info.shared_size, chunk_size);
+         const unsigned shared_size = align(nir->info.shared_size, chunk_size);
          NIR_PASS(_, nir, nir_zero_initialize_shared_memory, shared_size, chunk_size);
       }
    }
@@ -786,7 +782,11 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
     * bloat the instruction count of the loop and cause it to be
     * considered too large for unrolling.
     */
-   if (ac_nir_lower_indirect_derefs(nir, pdev->info.gfx_level) && !stage->key.optimisations_disabled &&
+   bool indirect_derefs_lowered = false;
+   NIR_PASS(indirect_derefs_lowered, nir, ac_nir_lower_indirect_derefs, pdev->info.gfx_level);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+
+   if (indirect_derefs_lowered && !stage->key.optimisations_disabled &&
        nir->info.stage != MESA_SHADER_COMPUTE) {
       /* Optimize the lowered code before the linking optimizations. */
       radv_optimize_nir(nir, false);
@@ -945,7 +945,7 @@ radv_lower_ngg(struct radv_device *device, struct radv_shader_stage *ngg_stage,
                &ngg_stage->info.ngg_lds_scratch_size);
    } else if (nir->info.stage == MESA_SHADER_MESH) {
       /* ACO aligns the workgroup size to the wave size. */
-      unsigned hw_workgroup_size = ALIGN(info->workgroup_size, info->wave_size);
+      unsigned hw_workgroup_size = align(info->workgroup_size, info->wave_size);
 
       bool scratch_ring = false;
       NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &pdev->info, options.export_clipdist_mask, options.vs_output_param_offset,

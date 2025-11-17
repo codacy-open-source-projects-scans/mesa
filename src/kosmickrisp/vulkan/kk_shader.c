@@ -8,8 +8,8 @@
 #include "kk_shader.h"
 
 #include "kk_cmd_buffer.h"
-#include "kk_descriptor_set_layout.h"
 #include "kk_debug.h"
+#include "kk_descriptor_set_layout.h"
 #include "kk_device.h"
 #include "kk_format.h"
 #include "kk_nir_lower_vbo.h"
@@ -715,7 +715,7 @@ nir_opts(nir_shader *nir)
       progress = false;
 
       NIR_PASS(progress, nir, nir_opt_loop);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
 
@@ -1207,6 +1207,7 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
          shader->pipeline.gfx.mtl_depth_stencil_state_handle;
    cmd->state.gfx.is_depth_stencil_dynamic = requires_dynamic_depth_stencil;
    cmd->state.gfx.dirty |= KK_DIRTY_PIPELINE;
+   cmd->state.gfx.dirty |= KK_DIRTY_VB;
 }
 
 static void

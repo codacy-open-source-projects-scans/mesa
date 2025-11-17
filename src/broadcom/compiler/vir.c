@@ -631,7 +631,7 @@ v3d_nir_lower_null_pointers_cb(nir_builder *b,
                 return false;
 
         /* Otherwise, see if it comes from a bcsel including a null pointer */
-        if (src->ssa->parent_instr->type != nir_instr_type_alu)
+        if (!nir_def_is_alu(src->ssa))
                 return false;
 
         nir_alu_instr *alu = nir_def_as_alu(src->ssa);
@@ -1035,7 +1035,7 @@ v3d_nir_lower_vs_early(struct v3d_compile *c)
 
         /* This must go before nir_lower_io */
         if (c->vs_key->per_vertex_point_size)
-                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f);
+                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f, nir_type_invalid);
 
         NIR_PASS(_, c->s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
                  type_size_vec4,
@@ -1077,7 +1077,7 @@ v3d_nir_lower_gs_early(struct v3d_compile *c)
 
         /* This must go before nir_lower_io */
         if (c->gs_key->per_vertex_point_size)
-                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f);
+                NIR_PASS(_, c->s, nir_lower_point_size, 1.0f, 0.0f, nir_type_invalid);
 
         NIR_PASS(_, c->s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
                  type_size_vec4,
@@ -1578,7 +1578,7 @@ v3d_nir_sort_constant_ubo_load(nir_block *block, nir_intrinsic_instr *ref)
                                  */
                                 break;
                         }
-                        if (intr->src[1].ssa->parent_instr == tmp) {
+                        if (nir_def_instr(intr->src[1].ssa) == tmp) {
                                 offset_inst = tmp;
                                 break;
                         }
@@ -1842,7 +1842,7 @@ v3d_attempt_compile(struct v3d_compile *c)
                  * this. We also want to run the lowering before v3d_optimize to
                  * clean-up redundant get_buffer_size calls produced in the pass.
                  */
-                NIR_PASS(_, c->s, nir_copy_prop);
+                NIR_PASS(_, c->s, nir_opt_copy_prop);
                 NIR_PASS(_, c->s, nir_opt_constant_folding);
 
                 NIR_PASS(_, c->s, nir_lower_robust_access,
@@ -1890,7 +1890,7 @@ v3d_attempt_compile(struct v3d_compile *c)
                 more_late_algebraic = false;
                 NIR_PASS(more_late_algebraic, c->s, nir_opt_algebraic_late);
                 NIR_PASS(_, c->s, nir_opt_constant_folding);
-                NIR_PASS(_, c->s, nir_copy_prop);
+                NIR_PASS(_, c->s, nir_opt_copy_prop);
                 NIR_PASS(_, c->s, nir_opt_dce);
                 NIR_PASS(_, c->s, nir_opt_cse);
         }

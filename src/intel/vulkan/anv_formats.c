@@ -2117,7 +2117,7 @@ void anv_GetPhysicalDeviceSparseImageFormatProperties2(
 
    if (physical_device->sparse_type == ANV_SPARSE_TYPE_NOT_SUPPORTED) {
       if (INTEL_DEBUG(DEBUG_SPARSE))
-         fprintf(stderr, "=== [%s:%d] [%s]\n", __FILE__, __LINE__, __func__);
+         mesa_logi("=== [%s:%d] [%s]\n", __FILE__, __LINE__, __func__);
       return;
    }
 
@@ -2164,7 +2164,7 @@ void anv_GetPhysicalDeviceSparseImageFormatProperties2(
 
       isl_surf_usage_flags_t isl_usage =
          anv_image_choose_isl_surf_usage(physical_device,
-                                         pFormatInfo->format,
+                                         pFormatInfo->format, NULL,
                                          vk_create_flags, pFormatInfo->usage,
                                          0, aspect,
                                          VK_IMAGE_COMPRESSION_DEFAULT_EXT);

@@ -471,7 +471,7 @@ static void pco_nir_opt(pco_ctx *ctx, nir_shader *nir, bool algebraic)
       NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
       NIR_PASS(progress, nir, nir_opt_dead_write_vars);
 
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
@@ -882,7 +882,7 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                                     ? nir_var_shader_out
                                     : nir_var_shader_in;
    NIR_PASS(_, nir, nir_lower_io_to_scalar, vec_modes, NULL, NULL);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_cse);
    NIR_PASS(_, nir, nir_opt_vectorize_io, vec_modes, false);
@@ -929,7 +929,8 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                nir,
                nir_lower_point_size,
                PVR_POINT_SIZE_RANGE_MIN,
-               PVR_POINT_SIZE_RANGE_MAX);
+               PVR_POINT_SIZE_RANGE_MAX,
+               nir_type_invalid);
 
       if (!nir->info.internal)
          NIR_PASS(_, nir, pco_nir_point_size);
@@ -1091,7 +1092,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
       NIR_PASS(_, nir, pco_nir_lower_algebraic_late);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
-      NIR_PASS(_, nir, nir_copy_prop);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    } while (progress);
@@ -1109,7 +1110,7 @@ void pco_postprocess_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
                                  NULL);
 
    NIR_PASS(_, nir, nir_convert_from_ssa, true, false);
-   NIR_PASS(_, nir, nir_copy_prop);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_move_vec_src_uses_to_dest, false);
    NIR_PASS(_, nir, nir_opt_dce);
 

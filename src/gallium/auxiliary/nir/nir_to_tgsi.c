@@ -1223,7 +1223,7 @@ static struct ureg_src
 ntt_get_chased_src(struct ntt_compile *c, nir_legacy_src *src)
 {
    if (src->is_ssa) {
-      if (src->ssa->parent_instr->type == nir_instr_type_load_const)
+      if (nir_def_is_const(src->ssa))
          return ntt_get_load_const_src(c, nir_def_as_load_const(src->ssa));
 
       return c->ssa_temp[src->ssa->index];
@@ -1267,7 +1267,7 @@ ntt_get_alu_src(struct ntt_compile *c, nir_alu_instr *instr, int i)
     * the specific swizzles from an undef don't matter)
     */
    if (nir_src_bit_size(instr->src[i].src) == 64 &&
-      !(src.src.is_ssa && src.src.ssa->parent_instr->type == nir_instr_type_undef)) {
+      !(src.src.is_ssa && nir_def_is_undef(src.src.ssa))) {
       int chan1 = 1;
       if (nir_op_infos[instr->op].input_sizes[i] == 0) {
          chan1 = instr->def.num_components > 1 ? 1 : 0;
@@ -3314,7 +3314,7 @@ ntt_optimize_nir(struct nir_shader *s, struct pipe_screen *screen,
       NIR_PASS(progress, s, nir_lower_vars_to_ssa);
       NIR_PASS(progress, s, nir_split_64bit_vec3_and_vec4);
 
-      NIR_PASS(progress, s, nir_copy_prop);
+      NIR_PASS(progress, s, nir_opt_copy_prop);
       NIR_PASS(progress, s, nir_opt_algebraic);
       NIR_PASS(progress, s, nir_opt_constant_folding);
       NIR_PASS(progress, s, nir_opt_remove_phis);
@@ -3948,7 +3948,7 @@ const void *nir_to_tgsi_options(struct nir_shader *s,
       progress = false;
       NIR_PASS(progress, s, nir_opt_algebraic_late);
       if (progress) {
-         NIR_PASS(_, s, nir_copy_prop);
+         NIR_PASS(_, s, nir_opt_copy_prop);
          NIR_PASS(_, s, nir_opt_dce);
          NIR_PASS(_, s, nir_opt_cse);
       }
@@ -3963,7 +3963,7 @@ const void *nir_to_tgsi_options(struct nir_shader *s,
       NIR_PASS(_, s, nir_lower_bool_to_float,
                !options->lower_cmp && !options->lower_fabs);
       /* bool_to_float generates MOVs for b2f32 that we want to clean up. */
-      NIR_PASS(_, s, nir_copy_prop);
+      NIR_PASS(_, s, nir_opt_copy_prop);
       NIR_PASS(_, s, nir_opt_dce);
    }
 

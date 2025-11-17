@@ -1724,7 +1724,7 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
       NIR_PASS(_, consumer, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 
       /* Eliminate useless vec->mov copies resulting from scalarization. */
-      NIR_PASS(_, producer, nir_copy_prop);
+      NIR_PASS(_, producer, nir_opt_copy_prop);
       NIR_PASS(_, producer, nir_opt_constant_folding);
    }
 
@@ -1889,8 +1889,8 @@ radv_generate_ps_epilog_key(const struct radv_device *device, const struct radv_
                                          state->alpha_to_coverage_via_mrtz);
 
    key.spi_shader_col_format = col_format;
-   key.color_is_int8 = pdev->info.gfx_level < GFX8 ? is_int8 : 0;
-   key.color_is_int10 = pdev->info.gfx_level < GFX8 ? is_int10 : 0;
+   key.color_is_int8 = pdev->info.has_cb_lt16bit_int_clamp_bug ? is_int8 : 0;
+   key.color_is_int10 = pdev->info.has_cb_lt16bit_int_clamp_bug ? is_int10 : 0;
    key.enable_mrt_output_nan_fixup = instance->drirc.debug.enable_mrt_output_nan_fixup ? is_float32 : 0;
    key.colors_written = state->colors_written;
    key.mrt0_is_dual_src = state->mrt0_is_dual_src;
@@ -2841,6 +2841,7 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
       }
 
       NIR_PASS(_, stages[MESA_SHADER_GEOMETRY].nir, nir_lower_gs_intrinsics, nir_gs_flags);
+      NIR_PASS(_, stages[MESA_SHADER_GEOMETRY].nir, nir_lower_vars_to_ssa);
    }
 
    /* Remove all varyings when the fragment shader is a noop. */

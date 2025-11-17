@@ -1226,13 +1226,13 @@ fixup_large_workgroup_image_coherency(nir_shader *nir)
             if (array_deref->deref_type != nir_deref_type_array)
                continue;
 
-            nir_alu_instr *alu = nir_src_as_alu_instr(intr->src[1]);
+            nir_alu_instr *alu = nir_src_as_alu(intr->src[1]);
             if (!alu || !nir_op_is_vec(alu->op))
                return;
 
             /* Check if any src is from @load_local_invocation_id. */
             for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++) {
-               nir_instr *parent = alu->src[i].src.ssa->parent_instr;
+               nir_instr *parent = nir_def_instr(alu->src[i].src.ssa);
                if (parent->type != nir_instr_type_intrinsic)
                   continue;
 
@@ -1339,12 +1339,17 @@ anv_shader_lower_nir(struct anv_device *device,
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-   /* Ensure robustness, do this before brw_nir_lower_storage_image so that
-    * added image size intrinsics for bounds checkings are properly lowered
-    * for cube images.
-    */
-   NIR_PASS(_, nir, nir_lower_robust_access,
-            accept_64bit_atomic_cb, NULL);
+   /* Apply lowering for 64bit atomics pre-Xe2 */
+   const bool lower_64bit_atomics = compiler->devinfo->ver < 20;
+
+   if (lower_64bit_atomics) {
+      /* Ensure robustness, do this before brw_nir_lower_storage_image so that
+       * added image size intrinsics for bounds checkings are properly lowered
+       * for cube images.
+       */
+      NIR_PASS(_, nir, nir_lower_robust_access,
+               accept_64bit_atomic_cb, NULL);
+   }
 
    NIR_PASS(_, nir, brw_nir_lower_storage_image, compiler,
             &(struct brw_nir_lower_storage_image_opts) {
@@ -1358,13 +1363,15 @@ anv_shader_lower_nir(struct anv_device *device,
                   pdevice->instance->emulate_read_without_format,
             });
 
-   /* Switch from image to global */
-   NIR_PASS(_, nir, nir_lower_image_atomics_to_global,
-            accept_64bit_atomic_cb, NULL);
+   if (lower_64bit_atomics) {
+      /* Switch from image to global */
+      NIR_PASS(_, nir, nir_lower_image_atomics_to_global,
+               accept_64bit_atomic_cb, NULL);
 
-   /* Detile for global */
-   NIR_PASS(_, nir, brw_nir_lower_texel_address, compiler->devinfo,
-            pdevice->isl_dev.shader_tiling);
+      /* Detile for global */
+      NIR_PASS(_, nir, brw_nir_lower_texel_address, compiler->devinfo,
+               pdevice->isl_dev.shader_tiling);
+   }
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
@@ -1400,7 +1407,7 @@ anv_shader_lower_nir(struct anv_device *device,
    do {
       progress = false;
       NIR_PASS(progress, nir, nir_opt_algebraic);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
@@ -1493,7 +1500,7 @@ anv_shader_lower_nir(struct anv_device *device,
           * used by the shader to chunk_size -- which does simplify the logic.
           */
          const unsigned chunk_size = 16;
-         const unsigned shared_size = ALIGN(nir->info.shared_size, chunk_size);
+         const unsigned shared_size = align(nir->info.shared_size, chunk_size);
          assert(shared_size <=
                 intel_compute_slm_calculate_size(compiler->devinfo->ver,
                                                  nir->info.shared_size));

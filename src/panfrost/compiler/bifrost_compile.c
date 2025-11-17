@@ -1430,11 +1430,27 @@ bi_emit_load_push_constant(bi_builder *b, nir_intrinsic_instr *instr)
       MAX2((base / 4) + n, b->shader->info.push->count);
 }
 
-static bi_index
-bi_addr_high(bi_builder *b, nir_src *src)
+/* Split a 32/64-bit address into low and high parts. 64-bit addresses are
+ * checked to be split and cached. 64-bit address happens on `store_scratch`
+ * produced by `nir_lower_vars_to_scratch`
+ */
+
+static void
+bi_addr_split(bi_builder *b, nir_src *src, bi_index *addr_lo, bi_index *addr_hi)
 {
-   return (nir_src_bit_size(*src) == 64) ? bi_extract(b, bi_src_index(src), 1)
-                                         : bi_zero();
+   bi_index addr = bi_src_index(src);
+   if (nir_src_bit_size(*src) == 32) {
+      *addr_lo = addr;
+      *addr_hi = bi_zero();
+      return;
+   }
+   bi_index *components = _mesa_hash_table_u64_search(b->shader->allocated_vec,
+                                                      bi_index_to_key(addr));
+   if (components == NULL) {
+      bi_emit_cached_split(b, addr, 64);
+   }
+   *addr_lo = bi_extract(b, addr, 0);
+   *addr_hi = bi_extract(b, addr, 1);
 }
 
 static void
@@ -1474,8 +1490,8 @@ bi_emit_load(bi_builder *b, nir_intrinsic_instr *instr, enum bi_seg seg)
    int16_t offset = 0;
    unsigned bits = instr->num_components * instr->def.bit_size;
    bi_index dest = bi_def_index(&instr->def);
-   bi_index addr_lo = bi_extract(b, bi_src_index(&instr->src[0]), 0);
-   bi_index addr_hi = bi_addr_high(b, &instr->src[0]);
+   bi_index addr_lo, addr_hi;
+   bi_addr_split(b, &instr->src[0], &addr_lo, &addr_hi);
 
    bi_handle_segment(b, &addr_lo, &addr_hi, seg, &offset);
 
@@ -1491,8 +1507,8 @@ bi_emit_store(bi_builder *b, nir_intrinsic_instr *instr, enum bi_seg seg)
           BITFIELD_MASK(instr->num_components));
 
    int16_t offset = 0;
-   bi_index addr_lo = bi_extract(b, bi_src_index(&instr->src[1]), 0);
-   bi_index addr_hi = bi_addr_high(b, &instr->src[1]);
+   bi_index addr_lo, addr_hi;
+   bi_addr_split(b, &instr->src[1], &addr_lo, &addr_hi);
 
    bi_handle_segment(b, &addr_lo, &addr_hi, seg, &offset);
 
@@ -2561,6 +2577,50 @@ bi_emit_load_const(bi_builder *b, nir_load_const_instr *instr)
    }
 }
 
+
+static bool
+bi_byte_swizzle_from_nir_swizzle(unsigned *channels, unsigned comps,
+                                 enum bi_swizzle *out_swizzle)
+{
+   assert(comps == 4 || comps == 2);
+   unsigned index = 0;
+   for (unsigned i = 0; i < 4; i++) {
+      index = (index << 2) + channels[i * comps / 4];
+   }
+   switch (index) {
+#define B(b0, b1, b2, b3)                                                      \
+   case ((b0) << 6) | ((b1) << 4) | ((b2) << 2) | (b3):                        \
+      *out_swizzle = BI_SWIZZLE_B##b0##b1##b2##b3;                             \
+      return true;
+      B(0, 1, 0, 1);
+      B(0, 1, 2, 3);
+      B(2, 3, 0, 1);
+      B(2, 3, 2, 3);
+      B(0, 0, 0, 0);
+      B(1, 1, 1, 1);
+      B(2, 2, 2, 2);
+      B(3, 3, 3, 3);
+      B(0, 0, 1, 1);
+      B(2, 2, 3, 3);
+      B(1, 0, 3, 2);
+      B(3, 2, 1, 0);
+      B(0, 0, 2, 2);
+      B(1, 1, 0, 0);
+      B(2, 2, 0, 0);
+      B(3, 3, 0, 0);
+      B(2, 2, 1, 1);
+      B(3, 3, 1, 1);
+      B(1, 1, 2, 2);
+      B(3, 3, 2, 2);
+      B(0, 0, 3, 3);
+      B(1, 1, 3, 3);
+      B(1, 1, 2, 3);
+#undef B
+   default:
+      return false;
+   }
+}
+
 static bi_index
 bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
 {
@@ -2605,6 +2665,15 @@ bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
       for (unsigned i = 0; i < comps; ++i) {
          unoffset_srcs[i] = bi_src_index(&src.src);
          channels[i] = src.swizzle[i];
+      }
+
+      if (comps == 2 || comps == 4) {
+         enum bi_swizzle swizzle;
+         if (bi_byte_swizzle_from_nir_swizzle(channels, comps, &swizzle)) {
+            bi_index ret = bi_src_index(&src.src);
+            ret.swizzle = swizzle;
+            return ret;
+         }
       }
 
       bi_index temp = bi_temp(b->shader);
@@ -5560,7 +5629,7 @@ bi_optimize_loop_nir(nir_shader *nir, unsigned gpu_id, bool allow_copies)
 
       NIR_PASS(progress, nir, nir_lower_alu_width, bi_vectorize_filter, &gpu_id);
       NIR_PASS(progress, nir, nir_opt_vectorize, bi_vectorize_filter, &gpu_id);
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_cse);
 
@@ -5585,7 +5654,7 @@ bi_optimize_loop_nir(nir_shader *nir, unsigned gpu_id, bool allow_copies)
           * if we want any hope of nir_opt_if or nir_opt_loop_unroll to make
           * progress.
           */
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_dce);
       }
 
@@ -5606,6 +5675,12 @@ bi_optimize_loop_nir(nir_shader *nir, unsigned gpu_id, bool allow_copies)
    NIR_PASS(_, nir, nir_lower_undef_to_zero);
 
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
+}
+
+void
+bifrost_optimize_nir(nir_shader *nir, unsigned gpu_id)
+{
+   bi_optimize_loop_nir(nir, gpu_id, true);
 }
 
 static void
@@ -5650,7 +5725,7 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
       late_algebraic = false;
       NIR_PASS(late_algebraic, nir, nir_opt_algebraic_late);
       NIR_PASS(_, nir, nir_opt_constant_folding);
-      NIR_PASS(_, nir, nir_copy_prop);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    }
@@ -5676,7 +5751,7 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
       late_algebraic = false;
       NIR_PASS(late_algebraic, nir, nir_opt_algebraic_late);
       NIR_PASS(_, nir, nir_opt_constant_folding);
-      NIR_PASS(_, nir, nir_copy_prop);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    }
@@ -5821,7 +5896,7 @@ bi_gather_texcoords(nir_builder *b, nir_instr *instr, void *data)
    if (x.def != y.def)
       return false;
 
-   nir_instr *parent = x.def->parent_instr;
+   nir_instr *parent = nir_def_instr(x.def);
 
    if (parent->type != nir_instr_type_intrinsic)
       return false;
@@ -6045,11 +6120,6 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       if (pan_arch(gpu_id) <= 7)
          NIR_PASS(_, nir, pan_nir_lower_vertex_id);
-
-      nir_variable *psiz = nir_find_variable_with_location(
-         nir, nir_var_shader_out, VARYING_SLOT_PSIZ);
-      if (psiz != NULL)
-         psiz->data.precision = GLSL_PRECISION_MEDIUM;
    }
 
    /* Get rid of any global vars before we lower to scratch. */
@@ -6109,13 +6179,9 @@ bifrost_postprocess_nir(nir_shader *nir, unsigned gpu_id)
       NIR_PASS(_, nir, bifrost_nir_lower_load_output);
    } else if (nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_, nir, nir_lower_viewport_transform);
-      NIR_PASS(_, nir, nir_lower_point_size, 1.0, 0.0);
+      NIR_PASS(_, nir, nir_lower_point_size, 1.0, 0.0,
+               pan_arch(gpu_id) >= 9 ? nir_type_float16 : nir_type_float32);
       NIR_PASS(_, nir, pan_nir_lower_noperspective_vs);
-
-      if (pan_arch(gpu_id) >= 9) {
-         NIR_PASS(_, nir, nir_lower_mediump_io, nir_var_shader_out,
-                  VARYING_BIT_PSIZ, false);
-      }
 
       /* nir_lower[_explicit]_io is lazy and emits mul+add chains even
        * for offsets it could figure out are constant.  Do some
@@ -6221,20 +6287,13 @@ void bifrost_lower_texture_nir(nir_shader *nir, unsigned gpu_id)
 static bool
 lower_texel_buffer_fetch(nir_builder *b, nir_tex_instr *tex, void *data)
 {
-   switch (tex->op) {
-   case nir_texop_txf:
-   case nir_texop_txf_ms:
-      break;
-   default:
-      return false;
-   }
-   if (tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
+   if (tex->op != nir_texop_txf || tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
       return false;
 
    b->cursor = nir_before_instr(&tex->instr);
 
    nir_def *res_handle = nir_imm_int(b, tex->texture_index);
-   nir_def *buf_index;
+   nir_def *buf_index = NULL;
    for (unsigned i = 0; i < tex->num_srcs; ++i) {
       switch (tex->src[i].src_type) {
       case nir_tex_src_coord:
@@ -6806,7 +6865,7 @@ bifrost_compile_shader_nir(nir_shader *nir,
          /* If shader output lower made progress, ensure to merge adjacent if that were added */
          if (shader_output_pass) {
             /* First we clean up and deduplicate added condition logic */
-            NIR_PASS(_, nir, nir_copy_prop);
+            NIR_PASS(_, nir, nir_opt_copy_prop);
             NIR_PASS(_, nir, nir_opt_dce);
             NIR_PASS(_, nir, nir_opt_cse);
 

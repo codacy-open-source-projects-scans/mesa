@@ -814,6 +814,8 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .NV_compute_shader_derivatives = true,
       .NV_cooperative_matrix2 = radv_cooperative_matrix2_nv_enabled(pdev),
       .VALVE_mutable_descriptor_type = true,
+      .VALVE_video_encode_rgb_conversion =
+         pdev->video_encode_enabled && pdev->info.vcn_ip_version >= VCN_2_0_0 && pdev->info.vcn_ip_version != VCN_2_2_0,
    };
    *out_ext = ext;
 }
@@ -872,7 +874,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderFloat64 = true,
       .shaderInt64 = true,
       .shaderInt16 = true,
-      .sparseBinding = true,
+      .sparseBinding = pdev->info.has_sparse_vm_mappings,
       .sparseResidencyBuffer = pdev->info.family >= CHIP_POLARIS10,
       .sparseResidencyImage2D = pdev->info.family >= CHIP_POLARIS10,
       .sparseResidencyImage3D = pdev->info.family >= CHIP_POLARIS10,
@@ -1428,6 +1430,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_KHR_maintenance10 */
       .maintenance10 = true,
+
+      /* VK_VALVE_video_encode_rgb_conversion */
+      .videoEncodeRgbConversion = true,
    };
 }
 
@@ -1569,7 +1574,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxMemoryAllocationCount = UINT32_MAX,
       .maxSamplerAllocationCount = 64 * 1024,
       .bufferImageGranularity = 1,
-      .sparseAddressSpaceSize = pdev->info.virtual_address_max,
+      .sparseAddressSpaceSize = pdev->info.has_sparse_vm_mappings ? pdev->info.virtual_address_max : 0,
       .maxBoundDescriptorSets = MAX_SETS,
       .maxPerStageDescriptorSamplers = max_descriptor_set_size,
       .maxPerStageDescriptorUniformBuffers = max_descriptor_set_size,
@@ -1949,7 +1954,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
        * alignment is any lower. */
       .shaderGroupBaseAlignment = RADV_RT_HANDLE_SIZE,
       .shaderGroupHandleCaptureReplaySize = sizeof(struct radv_rt_capture_replay_handle),
-      .maxRayDispatchInvocationCount = 1024 * 1024 * 64,
+      .maxRayDispatchInvocationCount = 1 << 30, /* Required limit. */
       .shaderGroupHandleAlignment = 16,
       .maxRayHitAttributeSize = RADV_MAX_HIT_ATTRIB_SIZE,
 

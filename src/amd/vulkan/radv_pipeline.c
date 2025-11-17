@@ -379,7 +379,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
       progress = false;
       NIR_PASS(progress, stage->nir, nir_opt_load_store_vectorize, &vectorize_opts);
       if (progress) {
-         NIR_PASS(_, stage->nir, nir_copy_prop);
+         NIR_PASS(_, stage->nir, nir_opt_copy_prop);
          NIR_PASS(_, stage->nir, nir_opt_shrink_stores, !instance->drirc.debug.disable_shrink_image_store);
 
          constant_fold_for_push_const = true;
@@ -543,7 +543,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
 
    if (radv_shader_should_clear_lds(device, stage->nir)) {
       const unsigned chunk_size = 16; /* max single store size */
-      const unsigned shared_size = ALIGN(stage->nir->info.shared_size, chunk_size);
+      const unsigned shared_size = align(stage->nir->info.shared_size, chunk_size);
       NIR_PASS(_, stage->nir, nir_clear_shared_memory, shared_size, chunk_size);
    }
 
@@ -569,7 +569,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
    if (!stage->key.optimisations_disabled) {
       NIR_PASS(_, stage->nir, nir_opt_dce);
 
-      NIR_PASS(_, stage->nir, nir_copy_prop);
+      NIR_PASS(_, stage->nir, nir_opt_copy_prop);
       NIR_PASS(_, stage->nir, nir_opt_constant_folding);
       NIR_PASS(_, stage->nir, nir_opt_cse);
       NIR_PASS(_, stage->nir, nir_opt_shrink_vectors, true);
@@ -583,10 +583,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
          .callback = ac_nir_mem_vectorize_callback,
          .cb_data = &(struct ac_nir_config){gfx_level, !use_llvm},
          .robust_modes = 0,
-         /* On GFX6, read2/write2 is out-of-bounds if the offset register is negative, even if
-          * the final offset is not.
-          */
-         .has_shared2_amd = gfx_level >= GFX7,
+         .has_shared2_amd = true,
       };
       NIR_PASS(_, stage->nir, nir_opt_load_store_vectorize, &late_vectorize_opts);
    }
@@ -643,7 +640,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
        * nir_opt_vectorize from vectorzing the alu uses of them.
        */
       if (run_copy_prop) {
-         NIR_PASS(_, stage->nir, nir_copy_prop);
+         NIR_PASS(_, stage->nir, nir_opt_copy_prop);
          NIR_PASS(_, stage->nir, nir_opt_dce);
       }
 
@@ -663,7 +660,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
       NIR_PASS(_, stage->nir, ac_nir_opt_pack_half, gfx_level);
 
    NIR_PASS(_, stage->nir, nir_lower_load_const_to_scalar);
-   NIR_PASS(_, stage->nir, nir_copy_prop);
+   NIR_PASS(_, stage->nir, nir_opt_copy_prop);
    NIR_PASS(_, stage->nir, nir_opt_dce);
 
    if (!stage->key.optimisations_disabled) {
@@ -1248,9 +1245,13 @@ radv_pipeline_report_pso_history(const struct radv_device *device, struct radv_p
    case RADV_PIPELINE_RAY_TRACING: {
       struct radv_ray_tracing_pipeline *rt_pipeline = radv_pipeline_to_ray_tracing(pipeline);
 
-      radv_print_pso_history(pipeline, rt_pipeline->prolog, output);
+      if (rt_pipeline->prolog)
+         radv_print_pso_history(pipeline, rt_pipeline->prolog, output);
 
-      for (uint32_t i = 0; i < rt_pipeline->stage_count; i++) {
+      if (pipeline->shaders[MESA_SHADER_INTERSECTION])
+         radv_print_pso_history(pipeline, pipeline->shaders[MESA_SHADER_INTERSECTION], output);
+
+      for (uint32_t i = 0; i < rt_pipeline->non_imported_stage_count; i++) {
          const struct radv_shader *shader = rt_pipeline->stages[i].shader;
 
          if (shader)

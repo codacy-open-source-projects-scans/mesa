@@ -367,7 +367,7 @@ clc_lower_nonnormalized_samplers(nir_shader *nir,
                continue;
 
             nir_src *sampler_src = &tex->src[sampler_src_idx].src;
-            assert(sampler_src->ssa->parent_instr->type == nir_instr_type_deref);
+            assert(nir_def_is_deref(sampler_src->ssa));
             nir_variable *sampler = nir_deref_instr_get_variable(nir_def_as_deref(sampler_src->ssa));
 
             // If the sampler returns ints, we'll handle this in the int lowering pass
@@ -820,7 +820,7 @@ clc_spirv_to_dxil(struct clc_libclc *lib,
       do
       {
          progress = false;
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
          NIR_PASS(progress, nir, nir_opt_deref);
          NIR_PASS(progress, nir, nir_opt_dce);
@@ -849,7 +849,7 @@ clc_spirv_to_dxil(struct clc_libclc *lib,
       do
       {
          progress = false;
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
          NIR_PASS(progress, nir, nir_opt_deref);
          NIR_PASS(progress, nir, nir_opt_dce);
@@ -953,7 +953,7 @@ clc_spirv_to_dxil(struct clc_libclc *lib,
       do {
          progress = false;
          NIR_PASS(progress, nir, nir_opt_memcpy);
-         NIR_PASS(progress, nir, nir_copy_prop);
+         NIR_PASS(progress, nir, nir_opt_copy_prop);
          NIR_PASS(progress, nir, nir_opt_copy_prop_vars);
          NIR_PASS(progress, nir, nir_opt_deref);
          NIR_PASS(progress, nir, nir_opt_dce);

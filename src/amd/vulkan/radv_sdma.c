@@ -134,7 +134,7 @@ radv_sdma_get_chunked_copy_info(const struct radv_device *const device, const st
 {
    const unsigned extent_horizontal_blocks = DIV_ROUND_UP(extent.width * img->texel_scale, img->blk_w);
    const unsigned extent_vertical_blocks = DIV_ROUND_UP(extent.height, img->blk_h);
-   const unsigned aligned_row_pitch = ALIGN(extent_horizontal_blocks, 4);
+   const unsigned aligned_row_pitch = align(extent_horizontal_blocks, 4);
    const unsigned aligned_row_bytes = aligned_row_pitch * img->bpp;
 
    /* Assume that we can always copy at least one full row at a time. */
@@ -292,6 +292,7 @@ radv_sdma_get_surf(const struct radv_device *const device, const struct radv_ima
    const uint64_t va = binding->addr;
    const uint32_t bpe = radv_sdma_get_bpe(image, subresource.aspectMask);
    struct radv_sdma_surf info = {
+      .format = image->vk.format,
       .extent =
          {
             .width = vk_format_get_plane_width(image->vk.format, plane_idx, image->vk.extent.width),
@@ -812,6 +813,14 @@ radv_sdma_use_t2t_scanline_copy(const struct radv_device *device, const struct r
    if (!util_is_aligned(dst_offset_blk.x, alignment->width) || !util_is_aligned(dst_offset_blk.y, alignment->height) ||
        !util_is_aligned(dst_offset_blk.z, alignment->depth))
       return true;
+
+   if (ver < SDMA_6_0 && ((src->format == VK_FORMAT_S8_UINT && vk_format_is_color(dst->format)) ||
+                          (vk_format_is_color(src->format) && dst->format == VK_FORMAT_S8_UINT))) {
+      /* For weird reasons, color<->stencil only T2T subwindow copies on SDMA4-5 don't work as
+       * expected, and the driver needs to fallback to scanline copies to workaround them.
+       */
+      return true;
+   }
 
    return false;
 }

@@ -681,6 +681,8 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
 
    u_init_pipe_screen_caps(&screen->base, 1);
 
+   caps->vendor_id = ARM_VENDOR_ID;
+
    struct panfrost_device *dev = &screen->dev;
 
    /* Our GL 3.x implementation is WIP */
@@ -930,6 +932,9 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    caps->max_texture_lod_bias = 16.0; /* arbitrary */
 
    caps->shader_atomic_int64 = dev->arch >= 9;
+
+   /* We hard-code this value as it is dictated by driver uAPI */
+   caps->max_label_length = 4096;
 }
 
 static void

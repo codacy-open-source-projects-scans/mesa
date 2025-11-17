@@ -227,6 +227,11 @@ struct tu_instance
 
    /* Apps may be accidentally incorrect  */
    bool ignore_frag_depth_direction;
+
+   /* D3D12 SM6.2 requires float32 denorm support which we have to emulate.
+    * However we don't want native Vulkan apps using this.
+    */
+   bool enable_softfloat32;
 };
 VK_DEFINE_HANDLE_CASTS(tu_instance, vk.base, VkInstance,
                        VK_OBJECT_TYPE_INSTANCE)
@@ -315,6 +320,8 @@ struct tu_device
    struct vk_pipeline_cache *mem_cache;
 
    struct vk_meta_device meta;
+
+   struct nir_shader *float32_shader;
 
    radix_sort_vk_t *radix_sort;
    mtx_t radix_sort_mutex;
@@ -565,6 +572,8 @@ struct tu_framebuffer
 
    struct tu_device_memory *depth_mem, *color_mem;
 
+   uint32_t max_tile_w_constraint;
+   uint32_t max_tile_h_constraint;
    struct tu_tiling_config tiling[TU_GMEM_LAYOUT_COUNT];
 
    uint32_t attachment_count;

@@ -257,9 +257,10 @@ struct brw_send_inst : brw_inst {
          bool is_volatile:1;
 
          /**
-          * Use extended bindless surface offset (26bits instead of 20bits)
+          * The surface used for this message is bindless and therefore should
+          * go into the address register.
           */
-         bool ex_bso:1;
+         bool bindless_surface:1;
 
          /**
           * Serialize the message (Gfx12.x only)
@@ -357,6 +358,7 @@ struct brw_load_payload_inst : brw_inst {
 };
 
 struct brw_urb_inst : brw_inst {
+   /** Global offset in bytes on Xe2 or OWords on older hardware */
    uint32_t offset;
    uint8_t components;
 };
@@ -526,7 +528,7 @@ brw_flag_mask(const brw_inst *inst, unsigned width)
    assert(util_is_power_of_two_nonzero(width));
    const unsigned start = (inst->flag_subreg * 16 + inst->group) &
                           ~(width - 1);
-   const unsigned end = start + ALIGN(inst->exec_size, width);
+   const unsigned end = start + align(inst->exec_size, width);
    return ((1 << DIV_ROUND_UP(end, 8)) - 1) & ~((1 << (start / 8)) - 1);
 }
 

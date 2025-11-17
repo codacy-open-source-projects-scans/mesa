@@ -909,7 +909,14 @@ tu_get_physical_device_properties_1_2(struct tu_physical_device *pdevice,
    p->shaderSignedZeroInfNanPreserveFloat16  = true;
 
    p->shaderDenormFlushToZeroFloat32         = true;
-   p->shaderDenormPreserveFloat32            = false;
+
+   /* FP32 denorm preserve has to be emulated via soft-float. Normal
+    * applications should not use this, and we don't want to advertize it and
+    * get people confused, but vkd3d-proton cannot emulate it itself so we
+    * have to allow it to use our emulation.
+    */
+   p->shaderDenormPreserveFloat32 = pdevice->instance->enable_softfloat32;
+
    p->shaderRoundingModeRTEFloat32           = true;
    p->shaderRoundingModeRTZFloat32           = false;
    p->shaderSignedZeroInfNanPreserveFloat32  = true;
@@ -1774,6 +1781,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_TU_DISABLE_D24S8_BORDER_COLOR_WORKAROUND(false)
       DRI_CONF_TU_USE_TEX_COORD_ROUND_NEAREST_EVEN_MODE(false)
       DRI_CONF_TU_IGNORE_FRAG_DEPTH_DIRECTION(false)
+      DRI_CONF_TU_ENABLE_SOFTFLOAT32(false)
    DRI_CONF_SECTION_END
 };
 
@@ -1800,6 +1808,8 @@ tu_init_dri_options(struct tu_instance *instance)
          driQueryOptionb(&instance->dri_options, "tu_use_tex_coord_round_nearest_even_mode");
    instance->ignore_frag_depth_direction =
          driQueryOptionb(&instance->dri_options, "tu_ignore_frag_depth_direction");
+   instance->enable_softfloat32 =
+         driQueryOptionb(&instance->dri_options, "tu_enable_softfloat32");
 }
 
 static uint32_t instance_count = 0;
@@ -2816,6 +2826,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_compiler;
    }
 
+   tu_init_softfloat32(device);
+
    /* Initialize sparse array for refcounting imported BOs */
    util_sparse_array_init(&device->bo_map, sizeof(struct tu_bo), 512);
 
@@ -3079,6 +3091,7 @@ fail_global_bo:
 fail_free_zombie_vma:
    util_sparse_array_finish(&device->bo_map);
    u_vector_finish(&device->zombie_vmas);
+   tu_destroy_softfloat32(device);
    ir3_compiler_destroy(device->compiler);
 fail_compiler:
    vk_meta_device_finish(&device->vk, &device->meta);
@@ -3132,6 +3145,8 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    tu_destroy_dynamic_rendering(device);
 
    vk_meta_device_finish(&device->vk, &device->meta);
+
+   tu_destroy_softfloat32(device);
 
    ir3_compiler_destroy(device->compiler);
 
@@ -3929,12 +3944,54 @@ tu_CreateFramebuffer(VkDevice _device,
    framebuffer->width = pCreateInfo->width;
    framebuffer->height = pCreateInfo->height;
    framebuffer->layers = pCreateInfo->layers;
+   framebuffer->max_tile_w_constraint = ~0;
+   framebuffer->max_tile_h_constraint = ~0;
 
    if (!imageless) {
       for (uint32_t i = 0; i < pCreateInfo->attachmentCount; i++) {
          VkImageView _iview = pCreateInfo->pAttachments[i];
          struct tu_image_view *iview = tu_image_view_from_handle(_iview);
          framebuffer->attachments[i] = iview;
+      }
+   }
+
+   if (pass->has_fdm) {
+      if (imageless) {
+         const VkFramebufferAttachmentsCreateInfo *fb_att_info =
+            vk_find_struct_const(pCreateInfo->pNext,
+                                 FRAMEBUFFER_ATTACHMENTS_CREATE_INFO);
+         for (uint32_t i = 0; i < fb_att_info->attachmentImageInfoCount;
+              i++) {
+            const VkFramebufferAttachmentImageInfo *image_info =
+               &fb_att_info->pAttachmentImageInfos[i];
+            if (image_info->flags &
+                   VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT &&
+                image_info->usage &
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+               struct fdl_lrz_fdm_extra_size extra_size =
+                  TU_CALLX(device, fdl6_lrz_get_max_fdm_extra_size)(
+                     device->physical_device->info, image_info->width,
+                     image_info->height, pass->attachments[0].samples,
+                     image_info->layerCount);
+               framebuffer->max_tile_w_constraint = extra_size.extra_width;
+               framebuffer->max_tile_h_constraint = extra_size.extra_height;
+               break;
+            }
+         }
+      } else {
+         for (uint32_t i = 0; i < pCreateInfo->attachmentCount; i++) {
+            const struct tu_image_view *iview = framebuffer->attachments[i];
+            if (iview->image->vk.create_flags &
+                   VK_IMAGE_CREATE_FRAGMENT_DENSITY_MAP_OFFSET_BIT_EXT &&
+                iview->image->vk.usage &
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+               framebuffer->max_tile_w_constraint =
+                  iview->image->max_tile_w_constraint_fdm;
+               framebuffer->max_tile_h_constraint =
+                  iview->image->max_tile_h_constraint_fdm;
+               break;
+            }
+         }
       }
    }
 
@@ -3987,6 +4044,18 @@ tu_setup_dynamic_framebuffer(struct tu_cmd_buffer *cmd_buffer,
       pRenderingInfo->renderArea.extent.height;
    framebuffer->layers =
       pRenderingInfo->viewMask != 0 ? 1 : pRenderingInfo->layerCount;
+   framebuffer->max_tile_w_constraint = ~0;
+   framebuffer->max_tile_h_constraint = ~0;
+
+   if (pass->has_fdm && pRenderingInfo->pDepthAttachment &&
+       pRenderingInfo->pDepthAttachment->imageView != VK_NULL_HANDLE) {
+      VK_FROM_HANDLE(tu_image_view, view,
+                     pRenderingInfo->pDepthAttachment->imageView);
+      framebuffer->max_tile_w_constraint =
+         view->image->max_tile_w_constraint_fdm;
+      framebuffer->max_tile_h_constraint =
+         view->image->max_tile_h_constraint_fdm;
+   }
 
    tu_framebuffer_tiling_config(framebuffer, cmd_buffer->device, pass);
 }

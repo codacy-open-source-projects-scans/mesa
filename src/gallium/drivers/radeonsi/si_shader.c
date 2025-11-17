@@ -205,8 +205,10 @@ unsigned si_calculate_needed_lds_size(enum amd_gfx_level gfx_level, struct si_sh
       lds_size = size_in_dw * 4;
    }
 
-   if (stage == MESA_SHADER_COMPUTE) {
-      lds_size = shader->selector->info.base.shared_size;
+   if (stage == MESA_SHADER_COMPUTE ||
+       stage == MESA_SHADER_TASK ||
+       stage == MESA_SHADER_MESH) {
+      lds_size = shader->info.shared_size;
    }
 
    /* Check that the LDS size is within hw limits. */
@@ -241,6 +243,8 @@ static void si_calculate_max_simd_waves(struct si_shader *shader)
       lds_per_wave = align(conf->lds_size, lds_increment) +
                      align(shader->info.num_ps_inputs * 48, lds_increment);
       break;
+   case MESA_SHADER_TASK:
+   case MESA_SHADER_MESH:
    case MESA_SHADER_COMPUTE: {
          unsigned max_workgroup_size = si_get_max_workgroup_size(shader);
          lds_per_wave = align(conf->lds_size, lds_increment) / DIV_ROUND_UP(max_workgroup_size, shader->wave_size);
@@ -391,7 +395,7 @@ static void si_lower_ngg(struct si_shader *shader, nir_shader *nir,
                shader->info.nr_param_exports || shader->info.nr_prim_param_exports,
                &out_needs_scratch_ring,
                shader->wave_size,
-               ALIGN(max_workgroup_size, shader->wave_size),
+               align(max_workgroup_size, shader->wave_size),
                false,
                false);
       shader->info.uses_mesh_scratch_ring = out_needs_scratch_ring;
@@ -923,7 +927,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
 
    if (si_should_clear_lds(sel->screen, nir)) {
       const unsigned chunk_size = 16; /* max single store size */
-      const unsigned shared_size = ALIGN(nir->info.shared_size, chunk_size);
+      const unsigned shared_size = align(nir->info.shared_size, chunk_size);
       NIR_PASS(_, nir, nir_clear_shared_memory, shared_size, chunk_size);
    }
 
@@ -960,10 +964,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
                         nir_var_shader_temp,
                .callback = ac_nir_mem_vectorize_callback,
                .cb_data = &(struct ac_nir_config){sel->screen->info.gfx_level, sel->info.base.use_aco_amd},
-               /* On GFX6, read2/write2 is out-of-bounds if the offset register is negative, even if
-                * the final offset is not.
-                */
-               .has_shared2_amd = sel->screen->info.gfx_level >= GFX7,
+               .has_shared2_amd = true,
             });
 
    /* This must be done again if 8-bit or 16-bit buffer stores were vectorized. */
@@ -1728,6 +1729,17 @@ static void si_fix_resource_usage(struct si_screen *sscreen, struct si_shader *s
    }
 }
 
+static void si_init_mesh_shader_ngg_info(struct si_shader *shader)
+{
+   struct si_shader_selector *sel = shader->selector;
+
+   shader->ngg.info.hw_max_esverts = 1;
+   shader->ngg.info.max_gsprims = 1;
+   shader->ngg.info.max_out_verts = sel->info.base.mesh.max_vertices_out;
+   shader->ngg.info.max_vert_out_per_gs_instance = false;
+   shader->ngg.info.ngg_out_lds_size = 0;
+}
+
 bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler *compiler,
                               struct si_shader *shader, struct util_debug_callback *debug)
 {
@@ -1898,6 +1910,8 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
                                          sel->info.base.gs.invocations,
                                          shader->previous_stage_sel->info.esgs_vertex_stride,
                                          &shader->gs_info);
+   } else if (sel->stage == MESA_SHADER_MESH) {
+      si_init_mesh_shader_ngg_info(shader);
    }
 
    si_fix_resource_usage(sscreen, shader);

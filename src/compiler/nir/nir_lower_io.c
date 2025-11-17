@@ -321,8 +321,7 @@ static nir_def *
 simplify_offset_src(nir_builder *b, nir_def *offset, unsigned num_slots)
 {
    /* Force index=0 for any indirect access to array[1]. */
-   if (num_slots == 1 &&
-       offset->parent_instr->type != nir_instr_type_load_const)
+   if (num_slots == 1 && !nir_def_is_const(offset))
       return nir_imm_int(b, 0);
 
    return offset;
@@ -1147,6 +1146,16 @@ nir_is_output_load(nir_intrinsic_instr *intr)
           intr->intrinsic == nir_intrinsic_load_per_vertex_output ||
           intr->intrinsic == nir_intrinsic_load_per_primitive_output ||
           intr->intrinsic == nir_intrinsic_load_per_view_output;
+}
+
+bool
+nir_is_input_load(nir_intrinsic_instr *intr)
+{
+   return intr->intrinsic == nir_intrinsic_load_input ||
+          intr->intrinsic == nir_intrinsic_load_per_vertex_input ||
+          intr->intrinsic == nir_intrinsic_load_per_primitive_input ||
+          intr->intrinsic == nir_intrinsic_load_interpolated_input ||
+          intr->intrinsic == nir_intrinsic_load_input_vertex;
 }
 
 /**

@@ -398,17 +398,18 @@ panvk_preprocess_nir(struct vk_physical_device *vk_pdev,
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, nir_opt_vectorize_io_vars, nir_var_shader_out);
 
-   NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries, nir_shader_get_entrypoint(nir),
-            true, true);
+   NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries,
+            nir_shader_get_entrypoint(nir), true, false);
 
 #if PAN_ARCH < 9
    /* This needs to be done just after the io_to_temporaries pass, because we
-    * rely on in/out temporaries to collect the final layer_id value. */
+    * rely on out temporaries to collect the final layer_id value.
+    */
    NIR_PASS(_, nir, lower_layer_writes);
 #endif
 
-   NIR_PASS(_, nir, nir_lower_indirect_derefs,
-            nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
+   NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+   NIR_PASS(_, nir, nir_split_var_copies);
 
    NIR_PASS(_, nir, nir_opt_copy_prop_vars);
    NIR_PASS(_, nir, nir_opt_combine_stores, nir_var_all);
@@ -450,6 +451,8 @@ panvk_preprocess_nir(struct vk_physical_device *vk_pdev,
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       NIR_PASS(_, nir, nir_lower_wpos_center);
+
+   pan_shader_optimize(nir, pdev->kmod.props.gpu_id);
 
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_lower_var_copies);
@@ -670,7 +673,7 @@ lower_load_push_consts(nir_shader *nir, struct panvk_shader_variant *shader)
    bool progress = false;
    do {
       progress = false;
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
       NIR_PASS(progress, nir, nir_opt_dead_cf);
@@ -769,7 +772,7 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
                 uint32_t set_layout_count,
                 struct vk_descriptor_set_layout *const *set_layouts,
                 const struct vk_pipeline_robustness_state *rs,
-                uint32_t *noperspective_varyings,
+                const uint32_t *noperspective_varyings,
                 const struct vk_graphics_pipeline_state *state,
                 const struct pan_compile_inputs *compile_input,
                 struct panvk_shader_variant *shader)
@@ -916,6 +919,10 @@ panvk_lower_nir(struct panvk_device *dev, nir_shader *nir,
 
    pan_shader_preprocess(nir, compile_input->gpu_id);
 
+   /* Postprocess can add copies back in and lower_io can't handle them */
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_indirect_derefs,
+            nir_var_shader_in | nir_var_shader_out, UINT32_MAX);
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             glsl_type_size, nir_lower_io_use_interpolated_input_intrinsics);
 
@@ -1290,7 +1297,7 @@ static VkResult
 panvk_compile_shader(struct panvk_device *dev,
                      struct vk_shader_compile_info *info,
                      const struct vk_graphics_pipeline_state *state,
-                     uint32_t *noperspective_varyings,
+                     const uint32_t *noperspective_varyings,
                      const VkAllocationCallbacks *pAllocator,
                      struct vk_shader **shader_out)
 {

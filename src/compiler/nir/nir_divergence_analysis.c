@@ -224,6 +224,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_subgroup_id_shift_ir3:
    case nir_intrinsic_load_base_instance:
    case nir_intrinsic_load_base_vertex:
+   case nir_intrinsic_load_raw_vertex_offset_pan:
    case nir_intrinsic_load_first_vertex:
    case nir_intrinsic_load_draw_id:
    case nir_intrinsic_load_is_indexed_draw:
@@ -848,6 +849,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_sample_pos_or_center:
    case nir_intrinsic_load_vertex_id_zero_base:
    case nir_intrinsic_load_vertex_id:
+   case nir_intrinsic_load_raw_vertex_id_pan:
    case nir_intrinsic_load_invocation_id:
    case nir_intrinsic_load_local_invocation_id:
    case nir_intrinsic_load_local_invocation_index:
@@ -1299,7 +1301,7 @@ visit_if_merge_phi(nir_phi_instr *phi, bool if_cond_divergent, bool ignore_undef
          phi->def.divergent = true;
          return true;
       }
-      if (src->src.ssa->parent_instr->type != nir_instr_type_undef) {
+      if (!nir_src_is_undef(src->src)) {
          defined_srcs++;
       }
    }

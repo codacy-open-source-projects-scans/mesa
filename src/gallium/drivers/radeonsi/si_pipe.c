@@ -391,6 +391,13 @@ static void si_destroy_context(struct pipe_context *context)
       _mesa_hash_table_u64_destroy(sctx->ps_resolve_shaders);
    }
 
+   si_resource_reference(&sctx->task_wait_buf, NULL);
+   si_resource_reference(&sctx->task_ring, NULL);
+   si_resource_reference(&sctx->task_scratch_buffer, NULL);
+   si_resource_reference(&sctx->mesh_scratch_ring, NULL);
+   if (sctx->task_preamble_state)
+      si_pm4_free_state(sctx, sctx->task_preamble_state, ~0);
+
    FREE(sctx);
 }
 
@@ -738,6 +745,9 @@ static struct pipe_context *si_create_context(struct pipe_screen *screen, unsign
          UNREACHABLE("unhandled gfx level");
       }
    }
+
+   if (screen->caps.mesh_shader)
+      si_init_task_mesh_shader_functions(sctx);
 
    sctx->sample_mask = 0xffff;
 

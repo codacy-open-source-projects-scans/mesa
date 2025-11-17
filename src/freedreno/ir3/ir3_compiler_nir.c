@@ -4190,7 +4190,7 @@ read_phi_src(struct ir3_context *ctx, struct ir3_block *blk,
 
    nir_foreach_phi_src (nsrc, nphi) {
       if (blk->nblock == nsrc->pred) {
-         if (nsrc->src.ssa->parent_instr->type == nir_instr_type_undef) {
+         if (nir_src_is_undef(nsrc->src)) {
             /* Create an ir3 undef */
             return NULL;
          } else {
@@ -4397,7 +4397,7 @@ get_branch_condition(struct ir3_context *ctx, nir_src *src, unsigned comp,
 {
    struct ir3_instruction *condition = ir3_get_src(ctx, src)[comp];
 
-   if (src->ssa->parent_instr->type == nir_instr_type_alu) {
+   if (nir_def_is_alu(src->ssa)) {
       nir_alu_instr *nir_cond = nir_def_as_alu(src->ssa);
 
       if (nir_cond->op == nir_op_inot) {
@@ -4420,7 +4420,7 @@ fold_conditional_branch(struct ir3_context *ctx, struct nir_src *nir_cond)
    if (!ctx->compiler->has_branch_and_or)
       return NULL;
 
-   if (nir_cond->ssa->parent_instr->type != nir_instr_type_alu)
+   if (!nir_def_is_alu(nir_cond->ssa))
       return NULL;
 
    nir_alu_instr *alu_cond = nir_def_as_alu(nir_cond->ssa);
@@ -6026,7 +6026,7 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
       ir3_instr_move_before(unlock, end);
    }
 
-   so->pvtmem_size = ALIGN(so->pvtmem_size, compiler->pvtmem_per_fiber_align);
+   so->pvtmem_size = align(so->pvtmem_size, compiler->pvtmem_per_fiber_align);
 
    /* Note that max_bary counts inputs that are not bary.f'd for FS: */
    if (so->type == MESA_SHADER_FRAGMENT)

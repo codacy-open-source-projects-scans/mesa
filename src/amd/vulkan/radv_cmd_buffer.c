@@ -1851,7 +1851,8 @@ radv_get_vgt_outprim_type(const struct radv_cmd_buffer *cmd_buffer)
       if (cmd_buffer->state.shaders[MESA_SHADER_GEOMETRY]) {
          return radv_conv_gl_prim_to_gs_out(cmd_buffer->state.shaders[MESA_SHADER_GEOMETRY]->info.gs.output_prim);
       } else if (cmd_buffer->state.shaders[MESA_SHADER_TESS_EVAL]) {
-         if (cmd_buffer->state.shaders[MESA_SHADER_TESS_EVAL]->info.tes.point_mode) {
+         if (cmd_buffer->state.shaders[MESA_SHADER_TESS_EVAL]->info.tes.point_mode ||
+             cmd_buffer->state.shaders[MESA_SHADER_TESS_CTRL]->info.tcs.point_mode) {
             return V_028A6C_POINTLIST;
          } else {
             return radv_conv_tess_prim_to_gs_out(
@@ -12061,7 +12062,8 @@ radv_emit_msaa_state(struct radv_cmd_buffer *cmd_buffer)
              !uses_inner_coverage) {
             pa_sc_conservative_rast |= S_028C4C_OVER_RAST_ENABLE(1) |
                                        S_028C4C_UNDER_RAST_SAMPLE_SELECT(pdev->info.gfx_level < GFX12) |
-                                       S_028C4C_PBB_UNCERTAINTY_REGION_ENABLE(1);
+                                       S_028C4C_PBB_UNCERTAINTY_REGION_ENABLE(1) |
+                                       S_028C4C_ZMM_TRI_EXTENT(1);
          } else {
             pa_sc_conservative_rast |=
                S_028C4C_OVER_RAST_SAMPLE_SELECT(pdev->info.gfx_level < GFX12) | S_028C4C_UNDER_RAST_ENABLE(1);
@@ -12671,7 +12673,7 @@ radv_bind_graphics_shaders(struct radv_cmd_buffer *cmd_buffer)
    descriptors_state->need_indirect_descriptors = need_indirect_descriptors;
    descriptors_state->dynamic_offset_count = dynamic_offset_count;
    pc_state->need_upload = need_push_constants_upload;
-   pc_state->size = push_constant_size;
+   pc_state->size = align(push_constant_size, 4);
 
    if (pdev->info.gfx_level <= GFX9) {
       cmd_buffer->state.ia_multi_vgt_param = radv_compute_ia_multi_vgt_param(device, cmd_buffer->state.shaders);
@@ -15553,7 +15555,7 @@ radv_bind_compute_shader(struct radv_cmd_buffer *cmd_buffer, struct radv_shader_
    descriptors_state->need_indirect_descriptors = radv_shader_need_indirect_descriptors(shader);
    descriptors_state->dynamic_offset_count = shader_obj->dynamic_offset_count;
    pc_state->need_upload = radv_shader_need_push_constants_upload(shader);
-   pc_state->size = shader->info.push_constant_size;
+   pc_state->size = align(shader->info.push_constant_size, 4);
 
    assert(cs->b->cdw <= cdw_max);
 }

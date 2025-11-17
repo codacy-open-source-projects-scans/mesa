@@ -65,7 +65,7 @@ void si_nir_opts(struct si_screen *sscreen, struct nir_shader *nir, bool has_arr
 
       NIR_PASS(lower_alu_to_scalar, nir, nir_opt_loop);
       /* (Constant) copy propagation is needed for txf with offsets. */
-      NIR_PASS(progress, nir, nir_copy_prop);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_remove_phis);
       NIR_PASS(progress, nir, nir_opt_dce);
       /* nir_opt_if_optimize_phi_true_false is disabled on LLVM14 (#6976) */
@@ -144,7 +144,7 @@ void si_nir_late_opts(nir_shader *nir)
           nir->options->support_indirect_outputs & BITFIELD_BIT(nir->info.stage))
          NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in | nir_var_shader_out);
 
-      NIR_PASS(_, nir, nir_copy_prop);
+      NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
       NIR_PASS(_, nir, nir_opt_cse);
    }
@@ -367,6 +367,22 @@ static void si_lower_nir(struct si_screen *sscreen, struct nir_shader *nir)
          options.shuffle_local_ids_for_quad_derivatives = true;
          NIR_PASS(_, nir, nir_lower_compute_system_values, &options);
       }
+   }
+
+   if (nir->info.stage == MESA_SHADER_MESH && !sscreen->info.mesh_fast_launch_2) {
+      nir_lower_compute_system_values_options options = {
+         /* Mesh shaders run as NGG which can implement local_invocation_index from
+          * the wave ID in merged_wave_info, but they don't have local_invocation_ids
+          * in FAST_LAUNCH=1 mode (the default on GFX10.3, deprecated on GFX11).
+          */
+         .lower_cs_local_id_to_index = true,
+         /* Mesh shaders only have a 1D "vertex index" which we use
+          * as "workgroup index" to emulate the 3D workgroup ID.
+          */
+         .lower_workgroup_id_to_index = true,
+         .shortcut_1d_workgroup_id = true,
+      };
+      NIR_PASS(_, nir, nir_lower_compute_system_values, &options);
    }
 
    si_nir_opts(sscreen, nir, true);

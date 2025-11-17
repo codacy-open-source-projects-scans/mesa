@@ -70,6 +70,7 @@
 #endif
 #include "util/u_vector.h"
 #include "util/u_math.h"
+#include "util/u_tristate.h"
 #include "util/vma.h"
 #include "util/xmlconfig.h"
 #include "vk_acceleration_structure.h"
@@ -360,6 +361,7 @@ void __anv_perf_warn(struct anv_device *device,
 /**
  * Print a FINISHME message, including its source location.
  */
+#if MESA_DEBUG
 #define anv_finishme(format, ...) \
    do { \
       static bool reported = false; \
@@ -369,6 +371,9 @@ void __anv_perf_warn(struct anv_device *device,
          reported = true; \
       } \
    } while (0)
+#else
+#define anv_finishme(x, ...)
+#endif
 
 /**
  * Print a perf warning message.  Set INTEL_DEBUG=perf to see these.
@@ -4456,7 +4461,7 @@ struct anv_cmd_graphics_state {
    uint32_t index_size;
 
    uint32_t indirect_data_stride;
-   bool indirect_data_stride_aligned;
+   enum u_tristate indirect_data_stride_aligned;
 
    struct vk_vertex_input_state vertex_input;
    struct vk_sample_locations_state sample_locations;
@@ -5459,18 +5464,6 @@ anv_is_compressed_format_emulated(const struct anv_physical_device *pdevice,
                                               format) != VK_FORMAT_UNDEFINED;
 }
 
-static inline bool
-anv_is_storage_format_atomics_emulated(const struct intel_device_info *devinfo,
-                                       VkFormat format)
-{
-   /* No emulation required on Xe2+ */
-   if (devinfo->ver >= 20)
-      return false;
-
-   return format == VK_FORMAT_R64_SINT ||
-          format == VK_FORMAT_R64_UINT;
-}
-
 static inline struct isl_swizzle
 anv_swizzle_for_render(struct isl_swizzle swizzle)
 {
@@ -6083,6 +6076,7 @@ anv_image_ccs_op(struct anv_cmd_buffer *cmd_buffer,
 isl_surf_usage_flags_t
 anv_image_choose_isl_surf_usage(struct anv_physical_device *device,
                                 VkFormat vk_format,
+                                const VkImageFormatListCreateInfo *format_list_info,
                                 VkImageCreateFlags vk_create_flags,
                                 VkImageUsageFlags vk_usage,
                                 isl_surf_usage_flags_t isl_extra_usage,

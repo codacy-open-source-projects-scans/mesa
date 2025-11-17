@@ -53,6 +53,7 @@
 #include "pvr_macros.h"
 #include "pvr_pass.h"
 #include "pvr_pds.h"
+#include "pvr_physical_device.h"
 #include "pvr_pipeline.h"
 #include "pvr_query.h"
 #include "pvr_tex_state.h"
@@ -324,7 +325,7 @@ pvr_cmd_buffer_upload_tables(struct pvr_device *device,
                              struct pvr_sub_cmd_gfx *const sub_cmd)
 {
    const uint32_t cache_line_size =
-      rogue_get_slc_cache_line_size(&device->pdevice->dev_info);
+      pvr_get_slc_cache_line_size(&device->pdevice->dev_info);
    VkResult result;
 
    assert(!sub_cmd->depth_bias_bo && !sub_cmd->scissor_bo);
@@ -398,7 +399,7 @@ pvr_cmd_buffer_upload_general(struct pvr_cmd_buffer *const cmd_buffer,
 {
    struct pvr_device *const device = cmd_buffer->device;
    const uint32_t cache_line_size =
-      rogue_get_slc_cache_line_size(&device->pdevice->dev_info);
+      pvr_get_slc_cache_line_size(&device->pdevice->dev_info);
    struct pvr_suballoc_bo *suballoc_bo;
    VkResult result;
 
@@ -427,7 +428,7 @@ pvr_cmd_buffer_upload_usc(struct pvr_cmd_buffer *const cmd_buffer,
 {
    struct pvr_device *const device = cmd_buffer->device;
    const uint32_t cache_line_size =
-      rogue_get_slc_cache_line_size(&device->pdevice->dev_info);
+      pvr_get_slc_cache_line_size(&device->pdevice->dev_info);
    struct pvr_suballoc_bo *suballoc_bo;
    VkResult result;
 
@@ -2715,7 +2716,7 @@ VkResult pvr_cmd_buffer_alloc_mem(struct pvr_cmd_buffer *cmd_buffer,
                                   struct pvr_suballoc_bo **const pvr_bo_out)
 {
    const uint32_t cache_line_size =
-      rogue_get_slc_cache_line_size(&cmd_buffer->device->pdevice->dev_info);
+      pvr_get_slc_cache_line_size(&cmd_buffer->device->pdevice->dev_info);
    struct pvr_suballoc_bo *suballoc_bo;
    struct pvr_suballocator *allocator;
    VkResult result;
@@ -3442,7 +3443,7 @@ static VkResult pvr_cs_write_load_op_for_view(struct pvr_cmd_buffer *cmd_buffer,
    const struct pvr_device *device = cmd_buffer->device;
    struct pvr_static_clear_ppp_template template =
       device->static_clear_state.ppp_templates[VK_IMAGE_ASPECT_COLOR_BIT];
-   uint32_t pds_state[PVR_STATIC_CLEAR_PDS_STATE_COUNT];
+   uint32_t pds_state[PVR_PDS_STATE_LENGTH];
    struct pvr_pds_upload shareds_update_program;
    struct pvr_suballoc_bo *pvr_bo;
    VkResult result;
@@ -7851,7 +7852,7 @@ static void pvr_insert_transparent_obj(struct pvr_cmd_buffer *const cmd_buffer,
     */
    struct pvr_static_clear_ppp_template clear =
       device->static_clear_state.ppp_templates[VK_IMAGE_ASPECT_COLOR_BIT];
-   uint32_t pds_state[PVR_STATIC_CLEAR_PDS_STATE_COUNT] = { 0 };
+   uint32_t pds_state[PVR_PDS_STATE_LENGTH] = { 0 };
    struct pvr_csb *csb = &sub_cmd->control_stream;
    struct pvr_suballoc_bo *ppp_bo;
 
