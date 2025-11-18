@@ -12,7 +12,8 @@
 #include "pvr_device_info.h"
 
 #define PVR_DEVICE_IDENT_15_V_1_64 \
-   .device_id = 0x15001064, .series_name = "Rogue", .public_name = "GE7800"
+   .device_id = 0x15001064, .series_name = "Rogue", \
+   .public_name = "GE7800", .arch = PVR_DEVICE_ARCH_ROGUE
 
 static const struct pvr_device_features pvr_device_features_15_V_1_64 = {
       .has_astc = true,
@@ -36,6 +37,7 @@ static const struct pvr_device_features pvr_device_features_15_V_1_64 = {
       .has_tpu_parallel_instances = true,
       .has_unified_store_depth = true,
       .has_usc_f16sop_u8 = true,
+      .has_usc_itr_parallel_instances = true,
       .has_usc_min_output_registers_per_pix = true,
       .has_usc_slots = true,
       .has_uvs_banks = true,
@@ -58,6 +60,7 @@ static const struct pvr_device_features pvr_device_features_15_V_1_64 = {
       .tile_size_y = 32U,
       .tpu_parallel_instances = 4U,
       .unified_store_depth = 208U,
+      .usc_itr_parallel_instances = 16U,
       .usc_min_output_registers_per_pix = 2U,
       .usc_slots = 56U,
       .uvs_banks = 8U,
@@ -66,9 +69,6 @@ static const struct pvr_device_features pvr_device_features_15_V_1_64 = {
       .vdm_cam_size = 128U,
 
       .has_requires_fb_cdc_zls_setup = true,
-      .has_usc_itr_parallel_instances = true,
-
-      .usc_itr_parallel_instances = 16U,
 };
 
 static const struct pvr_device_enhancements

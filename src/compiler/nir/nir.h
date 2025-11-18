@@ -249,6 +249,12 @@ typedef enum {
    NIR_CMAT_RESULT_SIGNED = 1u << 3,
 } nir_cmat_signed;
 
+typedef enum {
+   NIR_CMAT_REDUCE_ROW = 1u << 0,
+   NIR_CMAT_REDUCE_COLUMN = 1u << 1,
+   NIR_CMAT_REDUCE_2X2 = 1u << 2,
+} nir_cmat_reduce;
+
 #define nir_const_value_to_array(arr, c, components, m) \
    do {                                                 \
       for (unsigned i = 0; i < components; ++i)         \
@@ -947,6 +953,7 @@ typedef enum ENUM_PACKED {
    nir_instr_type_jump,
    nir_instr_type_undef,
    nir_instr_type_phi,
+   nir_instr_type_cmat_call,
 } nir_instr_type;
 
 typedef struct nir_instr {
@@ -1832,6 +1839,44 @@ typedef struct nir_call_instr {
    unsigned num_params;
    nir_src params[];
 } nir_call_instr;
+
+#define NIR_CMAT_CALL_MAX_CONST_INDEX 1
+
+typedef enum {
+   /*
+    * Cooperative matrix row/column reduce operation
+    * reduce (dst, src) - const index row/col
+    */
+   nir_cmat_call_op_reduce,
+   /*
+    * Cooperative matrix reduce operation finish
+    * for split flexible dimension matricies
+    * reduce_finish (dst, src0, src1) - const index 0 row/col reduce
+    */
+   nir_cmat_call_op_reduce_finish,
+   /*
+    * Cooperative matrix 2x2 reduce operation
+    * reduce 2x2 dst, src0, src1, src2, src3.
+    */
+   nir_cmat_call_op_reduce_2x2,
+} nir_cmat_call_op;
+
+typedef struct nir_cmat_call_instr {
+   nir_instr instr;
+
+   nir_cmat_call_op op;
+
+   nir_function *callee;
+   int const_index[NIR_CMAT_CALL_MAX_CONST_INDEX];
+
+   unsigned num_params;
+   nir_src params[];
+} nir_cmat_call_instr;
+
+static inline nir_cmat_reduce nir_cmat_call_reduce_flags(nir_cmat_call_instr *call)
+{
+   return (nir_cmat_reduce)call->const_index[0];
+}
 
 #include "nir_intrinsics.h"
 
@@ -2872,6 +2917,8 @@ NIR_DEFINE_CAST(nir_instr_as_undef, nir_instr, nir_undef_instr, instr,
                 type, nir_instr_type_undef)
 NIR_DEFINE_CAST(nir_instr_as_phi, nir_instr, nir_phi_instr, instr,
                 type, nir_instr_type_phi)
+NIR_DEFINE_CAST(nir_instr_as_cmat_call, nir_instr, nir_cmat_call_instr, instr,
+                type, nir_instr_type_cmat_call)
 
 #define NIR_DEFINE_DEF_AS_INSTR(instr_type, suffix, cast)                    \
    static inline instr_type *nir_def_as_##cast(const nir_def *def)           \
@@ -3790,6 +3837,8 @@ typedef struct nir_function {
    uint32_t driver_attributes;
 
    bool is_entrypoint;
+   /* called by a cmat call */
+   bool cmat_call;
    /* from SPIR-V linkage, only for libraries */
    bool is_exported;
    bool is_preamble;
@@ -3992,6 +4041,7 @@ nir_shader_get_function_for_name(const nir_shader *shader, const char *name)
  * functions from a shader and library respectively.
  */
 void nir_remove_non_entrypoints(nir_shader *shader);
+void nir_remove_non_cmat_call_entrypoints(nir_shader *nir);
 void nir_remove_non_exported(nir_shader *shader);
 void nir_remove_entrypoints(nir_shader *shader);
 void nir_fixup_is_exported(nir_shader *shader);
@@ -4128,6 +4178,11 @@ nir_intrinsic_instr *nir_intrinsic_instr_create(nir_shader *shader,
 
 nir_call_instr *nir_call_instr_create(nir_shader *shader,
                                       nir_function *callee);
+
+int nir_cmat_call_op_params(nir_cmat_call_op op, nir_function *callee);
+nir_cmat_call_instr *nir_cmat_call_instr_create(nir_shader *shader,
+                                                nir_cmat_call_op op,
+                                                nir_function *callee);
 
 /** Creates a NIR texture instruction */
 nir_tex_instr *nir_tex_instr_create(nir_shader *shader, unsigned num_srcs);

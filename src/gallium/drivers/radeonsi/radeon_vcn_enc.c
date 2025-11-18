@@ -609,17 +609,43 @@ static void radeon_vcn_enc_hevc_get_dbk_param(struct radeon_encoder *enc,
 {
    struct si_screen *sscreen = (struct si_screen *)enc->screen;
 
-   enc->enc_pic.hevc_deblock.loop_filter_across_slices_enabled =
-      pic->pic.pps_loop_filter_across_slices_enabled_flag;
-   enc->enc_pic.hevc_deblock.deblocking_filter_disabled =
-      pic->slice.slice_deblocking_filter_disabled_flag;
-   enc->enc_pic.hevc_deblock.beta_offset_div2 = pic->slice.slice_beta_offset_div2;
-   enc->enc_pic.hevc_deblock.tc_offset_div2 = pic->slice.slice_tc_offset_div2;
-   enc->enc_pic.hevc_deblock.cb_qp_offset = pic->slice.slice_cb_qp_offset;
-   enc->enc_pic.hevc_deblock.cr_qp_offset = pic->slice.slice_cr_qp_offset;
+   enc->enc_pic.hevc_deblock.deblocking_filter_disabled = 0;
+   enc->enc_pic.hevc_deblock.beta_offset_div2 = 0;
+   enc->enc_pic.hevc_deblock.tc_offset_div2 = 0;
    enc->enc_pic.hevc_deblock.disable_sao =
       sscreen->info.vcn_ip_version < VCN_2_0_0 ||
       !pic->seq.sample_adaptive_offset_enabled_flag;
+
+   if (pic->pic.deblocking_filter_override_enabled_flag &&
+       pic->slice.deblocking_filter_override_flag) {
+      enc->enc_pic.hevc_deblock.deblocking_filter_disabled =
+         pic->slice.slice_deblocking_filter_disabled_flag;
+      enc->enc_pic.hevc_deblock.beta_offset_div2 = pic->slice.slice_beta_offset_div2;
+      enc->enc_pic.hevc_deblock.tc_offset_div2 = pic->slice.slice_tc_offset_div2;
+   } else if (pic->pic.deblocking_filter_control_present_flag) {
+      enc->enc_pic.hevc_deblock.deblocking_filter_disabled =
+         pic->pic.pps_deblocking_filter_disabled_flag;
+      enc->enc_pic.hevc_deblock.beta_offset_div2 = pic->slice.slice_beta_offset_div2;
+      enc->enc_pic.hevc_deblock.tc_offset_div2 = pic->slice.slice_tc_offset_div2;
+   }
+
+   if (pic->pic.pps_slice_chroma_qp_offsets_present_flag) {
+      enc->enc_pic.hevc_deblock.cb_qp_offset = pic->slice.slice_cb_qp_offset;
+      enc->enc_pic.hevc_deblock.cr_qp_offset = pic->slice.slice_cr_qp_offset;
+   } else {
+      enc->enc_pic.hevc_deblock.cb_qp_offset = pic->pic.pps_cb_qp_offset;
+      enc->enc_pic.hevc_deblock.cr_qp_offset = pic->pic.pps_cr_qp_offset;
+   }
+
+   if (pic->pic.pps_loop_filter_across_slices_enabled_flag &&
+       (!enc->enc_pic.hevc_deblock.disable_sao ||
+        !enc->enc_pic.hevc_deblock.deblocking_filter_disabled)) {
+      enc->enc_pic.hevc_deblock.loop_filter_across_slices_enabled =
+         pic->slice.slice_loop_filter_across_slices_enabled_flag;
+   } else {
+      enc->enc_pic.hevc_deblock.loop_filter_across_slices_enabled =
+         pic->pic.pps_loop_filter_across_slices_enabled_flag;
+   }
 }
 
 static bool cu_qp_delta_supported(struct si_screen *sscreen)
@@ -903,15 +929,12 @@ static void radeon_vcn_enc_av1_get_spec_misc_param(struct radeon_encoder *enc,
          (pic->quantization.u_dc_delta_q != pic->quantization.v_dc_delta_q) ||
          (pic->quantization.u_ac_delta_q != pic->quantization.v_ac_delta_q);
 
-   if (enc->enc_pic.disable_screen_content_tools) {
-       enc->enc_pic.force_integer_mv  = 0;
-       enc->enc_pic.av1_spec_misc.palette_mode_enable = 0;
-   }
-
-   if (enc->enc_pic.force_integer_mv)
+   if (pic->allow_screen_content_tools && pic->force_integer_mv)
       enc->enc_pic.av1_spec_misc.mv_precision = RENCODE_AV1_MV_PRECISION_FORCE_INTEGER_MV;
-   else
+   else if (pic->allow_high_precision_mv)
       enc->enc_pic.av1_spec_misc.mv_precision = RENCODE_AV1_MV_PRECISION_ALLOW_HIGH_PRECISION;
+   else
+      enc->enc_pic.av1_spec_misc.mv_precision = RENCODE_AV1_MV_PRECISION_DISALLOW_HIGH_PRECISION;
 }
 
 static void radeon_vcn_enc_av1_get_rc_param(struct radeon_encoder *enc,
@@ -1027,10 +1050,6 @@ static void radeon_vcn_enc_av1_get_param(struct radeon_encoder *enc,
       pic->seq.bit_depth_minus8;
    enc_pic->pic_width_in_luma_samples = pic->seq.pic_width_in_luma_samples;
    enc_pic->pic_height_in_luma_samples = pic->seq.pic_height_in_luma_samples;
-   enc_pic->enable_error_resilient_mode = pic->error_resilient_mode;
-   enc_pic->force_integer_mv = pic->force_integer_mv;
-   enc_pic->disable_screen_content_tools = !pic->allow_screen_content_tools;
-   enc_pic->is_obu_frame = pic->enable_frame_obu;
    enc_pic->av1_enc_params.cur_order_hint = pic->order_hint;
 
    enc_pic->enc_params.reference_picture_index =

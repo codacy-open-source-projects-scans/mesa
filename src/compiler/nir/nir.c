@@ -626,6 +626,7 @@ nir_function_create(nir_shader *shader, const char *name)
    func->params = NULL;
    func->impl = NULL;
    func->is_entrypoint = false;
+   func->cmat_call = false;
    func->is_preamble = false;
    func->dont_inline = false;
    func->should_inline = false;
@@ -898,6 +899,37 @@ nir_call_instr_create(nir_shader *shader, nir_function *callee)
                        sizeof(nir_call_instr) + sizeof(nir_src) * num_params);
 
    instr->callee = callee;
+   instr->num_params = num_params;
+   for (unsigned i = 0; i < num_params; i++)
+      src_init(&instr->params[i]);
+
+   return instr;
+}
+
+int
+nir_cmat_call_op_params(nir_cmat_call_op op, nir_function *callee)
+{
+   switch (op) {
+   case nir_cmat_call_op_reduce:
+      return 2;
+   case nir_cmat_call_op_reduce_finish:
+      return 3;
+   case nir_cmat_call_op_reduce_2x2:
+      return 5;
+   }
+   UNREACHABLE("Invalid cmat call op");
+}
+
+nir_cmat_call_instr *
+nir_cmat_call_instr_create(nir_shader *shader, nir_cmat_call_op op, nir_function *callee)
+{
+   const unsigned num_params = nir_cmat_call_op_params(op, callee);
+   nir_cmat_call_instr *instr =
+      nir_instr_create(shader, nir_instr_type_cmat_call,
+                       sizeof(nir_cmat_call_instr) + sizeof(nir_src) * num_params);
+
+   instr->callee = callee;
+   instr->op = op;
    instr->num_params = num_params;
    for (unsigned i = 0; i < num_params; i++)
       src_init(&instr->params[i]);
@@ -1481,6 +1513,7 @@ nir_instr_def(nir_instr *instr)
 
    case nir_instr_type_call:
    case nir_instr_type_jump:
+   case nir_instr_type_cmat_call:
       return NULL;
    }
 
@@ -2879,6 +2912,7 @@ nir_instr_can_speculate(nir_instr *instr)
    case nir_instr_type_call:
    case nir_instr_type_jump:
    case nir_instr_type_phi:
+   case nir_instr_type_cmat_call:
       return false;
    }
 
@@ -3737,6 +3771,15 @@ nir_remove_non_entrypoints(nir_shader *nir)
          exec_node_remove(&func->node);
    }
    assert(exec_list_length(&nir->functions) == 1);
+}
+
+void
+nir_remove_non_cmat_call_entrypoints(nir_shader *nir)
+{
+   nir_foreach_function_safe(func, nir) {
+      if (!func->is_entrypoint && !func->cmat_call)
+         exec_node_remove(&func->node);
+   }
 }
 
 void

@@ -4986,6 +4986,8 @@ create_empty_block(bi_context *ctx)
 
    util_dynarray_init(&blk->predecessors, blk);
 
+   _mesa_pointer_set_init(&blk->dom_frontier, ctx);
+
    return blk;
 }
 
@@ -6911,44 +6913,45 @@ bifrost_compile_shader_nir(nir_shader *nir,
    info->ubo_mask &= (1 << nir->info.num_ubos) - 1;
 }
 
-bool *
-bi_find_loop_blocks(const bi_context *ctx, bi_block *header)
+static void
+find_all_predecessors(const bi_context *ctx, bi_block *b, BITSET_WORD *out)
 {
-   /* A block is in the loop if it has the header both as the predecessor and
-    * the successor. */
+   assert(out);
+   assert(b);
 
-   bool *h_as_suc = (bool *)calloc(ctx->num_blocks, sizeof(bool));
-   bool *h_as_pred = (bool *)calloc(ctx->num_blocks, sizeof(bool));
-   h_as_suc[header->index] = true;
-   h_as_pred[header->index] = true;
+   BITSET_CLEAR_RANGE(out, 0, ctx->num_blocks);
 
    /* If the CFG was one long chain, we would require |blocks|-1 iters to
     * propagate the in_loop info all the way through.
     */
    for (uint32_t iter = 0; iter < ctx->num_blocks - 1; ++iter) {
       bi_foreach_block(ctx, block) {
-
          bi_foreach_successor(block, succ) {
-            if (h_as_suc[succ->index]) {
-               h_as_suc[block->index] = true;
-               break;
-            }
-         }
-
-         bi_foreach_predecessor(block, pred) {
-            if (h_as_pred[(*pred)->index]) {
-               h_as_pred[block->index] = true;
+            if (succ == b || BITSET_TEST(out, succ->index)) {
+               BITSET_SET(out, block->index);
                break;
             }
          }
       }
    }
+}
 
-   for (uint32_t bidx = 0; bidx < ctx->num_blocks - 1; ++bidx) {
-      h_as_suc[bidx] &= h_as_pred[bidx];
+void
+bi_find_loop_blocks(const bi_context *ctx, bi_block *header, BITSET_WORD *out)
+{
+   find_all_predecessors(ctx, header, out);
+
+   BITSET_WORD *dominators = BITSET_RZALLOC(NULL, ctx->num_blocks);
+   bi_foreach_block(ctx, b) {
+      if (bi_block_dominates(header, b)) {
+         BITSET_SET(dominators, b->index);
+      }
    }
 
-   free(h_as_pred);
+   /* If the header dominates b and is also the successor of b, then b
+    * is in the loop of that header.
+    */
+   __bitset_and(out, out, dominators, BITSET_WORDS(ctx->num_blocks));
 
-   return h_as_suc;
+   ralloc_free(dominators);
 }

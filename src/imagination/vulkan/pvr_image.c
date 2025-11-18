@@ -64,7 +64,9 @@ static void pvr_image_init_memlayout(struct pvr_image *image)
    }
 }
 
-static void pvr_image_init_physical_extent(struct pvr_image *image)
+static void
+pvr_image_init_physical_extent(struct pvr_image *image,
+                               unsigned pbe_stride_align)
 {
    assert(image->memlayout != PVR_MEMLAYOUT_UNDEFINED);
 
@@ -89,8 +91,7 @@ static void pvr_image_init_physical_extent(struct pvr_image *image)
       if (image->vk.usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
                              VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
          image->physical_extent.width =
-            align(image->physical_extent.width,
-                  ROGUE_PBESTATE_REG_WORD0_LINESTRIDE_UNIT_SIZE);
+            align(image->physical_extent.width, pbe_stride_align);
       }
    }
 }
@@ -152,6 +153,9 @@ static void pvr_image_setup_mip_levels(struct pvr_image *image)
    image->size = image->layer_size * image->vk.array_layers;
 }
 
+static unsigned
+get_pbe_stride_align(const struct pvr_device_info *dev_info);
+
 VkResult pvr_CreateImage(VkDevice _device,
                          const VkImageCreateInfo *pCreateInfo,
                          const VkAllocationCallbacks *pAllocator,
@@ -181,9 +185,12 @@ VkResult pvr_CreateImage(VkDevice _device,
     */
    image->alignment = 4096U;
 
+   unsigned pbe_stride_align =
+      get_pbe_stride_align(&device->pdevice->dev_info);
+
    /* Initialize the image using the saved information from pCreateInfo */
    pvr_image_init_memlayout(image);
-   pvr_image_init_physical_extent(image);
+   pvr_image_init_physical_extent(image, pbe_stride_align);
    pvr_image_setup_mip_levels(image);
 
    *pImage = pvr_image_to_handle(image);
@@ -574,4 +581,14 @@ void pvr_DestroyBufferView(VkDevice _device,
       return;
 
    vk_buffer_view_destroy(&device->vk, pAllocator, &bview->vk);
+}
+
+/* Leave this at the very end, to avoid leakage of HW-defs here */
+#include "pvr_csb.h"
+
+static unsigned
+get_pbe_stride_align(const struct pvr_device_info *dev_info)
+{
+   return PVR_HAS_FEATURE(dev_info, pbe_stride_align_1pixel) ?
+      1 : ROGUE_PBESTATE_REG_WORD0_LINESTRIDE_UNIT_SIZE;
 }

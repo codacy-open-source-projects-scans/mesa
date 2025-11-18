@@ -381,7 +381,8 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
 
    cmd_buffer->batch.trace = tmp_trace;
 
-   trace_intel_end_sba(cmd_buffer->batch.trace);
+   trace_intel_end_sba(cmd_buffer->batch.trace,
+                       cmd_buffer->state.pending_db_mode);
 #endif
 
 #if GFX_VERx10 >= 125
@@ -3192,8 +3193,16 @@ genX(BeginCommandBuffer)(
     *    secondary command buffer is considered to be entirely inside a render
     *    pass. If this is a primary command buffer, then this bit is ignored.
     */
-   if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY)
+   if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_PRIMARY) {
       cmd_buffer->usage_flags &= ~VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
+   } else if (cmd_buffer->usage_flags &
+            VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) {
+      /* For secondary, if we have RENDER_PASS_CONTINUE_BIT, we can assume the
+       * pipeline mode is 3D. This avoid some stalling/state-emission.
+       */
+      cmd_buffer->state.current_pipeline = _3D;
+   }
+
 
 #if GFX_VER >= 12
    /* Reenable prefetching at the beginning of secondary command buffers. We
@@ -3242,23 +3251,6 @@ genX(BeginCommandBuffer)(
          ANV_CMD_DESCRIPTOR_BUFFER_MODE_LEGACY;
       genX(cmd_buffer_emit_bt_pool_base_address)(cmd_buffer);
    }
-
-   /* We sometimes store vertex data in the dynamic state buffer for blorp
-    * operations and our dynamic state stream may re-use data from previous
-    * command buffers.  In order to prevent stale cache data, we flush the VF
-    * cache.  We could do this on every blorp call but that's not really
-    * needed as all of the data will get written by the CPU prior to the GPU
-    * executing anything.  The chances are fairly high that they will use
-    * blorp at least once per primary command buffer so it shouldn't be
-    * wasted.
-    *
-    * There is also a workaround on gfx8 which requires us to invalidate the
-    * VF cache occasionally.  It's easier if we can assume we start with a
-    * fresh cache (See also genX(cmd_buffer_set_binding_for_gfx8_vb_flush).)
-    */
-   anv_add_pending_pipe_bits(cmd_buffer,
-                             ANV_PIPE_VF_CACHE_INVALIDATE_BIT,
-                             "new cmd buffer");
 
    /* Invalidate the aux table in every primary command buffer. This ensures
     * the command buffer see the last updates made by the host.
@@ -3675,6 +3667,11 @@ genX(CmdExecuteCommands)(
       }
 
       db_mode = secondary->state.current_db_mode;
+
+      /* Set the current pipeline state to the secondary's state if it did
+       * program the PIPELINE_SELECT instruction. */
+      if (secondary->state.current_pipeline != UINT32_MAX)
+         container->state.current_pipeline = secondary->state.current_pipeline;
    }
 
    /* The secondary isn't counted in our VF cache tracking so we need to
@@ -3698,7 +3695,6 @@ genX(CmdExecuteCommands)(
     * where we do any draws or compute dispatches from the container after the
     * secondary has returned.
     */
-   container->state.current_pipeline = UINT32_MAX;
    container->state.current_l3_config = NULL;
    container->state.current_hash_scale = 0;
    container->state.gfx.push_constant_stages = 0;
@@ -4911,7 +4907,10 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
        intel_needs_workaround(cmd_buffer->device->info, 16013063087))
       bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT;
 
-   anv_add_pending_pipe_bits(cmd_buffer, bits, "flush/invalidate PIPELINE_SELECT");
+   anv_add_pending_pipe_bits(cmd_buffer, bits,
+		             pipeline == _3D ?
+			     "flush/invalidate PIPELINE_SELECT 3D" :
+			     "flush/invalidate PIPELINE_SELECT GPGPU");
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
 #if GFX_VER == 9

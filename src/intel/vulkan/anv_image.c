@@ -2969,6 +2969,9 @@ anv_image_bind_address(struct anv_device *device,
                         enum anv_image_memory_binding binding,
                         struct anv_address address)
 {
+   assert(anv_address_physical(address) %
+          image->bindings[binding].memory_range.alignment == 0);
+
    image->bindings[binding].address = address;
 
    /* Map bindings for images with host transfer usage, so that we don't have
@@ -4074,15 +4077,4 @@ anv_layout_has_untracked_aux_writes(const struct intel_device_info * const devin
       return false;
 
    return true;
-}
-
-void anv_GetRenderingAreaGranularityKHR(
-    VkDevice                                    _device,
-    const VkRenderingAreaInfoKHR*               pRenderingAreaInfo,
-    VkExtent2D*                                 pGranularity)
-{
-   *pGranularity = (VkExtent2D) {
-      .width = 1,
-      .height = 1,
-   };
 }
