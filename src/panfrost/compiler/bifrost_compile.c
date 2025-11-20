@@ -1205,6 +1205,7 @@ va_shader_output_from_semantics(const nir_io_semantics *sem)
       return VA_SHADER_OUTPUT_POSITION;
    case VARYING_SLOT_PSIZ:
    case VARYING_SLOT_LAYER:
+   case VARYING_SLOT_PRIMITIVE_ID:
       return VA_SHADER_OUTPUT_ATTRIB;
    default:
       return VA_SHADER_OUTPUT_VARY;
@@ -1399,6 +1400,11 @@ bi_emit_store_vary(bi_builder *b, nir_intrinsic_instr *instr)
       if (sem.location == VARYING_SLOT_PSIZ)
          assert(T_size == 16 && "should've been lowered");
 
+      if (sem.location == VARYING_SLOT_PRIMITIVE_ID) {
+         assert(nr == 1 && src_bit_sz == 32);
+         pos_attr_offset = 12;
+      }
+
       bool varying = (output_type == VA_SHADER_OUTPUT_VARY);
 
       if (instr->intrinsic == nir_intrinsic_store_per_view_output) {
@@ -1410,8 +1416,12 @@ bi_emit_store_vary(bi_builder *b, nir_intrinsic_instr *instr)
             /* We don't patch these offsets in the no_psiz variant, so if
              * multiview is enabled we can't switch to the basic format by
              * using no_psiz */
-            bool extended_position_fifo = b->shader->nir->info.outputs_written &
-               (VARYING_BIT_LAYER | VARYING_BIT_PSIZ);
+            const uint64_t outputs = b->shader->nir->info.outputs_written;
+            bool extended_position_fifo =
+               valhal_writes_extended_fifo(outputs, false, true);
+            /* Must be the same with and without no_psiz */
+            assert(valhal_writes_extended_fifo(outputs, true, true) ==
+                   extended_position_fifo);
             unsigned position_fifo_stride = extended_position_fifo ? 8 : 4;
             index_offset += view_index * position_fifo_stride;
          }
@@ -6219,7 +6229,8 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
    NIR_PASS(_, nir, nir_lower_scratch_to_var);
    NIR_PASS(_, nir, nir_lower_vars_to_scratch, nir_var_function_temp, 256,
             vars_to_scratch_size_align_func, vars_to_scratch_size_align_func);
-   NIR_PASS(_, nir, nir_lower_indirect_derefs, nir_var_function_temp, ~0);
+   NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+            nir_var_function_temp, ~0);
 
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_lower_var_copies);
@@ -6859,10 +6870,10 @@ bi_compile_variant(nir_shader *nir,
 
       if (idvs == BI_IDVS_ALL) {
          /* Varying shader is only enabled if we can have any kind of varying
-          * written (that mean not position, layer or point size) */
+          * written (that mean not position, or an extended FIFO attribute) */
          info->vs.secondary_enable =
             (nir->info.outputs_written &
-             ~(VARYING_BIT_POS | VARYING_BIT_LAYER | VARYING_BIT_PSIZ)) != 0;
+             ~(VARYING_BIT_POS | VALHAL_EX_FIFO_VARYING_BITS)) != 0;
       }
    }
 

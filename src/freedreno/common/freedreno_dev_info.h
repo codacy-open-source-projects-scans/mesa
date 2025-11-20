@@ -70,6 +70,20 @@ struct fd_dev_info {
    };
 
    struct {
+      uint32_t RB_DBG_ECO_CNTL;
+      uint32_t RB_DBG_ECO_CNTL_blit;
+      uint32_t RB_RBP_CNTL;
+   } magic;
+
+   struct {
+         uint32_t reg;
+         uint32_t value;
+   } magic_raw[64];
+
+   struct {
+      /*
+       * A6XX / gen6
+       */
       uint32_t reg_size_vec4;
 
       /* The size (in instrlen units (128 bytes)) of instruction cache where
@@ -226,29 +240,6 @@ struct fd_dev_info {
       /* A702 cuts A LOT of things.. */
       bool is_a702;
 
-      struct {
-         uint32_t PC_POWER_CNTL;
-         uint32_t TPL1_DBG_ECO_CNTL;
-         uint32_t GRAS_DBG_ECO_CNTL;
-         uint32_t SP_CHICKEN_BITS;
-         uint32_t UCHE_CLIENT_PF;
-         uint32_t PC_MODE_CNTL;
-         uint32_t SP_DBG_ECO_CNTL;
-         uint32_t RB_DBG_ECO_CNTL;
-         uint32_t RB_DBG_ECO_CNTL_blit;
-         uint32_t HLSQ_DBG_ECO_CNTL;
-         uint32_t RB_RBP_CNTL;
-         uint32_t VPC_DBG_ECO_CNTL;
-         uint32_t UCHE_UNKNOWN_0E12;
-
-         uint32_t RB_CCU_DBG_ECO_CNTL;
-      } magic;
-
-      struct {
-            uint32_t reg;
-            uint32_t value;
-      } magic_raw[64];
-
       /* maximum number of descriptor sets */
       uint32_t max_sets;
 
@@ -275,9 +266,11 @@ struct fd_dev_info {
 
       /* True if PC_DGEN_SO_CNTL is present. */
       bool has_pc_dgen_so_cntl;
-   } a6xx;
 
-   struct {
+      /*
+       * A7XX / gen7
+       */
+
       /* stsc may need to be done twice for the same range to workaround
        * _something_, observed in blob's disassembly.
        */
@@ -394,7 +387,7 @@ struct fd_dev_info {
        * driver.
        */
       bool has_hw_bin_scaling;
-   } a7xx;
+   } props;
 };
 
 struct fd_dev_id {

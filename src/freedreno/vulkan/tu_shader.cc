@@ -58,10 +58,135 @@ static const struct spirv_to_nir_options tu_spirv_options = {
    .min_ssbo_alignment = 4,
 };
 
+static nir_shader *
+tu_spirv_to_nir_library(struct tu_device *dev,
+                        const uint32_t *words,
+                        size_t word_count)
+{
+   const nir_shader_compiler_options *nir_options =
+      ir3_get_compiler_options(dev->compiler);
+   spirv_to_nir_options spirv_options = tu_spirv_options;
+   spirv_options.create_library = true;
+
+   nir_shader *nir =
+      spirv_to_nir(words, word_count, NULL, 0, MESA_SHADER_COMPUTE,
+                   "main", &spirv_options, nir_options);
+
+   NIR_PASS(_, nir, nir_lower_system_values);
+
+   /* We have to lower away local constant initializers right before we
+    * inline functions.  That way they get properly initialized at the top
+    * of the function and not at the top of its caller.
+    */
+   NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
+   NIR_PASS(_, nir, nir_lower_returns);
+   NIR_PASS(_, nir, nir_inline_functions);
+   nir_remove_non_exported(nir);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
+   NIR_PASS(_, nir, nir_opt_deref);
+
+   /* We can't deal with constant data, get rid of it */
+   nir_lower_constant_to_temp(nir);
+
+   /* We can go ahead and lower the rest of the constant initializers.  We do
+    * this here so that nir_remove_dead_variables and split_per_member_structs
+    * below see the corresponding stores.
+    */
+   NIR_PASS(_, nir, nir_lower_variable_initializers, (nir_variable_mode)~0);
+
+   NIR_PASS(_, nir, nir_opt_find_array_copies);
+   NIR_PASS(_, nir, nir_opt_copy_prop_vars);
+   NIR_PASS(_, nir, nir_opt_dce);
+
+   NIR_PASS(_, nir, nir_split_var_copies);
+   NIR_PASS(_, nir, nir_lower_var_copies);
+
+   NIR_PASS(_, nir, nir_lower_mediump_vars, nir_var_function_temp);
+   NIR_PASS(_, nir, nir_opt_copy_prop_vars);
+   NIR_PASS(_, nir, nir_opt_combine_stores, nir_var_all);
+
+   /* Do some optimizations to clean up the shader now.  By optimizing the
+    * functions in the library, we avoid having to re-do that work every
+    * time we inline a copy of a function.  Reducing basic blocks also helps
+    * with compile times.
+    */
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
+   NIR_PASS(_, nir, nir_opt_copy_prop);
+   NIR_PASS(_, nir, nir_opt_dce);
+   NIR_PASS(_, nir, nir_opt_cse);
+   NIR_PASS(_, nir, nir_opt_gcm, true);
+
+   nir_opt_peephole_select_options peephole_select_options = {};
+   peephole_select_options.limit = 1;
+   NIR_PASS(_, nir, nir_opt_peephole_select, &peephole_select_options);
+   NIR_PASS(_, nir, nir_opt_dce);
+
+   return nir;
+}
+
+static const uint32_t float32_spv[] = {
+#include "float32_spv.h"
+};
+
+#include "float64_spv.h"
+
+void
+tu_init_softfloat32(struct tu_device *dev)
+{
+   if (dev->float32_shader)
+      return;
+
+   mtx_lock(&dev->softfloat_mutex);
+   if (!dev->float32_shader) {
+      dev->float32_shader = tu_spirv_to_nir_library(dev, float32_spv,
+                                                    ARRAY_SIZE(float32_spv));
+   }
+   mtx_unlock(&dev->softfloat_mutex);
+}
+
+void
+tu_init_softfloat64(struct tu_device *dev)
+{
+   if (dev->float64_shader)
+      return;
+
+   mtx_lock(&dev->softfloat_mutex);
+   if (!dev->float64_shader) {
+      dev->float64_shader = tu_spirv_to_nir_library(dev, float64_spv_source,
+                                                    ARRAY_SIZE(float64_spv_source));
+   }
+   mtx_unlock(&dev->softfloat_mutex);
+}
+
+void
+tu_destroy_softfloat(struct tu_device *dev)
+{
+   if (dev->float32_shader)
+      ralloc_free(dev->float32_shader);
+   if (dev->float64_shader)
+      ralloc_free(dev->float64_shader);
+}
+
 static void
 tu_nir_lower_softfloat32(struct tu_device *dev, nir_shader *nir)
 {
+   tu_init_softfloat32(dev);
+
    NIR_PASS(_, nir, nir_lower_floats, dev->float32_shader);
+
+   /* Cleanup the result before linking to minimize shader size. */
+   struct ir3_optimize_options optimize_options = {};
+   ir3_optimize_loop(dev->compiler, &optimize_options, nir);
+}
+
+static void
+tu_nir_lower_softfloat64(struct tu_device *dev, nir_shader *nir)
+{
+   tu_init_softfloat64(dev);
+
+   NIR_PASS(_, nir, nir_lower_doubles, dev->float64_shader,
+            nir_lower_fp64_full_software);
 
    /* Cleanup the result before linking to minimize shader size. */
    struct ir3_optimize_options optimize_options = {};
@@ -158,91 +283,11 @@ tu_spirv_to_nir(struct tu_device *dev,
       tu_nir_lower_softfloat32(dev, nir);
    }
 
-   return nir;
-}
-
-static nir_shader *
-tu_spirv_to_nir_library(struct tu_device *dev,
-                        const uint32_t *words,
-                        size_t word_count)
-{
-   const nir_shader_compiler_options *nir_options =
-      ir3_get_compiler_options(dev->compiler);
-   spirv_to_nir_options spirv_options = tu_spirv_options;
-   spirv_options.create_library = true;
-
-   nir_shader *nir =
-      spirv_to_nir(words, word_count, NULL, 0, MESA_SHADER_COMPUTE,
-                   "main", &spirv_options, nir_options);
-
-   NIR_PASS(_, nir, nir_lower_system_values);
-
-   /* We have to lower away local constant initializers right before we
-    * inline functions.  That way they get properly initialized at the top
-    * of the function and not at the top of its caller.
-    */
-   NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_function_temp);
-   NIR_PASS(_, nir, nir_lower_returns);
-   NIR_PASS(_, nir, nir_inline_functions);
-   nir_remove_non_exported(nir);
-   NIR_PASS(_, nir, nir_opt_copy_prop);
-   NIR_PASS(_, nir, nir_opt_deref);
-
-   /* We can't deal with constant data, get rid of it */
-   nir_lower_constant_to_temp(nir);
-
-   /* We can go ahead and lower the rest of the constant initializers.  We do
-    * this here so that nir_remove_dead_variables and split_per_member_structs
-    * below see the corresponding stores.
-    */
-   NIR_PASS(_, nir, nir_lower_variable_initializers, (nir_variable_mode)~0);
-
-   NIR_PASS(_, nir, nir_opt_find_array_copies);
-   NIR_PASS(_, nir, nir_opt_copy_prop_vars);
-   NIR_PASS(_, nir, nir_opt_dce);
-
-   NIR_PASS(_, nir, nir_split_var_copies);
-   NIR_PASS(_, nir, nir_lower_var_copies);
-
-   NIR_PASS(_, nir, nir_lower_mediump_vars, nir_var_function_temp);
-   NIR_PASS(_, nir, nir_opt_copy_prop_vars);
-   NIR_PASS(_, nir, nir_opt_combine_stores, nir_var_all);
-
-   /* Do some optimizations to clean up the shader now.  By optimizing the
-    * functions in the library, we avoid having to re-do that work every
-    * time we inline a copy of a function.  Reducing basic blocks also helps
-    * with compile times.
-    */
-   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-   NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
-   NIR_PASS(_, nir, nir_opt_copy_prop);
-   NIR_PASS(_, nir, nir_opt_dce);
-   NIR_PASS(_, nir, nir_opt_cse);
-   NIR_PASS(_, nir, nir_opt_gcm, true);
-
-   nir_opt_peephole_select_options peephole_select_options = {};
-   peephole_select_options.limit = 1;
-   NIR_PASS(_, nir, nir_opt_peephole_select, &peephole_select_options);
-   NIR_PASS(_, nir, nir_opt_dce);
+   if (nir->info.bit_sizes_float & 64) {
+      tu_nir_lower_softfloat64(dev, nir);
+   }
 
    return nir;
-}
-
-static const uint32_t float32_spv[] = {
-#include "float32_spv.h"
-};
-
-void
-tu_init_softfloat32(struct tu_device *dev)
-{
-   dev->float32_shader = tu_spirv_to_nir_library(dev, float32_spv,
-                                                 ARRAY_SIZE(float32_spv));
-}
-
-void
-tu_destroy_softfloat32(struct tu_device *dev)
-{
-   ralloc_free(dev->float32_shader);
 }
 
 static void
@@ -420,7 +465,7 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
    }
 
    nir_def *base_idx = nir_mov_scalar(b, scalar_idx);
-   for (unsigned i = 0; i < dev->physical_device->info->a6xx.max_sets; i++) {
+   for (unsigned i = 0; i < dev->physical_device->info->props.max_sets; i++) {
       /* if (base_idx == i) { ... */
       nir_if *nif = nir_push_if(b, nir_ieq_imm(b, base_idx, i));
 
@@ -458,7 +503,7 @@ lower_ssbo_ubo_intrinsic(struct tu_device *dev,
 
    nir_def *result =
       nir_undef(b, intrin->def.num_components, intrin->def.bit_size);
-   for (int i = dev->physical_device->info->a6xx.max_sets - 1; i >= 0; i--) {
+   for (int i = dev->physical_device->info->props.max_sets - 1; i >= 0; i--) {
       nir_pop_if(b, NULL);
       if (info->has_dest)
          result = nir_if_phi(b, results[i], result);
@@ -799,7 +844,7 @@ lower_inline_ubo(nir_builder *b, nir_intrinsic_instr *intrin, void *cb_data)
    unsigned range;
    bool use_load = false;
    bool use_ldg_k =
-      params->dev->physical_device->info->a7xx.load_inline_uniforms_via_preamble_ldgk;
+      params->dev->physical_device->info->props.load_inline_uniforms_via_preamble_ldgk;
 
    for (unsigned i = 0; i < const_state->num_inline_ubos; i++) {
       if (const_state->ubos[i].base == binding.desc_set &&
@@ -1015,7 +1060,7 @@ tu_lower_io(nir_shader *shader, struct tu_device *dev,
     */
    size_t ldgk_consts = 0;
    bool use_ldg_k =
-      dev->physical_device->info->a7xx.load_inline_uniforms_via_preamble_ldgk;
+      dev->physical_device->info->props.load_inline_uniforms_via_preamble_ldgk;
    for (unsigned set = 0; set < layout->num_sets; set++) {
       const struct tu_descriptor_set_layout *desc_layout =
          layout->set[set].layout;
@@ -1198,12 +1243,12 @@ lower_ssbo_descriptor_instr(nir_builder *b, nir_intrinsic_instr *intrin,
     *  - 8-bit SSBO loads and stores -- next-index descriptor is dedicated to
     *    storage accesses of that size.
     */
-   if ((dev->physical_device->info->a6xx.storage_16bit &&
-        !dev->physical_device->info->a6xx.has_isam_v &&
+   if ((dev->physical_device->info->props.storage_16bit &&
+        !dev->physical_device->info->props.has_isam_v &&
         intrin->intrinsic == nir_intrinsic_load_ssbo &&
         (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
         intrin->def.bit_size > 16) ||
-       (dev->physical_device->info->a7xx.storage_8bit &&
+       (dev->physical_device->info->props.storage_8bit &&
         ((intrin->intrinsic == nir_intrinsic_load_ssbo && intrin->def.bit_size == 8) ||
          (intrin->intrinsic == nir_intrinsic_store_ssbo && intrin->src[0].ssa->bit_size == 8)))) {
       unsigned buffer_src;
@@ -1549,7 +1594,7 @@ tu6_emit_xs(struct tu_cs *cs,
       ));
       break;
    case MESA_SHADER_COMPUTE:
-      thrsz = cs->device->physical_device->info->a6xx
+      thrsz = cs->device->physical_device->info->props
             .supports_double_threadsize ? thrsz : THREAD128;
       tu_cs_emit_regs(cs, A6XX_SP_CS_CNTL_0(
                .halfregfootprint = xs->info.max_half_reg + 1,
@@ -1593,7 +1638,7 @@ tu6_emit_xs(struct tu_cs *cs,
 
    if (cs->device->physical_device->info->chip == A6XX) {
       uint32_t shader_preload_size =
-         MIN2(xs->instrlen, cs->device->physical_device->info->a6xx.instr_cache_size);
+         MIN2(xs->instrlen, cs->device->physical_device->info->props.instr_cache_size);
 
       tu_cs_emit_pkt7(cs, tu6_stage2opcode(stage), 3);
       tu_cs_emit(cs, CP_LOAD_STATE6_0_DST_OFF(0) |
@@ -1612,7 +1657,7 @@ tu6_emit_xs(struct tu_cs *cs,
    unsigned immediate_size = tu_xs_get_immediates_packet_size_dwords(xs);
 
    if (immediate_size > 0) {
-      assert(!cs->device->physical_device->info->a7xx.load_shader_consts_via_preamble);
+      assert(!cs->device->physical_device->info->props.load_shader_consts_via_preamble);
       tu_cs_emit_pkt7(cs, tu6_stage2opcode(stage), 3 + immediate_size);
       tu_cs_emit(cs, CP_LOAD_STATE6_0_DST_OFF(base) |
                  CP_LOAD_STATE6_0_STATE_TYPE(ST6_CONSTANTS) |
@@ -1716,7 +1761,7 @@ tu6_emit_cs_config(struct tu_cs *cs,
    tu_cs_emit(cs, A6XX_SP_CS_CNTL_1_SHARED_SIZE(shared_size) |
                   A6XX_SP_CS_CNTL_1_CONSTANTRAMMODE(mode));
 
-   if (CHIP == A6XX && cs->device->physical_device->info->a6xx.has_lpac) {
+   if (CHIP == A6XX && cs->device->physical_device->info->props.has_lpac) {
       tu_cs_emit_pkt4(cs, REG_A6XX_HLSQ_CS_CTRL_REG1, 1);
       tu_cs_emit(cs, A6XX_HLSQ_CS_CTRL_REG1_SHARED_SIZE(shared_size) |
                      A6XX_HLSQ_CS_CTRL_REG1_CONSTANTRAMMODE(mode));
@@ -1733,7 +1778,7 @@ tu6_emit_cs_config(struct tu_cs *cs,
     * which is always set to THREAD128.
     */
    enum a6xx_threadsize thrsz = v->info.double_threadsize ? THREAD128 : THREAD64;
-   enum a6xx_threadsize thrsz_cs = cs->device->physical_device->info->a6xx
+   enum a6xx_threadsize thrsz_cs = cs->device->physical_device->info->props
       .supports_double_threadsize ? thrsz : THREAD128;
    if (CHIP == A6XX) {
       tu_cs_emit_pkt4(cs, REG_A6XX_SP_CS_CONST_CONFIG_0, 2);
@@ -1744,12 +1789,12 @@ tu6_emit_cs_config(struct tu_cs *cs,
                  A6XX_SP_CS_CONST_CONFIG_0_LOCALIDREGID(local_invocation_id));
       tu_cs_emit(cs, A6XX_SP_CS_WGE_CNTL_LINEARLOCALIDREGID(regid(63, 0)) |
                      A6XX_SP_CS_WGE_CNTL_THREADSIZE(thrsz_cs));
-      if (!cs->device->physical_device->info->a6xx.supports_double_threadsize) {
+      if (!cs->device->physical_device->info->props.supports_double_threadsize) {
          tu_cs_emit_pkt4(cs, REG_A6XX_SP_PS_WAVE_CNTL, 1);
          tu_cs_emit(cs, A6XX_SP_PS_WAVE_CNTL_THREADSIZE(thrsz));
       }
 
-      if (cs->device->physical_device->info->a6xx.has_lpac) {
+      if (cs->device->physical_device->info->props.has_lpac) {
          tu_cs_emit_pkt4(cs, REG_A6XX_SP_CS_WIE_CNTL_0, 2);
          tu_cs_emit(cs,
                     A6XX_SP_CS_WIE_CNTL_0_WGIDCONSTID(work_group_id) |
@@ -1904,7 +1949,7 @@ tu6_emit_fs_inputs(struct tu_cs *cs, const struct ir3_shader_variant *fs)
    tu_cs_emit_regs(cs,
       SP_LB_PARAM_LIMIT(CHIP,
          .primallocthreshold =
-            cs->device->physical_device->info->a6xx.prim_alloc_threshold),
+            cs->device->physical_device->info->props.prim_alloc_threshold),
       SP_REG_PROG_ID_0(CHIP, .faceregid = face_regid,
                          .sampleid = samp_id_regid,
                          .samplemask = smask_in_regid,
@@ -2141,7 +2186,7 @@ tu6_emit_vs(struct tu_cs *cs,
     * CP_EVENT_WRITE when multiview is disabled. I'm not exactly sure what
     * this is working around yet.
     */
-   if (cs->device->physical_device->info->a6xx.has_cp_reg_write) {
+   if (cs->device->physical_device->info->props.has_cp_reg_write) {
       tu_cs_emit_pkt7(cs, CP_REG_WRITE, 3);
       tu_cs_emit(cs, CP_REG_WRITE_0_TRACKER(UNK_EVENT_WRITE));
       tu_cs_emit(cs, REG_A6XX_PC_STEREO_RENDERING_CNTL);
@@ -2154,7 +2199,7 @@ tu6_emit_vs(struct tu_cs *cs,
    tu_cs_emit(cs, multiview_cntl);
 
    if (multiview_cntl &&
-       cs->device->physical_device->info->a6xx.supports_multiview_mask) {
+       cs->device->physical_device->info->props.supports_multiview_mask) {
       tu_cs_emit_pkt4(cs, REG_A6XX_PC_STEREO_RENDERING_VIEWMASK, 1);
       tu_cs_emit(cs, view_mask);
    }
@@ -3279,7 +3324,7 @@ tu_shader_key_subgroup_size(struct tu_shader_key *key,
                             struct tu_device *dev)
 {
    enum ir3_wavesize_option api_wavesize, real_wavesize;
-   if (!dev->physical_device->info->a6xx.supports_double_threadsize) {
+   if (!dev->physical_device->info->props.supports_double_threadsize) {
       api_wavesize = IR3_SINGLE_ONLY;
       real_wavesize = IR3_SINGLE_ONLY;
    } else {

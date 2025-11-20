@@ -1211,42 +1211,35 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
        nir->info.stage == MESA_SHADER_TASK)
       return;
 
-   bool lower_indirect_inputs =
-      nir->info.stage != MESA_SHADER_MESH &&
-      !(nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage));
-
-   /* Transform feedback requires that indirect outputs are lowered. */
-   bool lower_indirect_outputs =
-      !(nir->options->support_indirect_outputs & BITFIELD_BIT(nir->info.stage)) ||
-      nir->xfb_info;
-
-   /* TODO: This is a hack until a better solution is available.
-    * For all shaders except TCS, lower all outputs to temps because:
-    * - there can be output loads (nobody expects those outside of TCS)
-    * - drivers don't expect when an output is only written in control flow
-    *
-    * "lower_indirect_outputs = true" causes all outputs to be lowered to temps,
-    * which lowers indirect stores, eliminates output loads, and moves all
-    * output stores to the end or GS emits.
+   /* If the driver doesn't support indirect TCS output slot access, lower
+    * it to an if-else tree of direct accesses.
     */
-   if (nir->info.stage != MESA_SHADER_TESS_CTRL)
-      lower_indirect_outputs = true;
+   if (nir->info.stage == MESA_SHADER_TESS_CTRL &&
+       !(nir->options->support_indirect_outputs &
+         BITFIELD_BIT(nir->info.stage))) {
+      NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+               nir_var_shader_out, UINT32_MAX);
+   }
 
-   /* TODO: Sorting variables by location is required due to some bug
-    * in nir_lower_io_vars_to_temporaries. If variables are not sorted,
-    * dEQP-GLES31.functional.separate_shader.random.0 fails.
-    *
-    * This isn't needed if nir_assign_io_var_locations is called because it
-    * also sorts variables. However, if IO is lowered sooner than that, we
-    * must sort explicitly here to get what nir_assign_io_var_locations does.
+   /* For VS, TES, GS, FS: Always lower all outputs to temps, which:
+    * - lowers output loads (nobody expects those outside of TCS & MS)
+    * - lowers indirect output slot indexing (also XFB info can't be stored
+    *   in indirect IO intrinsics)
+    * - moves output stores to the end or GS emits
     */
-   unsigned varying_var_mask =
-      (nir->info.stage != MESA_SHADER_VERTEX &&
-       nir->info.stage != MESA_SHADER_MESH ? nir_var_shader_in : 0) |
-      (nir->info.stage != MESA_SHADER_FRAGMENT ? nir_var_shader_out : 0);
-   nir_sort_variables_by_location(nir, varying_var_mask);
+   if (nir->info.stage == MESA_SHADER_VERTEX ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL ||
+       nir->info.stage == MESA_SHADER_GEOMETRY ||
+       nir->info.stage == MESA_SHADER_FRAGMENT) {
+      /* TODO: Sorting variables by location is required due to some bug
+       * in nir_lower_io_vars_to_temporaries. If variables are not sorted,
+       * dEQP-GLES31.functional.separate_shader.random.0 fails.
+       */
+      unsigned varying_var_mask =
+         (nir->info.stage != MESA_SHADER_VERTEX ? nir_var_shader_in : 0) |
+         (nir->info.stage != MESA_SHADER_FRAGMENT ? nir_var_shader_out : 0);
+      nir_sort_variables_by_location(nir, varying_var_mask);
 
-   if (lower_indirect_outputs) {
       NIR_PASS(_, nir, nir_lower_io_vars_to_temporaries,
                nir_shader_get_entrypoint(nir), nir_var_shader_out);
 
@@ -1256,14 +1249,6 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
       NIR_PASS(_, nir, nir_split_var_copies);
       NIR_PASS(_, nir, nir_lower_var_copies);
       NIR_PASS(_, nir, nir_lower_global_vars_to_local);
-
-      /* This is partially redundant with nir_lower_io_vars_to_temporaries.
-       * The problem is that nir_lower_io_vars_to_temporaries doesn't handle TCS.
-       */
-      if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
-         NIR_PASS(_, nir, nir_lower_indirect_derefs, nir_var_shader_out,
-                  UINT32_MAX);
-      }
    }
 
    /* The correct lower_64bit_to_32 flag is required by st/mesa depending
@@ -1280,7 +1265,8 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
    NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in | nir_var_shader_out);
 
    /* This must be called after nir_io_add_const_offset_to_base. */
-   if (lower_indirect_inputs)
+   if (nir->info.stage != MESA_SHADER_MESH &&
+       !(nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage)))
       NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in);
 
    /* Lower and remove dead derefs and variables to clean up the IR. */
