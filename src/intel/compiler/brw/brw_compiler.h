@@ -249,8 +249,6 @@ enum brw_robustness_flags {
 };
 
 struct brw_base_prog_key {
-   unsigned program_string_id;
-
    /** Multiview mask
     *
     * Used to compute the number of position slots in the VUE
@@ -270,7 +268,7 @@ struct brw_base_prog_key {
     */
    bool limit_trig_input_range:1;
 
-   uint64_t padding:58;
+   uint32_t padding:26;
 };
 
 /**
@@ -332,7 +330,7 @@ struct brw_vs_prog_key {
     */
    bool no_vf_slot_compaction : 1;
 
-   uint64_t padding : 62;
+   uint32_t padding:30;
 };
 
 /** The program key for Tessellation Control Shaders. */
@@ -403,8 +401,6 @@ struct brw_mesh_prog_key
 struct brw_wm_prog_key {
    struct brw_base_prog_key base;
 
-   uint64_t input_slots_valid;
-
    float min_sample_shading;
 
    uint8_t color_outputs_valid;
@@ -464,7 +460,7 @@ struct brw_cs_prog_key {
     */
    bool lower_unaligned_dispatch:1;
 
-   uint64_t padding:63;
+   uint32_t padding:31;
 };
 
 struct brw_bs_prog_key {
@@ -475,8 +471,6 @@ struct brw_bs_prog_key {
     * shader.
     */
    uint32_t pipeline_ray_flags;
-
-   uint32_t padding;
 };
 
 /* brw_any_prog_key is any of the keys that map to an API stage */

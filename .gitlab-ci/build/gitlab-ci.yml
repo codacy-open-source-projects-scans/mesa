@@ -44,6 +44,7 @@ debian-x86_64:
       -D spirv-to-dxil=true
       -D tools=drm-shim
       -D valgrind=disabled
+      -D perfetto=true
     S3_ARTIFACT_NAME: mesa-x86_64-default-${BUILDTYPE}
     RUN_MESON_TESTS: "false"  # debian-build-x86_64 already runs these
   artifacts:
@@ -361,6 +362,7 @@ debian-android:
       -D android-libbacktrace=disabled
       -D mesa-clc=system
       -D precomp-compiler=system
+      -D perfetto=true
     GALLIUM_ST: >
       -D gallium-va=disabled
       -D gallium-rusticl=false
@@ -390,7 +392,7 @@ debian-android:
     - git clean -dxf .
     # aarch64 build:
     - export CROSS=aarch64-linux-android
-    - export GALLIUM_DRIVERS=etnaviv,freedreno,lima,panfrost,vc4,v3d
+    - export GALLIUM_DRIVERS=etnaviv,freedreno,lima,panfrost,vc4,v3d,zink
     - export VULKAN_DRIVERS=freedreno,broadcom,panfrost,virtio
     - export S3_ARTIFACT_NAME=mesa-arm64-android-${BUILDTYPE}
     - !reference [.meson-build-for-tests, script]
@@ -493,6 +495,7 @@ debian-arm64:
       -D imagination-srv=true
       -D freedreno-kmds=msm,virtio
       -D teflon=true
+      -D perfetto=true
     GALLIUM_ST:
       -D gallium-rusticl=true
     RUN_MESON_TESTS: "false"  # run by debian-arm64-build-testing

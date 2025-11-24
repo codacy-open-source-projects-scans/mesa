@@ -281,7 +281,7 @@ radv_sqtt_init_bo(struct radv_device *device)
    size += device->sqtt.buffer_size * (uint64_t)max_se;
 
    struct radeon_winsys_bo *bo = NULL;
-   result = radv_bo_create(device, NULL, size, 4096, RADEON_DOMAIN_VRAM,
+   result = radv_bo_create(device, NULL, size, 4096, RADEON_DOMAIN_GTT,
                            RADEON_FLAG_CPU_ACCESS | RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_ZERO_VRAM,
                            RADV_BO_PRIORITY_SCRATCH, 0, true, &bo);
    device->sqtt.bo = bo;
@@ -498,9 +498,9 @@ radv_begin_sqtt(struct radv_queue *queue)
    /* Enable SQG events that collects thread trace data. */
    ac_emit_cp_spi_config_cntl(cs.b, pdev->info.gfx_level, true);
 
-   radv_perfcounter_emit_reset(&cs, true);
-
    if (device->spm.bo) {
+      ac_emit_spm_reset(cs.b);
+
       /* Enable all shader stages by default. */
       radv_perfcounter_emit_shaders(device, &cs, ac_sqtt_get_shader_mask(&pdev->info));
 
@@ -512,7 +512,7 @@ radv_begin_sqtt(struct radv_queue *queue)
 
    if (device->spm.bo) {
       radeon_check_space(ws, cs.b, 8);
-      radv_perfcounter_emit_spm_start(device, &cs);
+      ac_emit_spm_start(cs.b, cs.hw_ip);
    }
 
    result = ws->cs_finalize(cs.b);
@@ -574,13 +574,14 @@ radv_end_sqtt(struct radv_queue *queue)
 
    if (device->spm.bo) {
       radeon_check_space(ws, cs.b, 8);
-      radv_perfcounter_emit_spm_stop(device, &cs);
+      ac_emit_spm_stop(cs.b, cs.hw_ip, &pdev->info);
    }
 
    /* Stop SQTT. */
    radv_emit_sqtt_stop(device, &cs);
 
-   radv_perfcounter_emit_reset(&cs, true);
+   if (device->spm.bo)
+      ac_emit_spm_reset(cs.b);
 
    /* Restore previous state by disabling SQG events. */
    ac_emit_cp_spi_config_cntl(cs.b, pdev->info.gfx_level, false);

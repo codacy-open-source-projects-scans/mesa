@@ -40,6 +40,14 @@
 #include "genX_mi_builder.h"
 #include "genX_cmd_draw_generated_flush.h"
 
+static void emit_pipe_control(struct anv_batch *batch,
+                              const struct intel_device_info *devinfo,
+                              uint32_t current_pipeline,
+                              uint32_t post_sync_op,
+                              struct anv_address address,
+                              uint32_t imm_data,
+                              enum anv_pipe_bits bits);
+
 static void genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
                                         uint32_t pipeline);
 
@@ -279,15 +287,16 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
     *
     * Render target cache flush before SBA is required by Wa_18039438632.
     */
-   genx_batch_emit_pipe_control(&cmd_buffer->batch, device->info,
-                                cmd_buffer->state.current_pipeline,
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch, device->info,
+                                 cmd_buffer->state.current_pipeline,
 #if GFX_VER >= 12
-                                ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
+                                 ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
 #else
-                                ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                                 ANV_PIPE_DATA_CACHE_FLUSH_BIT |
 #endif
-                                ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-                                ANV_PIPE_CS_STALL_BIT);
+                                 ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+                                 ANV_PIPE_CS_STALL_BIT,
+                                 "pre STATE_BASE_ADDRESS flush");
 
 #if INTEL_NEEDS_WA_1607854226
    /* Wa_1607854226:
@@ -365,9 +374,10 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
       (intel_needs_workaround(device->info, 16013000631) ?
        ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT : 0);
 
-   genx_batch_emit_pipe_control(&cmd_buffer->batch, device->info,
-                                cmd_buffer->state.current_pipeline,
-                                bits);
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch, device->info,
+                                 cmd_buffer->state.current_pipeline,
+                                 bits,
+                                 "Post STATE_BASE_ADDRESS invalidate");
 
    assert(cmd_buffer->state.current_db_mode !=
           ANV_CMD_DESCRIPTOR_BUFFER_MODE_UNKNOWN);
@@ -421,10 +431,11 @@ genX(cmd_buffer_emit_bt_pool_base_address)(struct anv_cmd_buffer *cmd_buffer)
     * Prior to do the invalidation, we need a CS_STALL to ensure that all work
     * using surface states has completed.
     */
-   genx_batch_emit_pipe_control(&cmd_buffer->batch,
-                                cmd_buffer->device->info,
-                                cmd_buffer->state.current_pipeline,
-                                ANV_PIPE_CS_STALL_BIT);
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch,
+                                 cmd_buffer->device->info,
+                                 cmd_buffer->state.current_pipeline,
+                                 ANV_PIPE_CS_STALL_BIT,
+                                 "pre BINDING_TABLE_POOL_ALLOC stall");
    anv_batch_emit(
       &cmd_buffer->batch, GENX(3DSTATE_BINDING_TABLE_POOL_ALLOC), btpa) {
       btpa.BindingTablePoolBaseAddress =
@@ -432,11 +443,12 @@ genX(cmd_buffer_emit_bt_pool_base_address)(struct anv_cmd_buffer *cmd_buffer)
       btpa.BindingTablePoolBufferSize = device->physical->va.binding_table_pool.size / 4096;
       btpa.MOCS = mocs;
    }
-   genx_batch_emit_pipe_control(&cmd_buffer->batch,
-                                cmd_buffer->device->info,
-                                cmd_buffer->state.current_pipeline,
-                                ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
-                                ANV_PIPE_STATE_CACHE_INVALIDATE_BIT);
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch,
+                                 cmd_buffer->device->info,
+                                 cmd_buffer->state.current_pipeline,
+                                 ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
+                                 ANV_PIPE_STATE_CACHE_INVALIDATE_BIT,
+                                 "post BINDING_TABLE_POOL_ALLOC invalidate");
 
 #else /* GFX_VERx10 < 125 */
    genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
@@ -1519,10 +1531,11 @@ genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
     * while the pipeline is completely drained and the caches are flushed,
     * which involves a first PIPE_CONTROL flush which stalls the pipeline...
     */
-   genx_batch_emit_pipe_control(&cmd_buffer->batch, cmd_buffer->device->info,
-                                cmd_buffer->state.current_pipeline,
-                                ANV_PIPE_DATA_CACHE_FLUSH_BIT |
-                                ANV_PIPE_CS_STALL_BIT);
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch, cmd_buffer->device->info,
+                                 cmd_buffer->state.current_pipeline,
+                                 ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                                 ANV_PIPE_CS_STALL_BIT,
+                                 "L3 config pc0");
 
    /* ...followed by a second pipelined PIPE_CONTROL that initiates
     * invalidation of the relevant caches.  Note that because RO invalidation
@@ -1538,20 +1551,22 @@ genX(cmd_buffer_config_l3)(struct anv_cmd_buffer *cmd_buffer,
     * already guarantee that there is no concurrent GPGPU kernel execution
     * (see SKL HSD 2132585).
     */
-   genx_batch_emit_pipe_control(&cmd_buffer->batch, cmd_buffer->device->info,
-                                cmd_buffer->state.current_pipeline,
-                                ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
-                                ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
-                                ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT |
-                                ANV_PIPE_STATE_CACHE_INVALIDATE_BIT);
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch, cmd_buffer->device->info,
+                                 cmd_buffer->state.current_pipeline,
+                                 ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT |
+                                 ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT |
+                                 ANV_PIPE_INSTRUCTION_CACHE_INVALIDATE_BIT |
+                                 ANV_PIPE_STATE_CACHE_INVALIDATE_BIT,
+                                 "L3 config pc1");
 
    /* Now send a third stalling flush to make sure that invalidation is
     * complete when the L3 configuration registers are modified.
     */
-   genx_batch_emit_pipe_control(&cmd_buffer->batch, cmd_buffer->device->info,
-                                cmd_buffer->state.current_pipeline,
-                                ANV_PIPE_DATA_CACHE_FLUSH_BIT |
-                                ANV_PIPE_CS_STALL_BIT);
+   genX(batch_emit_pipe_control)(&cmd_buffer->batch, cmd_buffer->device->info,
+                                 cmd_buffer->state.current_pipeline,
+                                 ANV_PIPE_DATA_CACHE_FLUSH_BIT |
+                                 ANV_PIPE_CS_STALL_BIT,
+                                 "L3 config pc2");
 
    genX(emit_l3_config)(&cmd_buffer->batch, cmd_buffer->device, cfg);
 #endif /* GFX_VER >= 11 */
@@ -1793,8 +1808,8 @@ genX(emit_apply_pipe_flushes)(struct anv_batch *batch,
       }
 
       /* Flush PC. */
-      genx_batch_emit_pipe_control_write(batch, device->info, current_pipeline,
-                                         sync_op, addr, 0, flush_bits);
+      emit_pipe_control(batch, device->info, current_pipeline,
+                        sync_op, addr, 0, flush_bits);
 
       /* If the caller wants to know what flushes have been emitted,
        * provide the bits based off the PIPE_CONTROL programmed bits.
@@ -1822,8 +1837,8 @@ genX(emit_apply_pipe_flushes)(struct anv_batch *batch,
       }
 
       /* Invalidate PC. */
-      genx_batch_emit_pipe_control_write(batch, device->info, current_pipeline,
-                                         sync_op, addr, 0, bits);
+      emit_pipe_control(batch, device->info, current_pipeline,
+                        sync_op, addr, 0, bits);
 
       genX(invalidate_aux_map)(batch, device, batch->engine_class, bits);
 
@@ -2425,8 +2440,7 @@ emit_pipe_control(struct anv_batch *batch,
                   uint32_t post_sync_op,
                   struct anv_address address,
                   uint32_t imm_data,
-                  enum anv_pipe_bits bits,
-                  const char *reason)
+                  enum anv_pipe_bits bits)
 {
    if ((batch->engine_class == INTEL_ENGINE_CLASS_COPY) ||
        (batch->engine_class == INTEL_ENGINE_CLASS_VIDEO))
@@ -2437,13 +2451,8 @@ emit_pipe_control(struct anv_batch *batch,
                ANV_PIPE_STALL_BITS |
                ANV_PIPE_INVALIDATE_BITS |
                ANV_PIPE_END_OF_PIPE_SYNC_BIT)) != 0;
-   if (trace_flush && batch->trace != NULL) {
-      // Store pipe control reasons if there is enough space
-      if (batch->pc_reasons_count < ARRAY_SIZE(batch->pc_reasons)) {
-         batch->pc_reasons[batch->pc_reasons_count++] = reason;
-      }
+   if (trace_flush && batch->trace != NULL)
       trace_intel_begin_stall(batch->trace);
-   }
 
    /* XXX - insert all workarounds and GFX specific things below. */
 
@@ -2455,9 +2464,8 @@ emit_pipe_control(struct anv_batch *batch,
     */
    if (intel_needs_workaround(devinfo, 1607156449) &&
        current_pipeline == GPGPU && post_sync_op != NoWrite) {
-      emit_pipe_control(batch, devinfo, current_pipeline,
-                        NoWrite, ANV_NULL_ADDRESS, 0,
-                        bits, "Wa_1607156449");
+      genX(batch_emit_pipe_control)(batch, devinfo, current_pipeline,
+                                    bits, "Wa_1607156449");
       bits = ANV_PIPE_CS_STALL_BIT;
    }
 #endif
@@ -2485,9 +2493,9 @@ emit_pipe_control(struct anv_batch *batch,
        batch->engine_class == INTEL_ENGINE_CLASS_RENDER &&
        current_pipeline == GPGPU &&
        post_sync_op != NoWrite) {
-      emit_pipe_control(batch, devinfo, current_pipeline,
-                        NoWrite, ANV_NULL_ADDRESS, 0,
-                        bits, "Wa_18040903259");
+      genX(batch_emit_pipe_control)(batch, devinfo, current_pipeline,
+                                    bits,
+                                    "Wa_18040903259");
       bits = ANV_PIPE_CS_STALL_BIT;
    }
 #endif
@@ -2608,7 +2616,7 @@ emit_pipe_control(struct anv_batch *batch,
       pipe.DestinationAddressType = DAT_PPGTT;
       pipe.ImmediateData = imm_data;
 
-      anv_debug_dump_pc(pipe, reason);
+      anv_debug_dump_pc(pipe, "emission");
    }
 
    if (trace_flush && batch->trace != NULL) {
@@ -2633,8 +2641,12 @@ genX(batch_emit_pipe_control)(struct anv_batch *batch,
                               enum anv_pipe_bits bits,
                               const char *reason)
 {
+   /* Store pipe control reasons if there is enough space */
+   if (reason != NULL &&
+       batch->pc_reasons_count < ARRAY_SIZE(batch->pc_reasons))
+      batch->pc_reasons[batch->pc_reasons_count++] = reason;
    emit_pipe_control(batch, devinfo, current_pipeline,
-                     NoWrite, ANV_NULL_ADDRESS, 0, bits, reason);
+                     NoWrite, ANV_NULL_ADDRESS, 0, bits);
 }
 
 void
@@ -2647,8 +2659,12 @@ genX(batch_emit_pipe_control_write)(struct anv_batch *batch,
                                     enum anv_pipe_bits bits,
                                     const char *reason)
 {
+   /* Store pipe control reasons if there is enough space */
+   if (reason != NULL &&
+       batch->pc_reasons_count < ARRAY_SIZE(batch->pc_reasons))
+      batch->pc_reasons[batch->pc_reasons_count++] = reason;
    emit_pipe_control(batch, devinfo, current_pipeline,
-                     post_sync_op, address, imm_data, bits, reason);
+                     post_sync_op, address, imm_data, bits);
 }
 
 /* Set preemption on/off. */
@@ -2668,8 +2684,9 @@ genX(batch_set_preemption)(struct anv_batch *batch,
    }
 
    /* Wa_16013994831 - we need to insert CS_STALL and 250 noops. */
-   genx_batch_emit_pipe_control(batch, device->info, current_pipeline,
-                                ANV_PIPE_CS_STALL_BIT);
+   genX(batch_emit_pipe_control)(batch, device->info, current_pipeline,
+                                 ANV_PIPE_CS_STALL_BIT,
+                                 "Wa_16013994831");
 
    for (unsigned i = 0; i < 250; i++)
       anv_batch_emit(batch, GENX(MI_NOOP), noop);
@@ -5334,10 +5351,11 @@ cmd_buffer_emit_depth_stencil(struct anv_cmd_buffer *cmd_buffer)
        * This also seems sufficient to handle Wa_14014097488 and
        * Wa_14016712196.
        */
-      genx_batch_emit_pipe_control_write(&cmd_buffer->batch, device->info,
-                                         cmd_buffer->state.current_pipeline,
-                                         WriteImmediateData,
-                                         device->workaround_address, 0, 0);
+      genX(batch_emit_pipe_control_write)(&cmd_buffer->batch, device->info,
+                                          cmd_buffer->state.current_pipeline,
+                                          WriteImmediateData,
+                                          device->workaround_address, 0, 0,
+                                          "Wa_1408224581/14014097488/14016712196");
    }
 
    if (info.depth_surf)
@@ -5386,10 +5404,11 @@ cmd_buffer_emit_cps_control_buffer(struct anv_cmd_buffer *cmd_buffer,
     * Emit dummy pipe control after state that sends implicit depth flush.
     */
    if (intel_needs_workaround(device->info, 14016712196)) {
-      genx_batch_emit_pipe_control_write(&cmd_buffer->batch, device->info,
-                                         cmd_buffer->state.current_pipeline,
-                                         WriteImmediateData,
-                                         device->workaround_address, 0, 0);
+      genX(batch_emit_pipe_control_write)(&cmd_buffer->batch, device->info,
+                                          cmd_buffer->state.current_pipeline,
+                                          WriteImmediateData,
+                                          device->workaround_address, 0, 0,
+                                          "Wa_14016712196");
    }
 
 #endif /* GFX_VERx10 >= 125 */
@@ -6231,12 +6250,13 @@ void genX(CmdSetEvent2)(
          pc_bits |= ANV_PIPE_CS_STALL_BIT;
       }
 
-      genx_batch_emit_pipe_control_write
+      genX(batch_emit_pipe_control_write)
          (&cmd_buffer->batch, cmd_buffer->device->info,
           cmd_buffer->state.current_pipeline, WriteImmediateData,
           anv_state_pool_state_address(&cmd_buffer->device->dynamic_state_pool,
                                        event->state),
-          VK_EVENT_SET, pc_bits);
+          VK_EVENT_SET, pc_bits,
+          "vkCmdSetEvent2");
       break;
    }
 
@@ -6276,13 +6296,14 @@ void genX(CmdResetEvent2)(
          pc_bits |= ANV_PIPE_CS_STALL_BIT;
       }
 
-      genx_batch_emit_pipe_control_write
+      genX(batch_emit_pipe_control_write)
          (&cmd_buffer->batch, cmd_buffer->device->info,
           cmd_buffer->state.current_pipeline, WriteImmediateData,
           anv_state_pool_state_address(&cmd_buffer->device->dynamic_state_pool,
                                        event->state),
           VK_EVENT_RESET,
-          pc_bits);
+          pc_bits,
+          "vkCmdResetEvent2");
       break;
    }
 

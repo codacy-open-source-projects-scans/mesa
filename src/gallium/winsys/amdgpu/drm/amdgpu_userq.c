@@ -58,14 +58,16 @@ amdgpu_userq_ring_init(struct amdgpu_winsys *aws, struct amdgpu_userq *userq,
    *userq->wptr_bo_map = 0;
    userq->next_wptr = 0;
 
-   userq->rptr_bo = amdgpu_bo_create(aws, aws->info.gart_page_size, 256, RADEON_DOMAIN_VRAM,
+   /* Allocate memory for rptr. */
+   userq->vram_bo = amdgpu_bo_create(aws, aws->info.gart_page_size, 256, RADEON_DOMAIN_VRAM,
                                      RADEON_FLAG_CLEAR_VRAM | RADEON_FLAG_GL2_BYPASS |
                                         RADEON_FLAG_NO_SUBALLOC |
                                         RADEON_FLAG_NO_INTERPROCESS_SHARING);
-   if (!userq->rptr_bo)
+   if (!userq->vram_bo)
       return false;
 
-   update_vm_timeline_point_to_wait(vm_timeline_point_to_wait, userq->rptr_bo);
+   update_vm_timeline_point_to_wait(vm_timeline_point_to_wait, userq->vram_bo);
+   userq->rptr_va = amdgpu_bo_get_va(userq->vram_bo);
    return true;
 }
 
@@ -77,7 +79,7 @@ amdgpu_userq_deinit(struct amdgpu_winsys *aws, struct amdgpu_userq *userq)
 
    radeon_bo_reference(&aws->dummy_sws.base, &userq->gtt_bo, NULL);
    radeon_bo_reference(&aws->dummy_sws.base, &userq->wptr_bo, NULL);
-   radeon_bo_reference(&aws->dummy_sws.base, &userq->rptr_bo, NULL);
+   radeon_bo_reference(&aws->dummy_sws.base, &userq->vram_bo, NULL);
    radeon_bo_reference(&aws->dummy_sws.base, &userq->doorbell_bo, NULL);
 
    switch (userq->ip_type) {
@@ -85,6 +87,7 @@ amdgpu_userq_deinit(struct amdgpu_winsys *aws, struct amdgpu_userq *userq)
       radeon_bo_reference(&aws->dummy_sws.base, &userq->gfx_data.csa_bo, NULL);
       radeon_bo_reference(&aws->dummy_sws.base, &userq->gfx_data.shadow_bo, NULL);
       radeon_bo_reference(&aws->dummy_sws.base, &userq->cs_preamble_ib_bo, NULL);
+      radeon_bo_reference(&aws->dummy_sws.base, &userq->f32_shadowing_ib_bo, NULL);
       break;
    case AMD_IP_COMPUTE:
       radeon_bo_reference(&aws->dummy_sws.base, &userq->compute_data.eop_bo, NULL);
@@ -206,8 +209,8 @@ amdgpu_userq_init(struct amdgpu_winsys *aws, struct amdgpu_userq *userq, enum am
       r = ac_drm_create_userqueue(aws->dev, hw_ip_type,
                                   get_real_bo(amdgpu_winsys_bo(userq->doorbell_bo))->kms_handle,
                                   AMDGPU_USERQ_DOORBELL_INDEX, ring_va, AMDGPU_USERQ_RING_SIZE,
-                                  amdgpu_bo_get_va(userq->wptr_bo), amdgpu_bo_get_va(userq->rptr_bo),
-                                  mqd, priority, &userq->userq_handle);
+                                  amdgpu_bo_get_va(userq->wptr_bo), userq->rptr_va, mqd, priority,
+                                  &userq->userq_handle);
       if (r == -EACCES && priority == AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_HIGH) {
          /* Try again with a lower priority. */
          priority = AMDGPU_USERQ_CREATE_FLAGS_QUEUE_PRIORITY_NORMAL_HIGH;
@@ -235,7 +238,7 @@ amdgpu_userq_submit_cs_preamble_ib_once(struct radeon_cmdbuf *rcs, struct ac_pm4
    struct amdgpu_cs *acs = amdgpu_cs(rcs);
    struct amdgpu_winsys *aws =  acs->aws;
    struct amdgpu_userq *userq = &aws->queues[acs->queue_index].userq;
-   uint64_t *cs_preamble_ib_bo_map;
+   uint8_t *cs_preamble_ib_bo_map;
 
    simple_mtx_lock(&userq->lock);
 
@@ -246,7 +249,6 @@ amdgpu_userq_submit_cs_preamble_ib_once(struct radeon_cmdbuf *rcs, struct ac_pm4
 
    userq->is_cs_preamble_ib_sent = true;
    assert(userq->ip_type == AMD_IP_GFX);
-   assert(!userq->next_wptr);
 
    userq->cs_preamble_ib_bo = amdgpu_bo_create(aws, pm4->ndw * 4, 256, RADEON_DOMAIN_GTT,
                                                   RADEON_FLAG_GL2_BYPASS |
@@ -277,7 +279,66 @@ amdgpu_userq_submit_cs_preamble_ib_once(struct radeon_cmdbuf *rcs, struct ac_pm4
    return true;
 }
 
+static bool
+amdgpu_userq_f32_init_reg_shadowing(struct radeon_cmdbuf *rcs, struct ac_pm4_state *pm4)
+{
+   struct amdgpu_cs *acs = amdgpu_cs(rcs);
+   struct amdgpu_winsys *aws =  acs->aws;
+   struct amdgpu_userq *userq = &aws->queues[acs->queue_index].userq;
+   uint8_t *shadowing_ib_bo_map;
+
+   simple_mtx_lock(&userq->lock);
+
+   if (userq->f32_is_shadowing_ib_initialized) {
+      simple_mtx_unlock(&userq->lock);
+      return true;
+   }
+
+   userq->f32_is_shadowing_ib_initialized = true;
+   assert(userq->ip_type == AMD_IP_GFX);
+   assert(!userq->next_wptr);
+
+   userq->f32_shadowing_ib_bo = amdgpu_bo_create(aws, pm4->ndw * 4, 256, RADEON_DOMAIN_VRAM,
+                                                 RADEON_FLAG_NO_INTERPROCESS_SHARING);
+   if (!userq->f32_shadowing_ib_bo) {
+      simple_mtx_unlock(&userq->lock);
+      return false;
+   }
+
+   shadowing_ib_bo_map = amdgpu_bo_map(&aws->dummy_sws.base, userq->f32_shadowing_ib_bo, NULL,
+                                       PIPE_MAP_READ | PIPE_MAP_WRITE | PIPE_MAP_UNSYNCHRONIZED);
+   if (!shadowing_ib_bo_map) {
+      simple_mtx_unlock(&userq->lock);
+      return false;
+   }
+
+   memcpy(shadowing_ib_bo_map, &pm4->pm4, pm4->ndw * 4);
+   userq->f32_shadowing_ib_pm4_dw = pm4->ndw;
+
+   amdgpu_pkt_begin();
+   amdgpu_pkt_add_dw(PKT3(PKT3_INDIRECT_BUFFER, 2, 0));
+   amdgpu_pkt_add_dw(amdgpu_bo_get_va(userq->f32_shadowing_ib_bo));
+   amdgpu_pkt_add_dw(amdgpu_bo_get_va(userq->f32_shadowing_ib_bo) >> 32);
+   amdgpu_pkt_add_dw(pm4->ndw | S_3F3_INHERIT_VMID_MQD_GFX(1));
+   amdgpu_pkt_end();
+
+   simple_mtx_unlock(&userq->lock);
+   return true;
+}
+
+static uint64_t
+amdgpu_userq_f32_get_shadow_regs_va(struct radeon_cmdbuf *rcs) {
+   struct amdgpu_cs *acs = amdgpu_cs(rcs);
+   struct amdgpu_winsys *aws =  acs->aws;
+   struct amdgpu_userq *userq = &aws->queues[acs->queue_index].userq;
+
+   assert(userq->ip_type == AMDGPU_HW_IP_GFX);
+   return amdgpu_bo_get_va(userq->gfx_data.shadow_bo);
+}
+
 void amdgpu_userq_init_functions(struct amdgpu_screen_winsys *sws)
 {
    sws->base.userq_submit_cs_preamble_ib_once = amdgpu_userq_submit_cs_preamble_ib_once;
+   sws->base.userq_f32_init_reg_shadowing = amdgpu_userq_f32_init_reg_shadowing;
+   sws->base.userq_f32_get_shadow_regs_va = amdgpu_userq_f32_get_shadow_regs_va;
 }

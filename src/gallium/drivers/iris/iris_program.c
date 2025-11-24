@@ -66,7 +66,6 @@ vue_layout(bool separate_shader)
    .prefix.limit_trig_input_range =                        \
       screen->driconf.limit_trig_input_range
 #define BRW_KEY_INIT(base_key, _vue_layout) \
-   .base.program_string_id = (base_key).program_string_id,     \
    .base.limit_trig_input_range = (base_key).limit_trig_input_range, \
    .base.vue_layout = _vue_layout
 
@@ -583,7 +582,6 @@ iris_to_brw_fs_key(const struct iris_screen *screen,
       .force_dual_color_blend = key->force_dual_color_blend,
       .coherent_fb_fetch = key->coherent_fb_fetch,
       .color_outputs_valid = key->color_outputs_valid,
-      .input_slots_valid = key->input_slots_valid,
       .ignore_sample_mask_out = !key->multisample_fbo,
       .null_push_constant_tbimr_workaround =
          screen->devinfo->needs_null_push_constant_tbimr_workaround,
