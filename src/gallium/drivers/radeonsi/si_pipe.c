@@ -1192,8 +1192,8 @@ static void si_disk_cache_create(struct si_screen *sscreen)
    _mesa_sha1_final(&ctx, sha1);
    mesa_bytes_to_hex(cache_id, sha1, 20);
 
-   sscreen->disk_shader_cache = disk_cache_create(sscreen->info.name, cache_id,
-                                                  sscreen->info.address32_hi);
+   sscreen->disk_shader_cache = disk_cache_create(ac_get_family_name(sscreen->info.family),
+                                                  cache_id, sscreen->info.address32_hi);
 }
 
 static void si_set_max_shader_compiler_threads(struct pipe_screen *screen, unsigned max_threads)
@@ -1285,6 +1285,14 @@ static void si_setup_force_shader_use_aco(struct si_screen *sscreen, bool suppor
    }
 
    fclose(f);
+}
+
+static bool
+is_pro_graphics(struct si_screen *sscreen)
+{
+   return  strstr(sscreen->info.marketing_name, "Pro") ||
+           strstr(sscreen->info.marketing_name, "PRO") ||
+           strstr(sscreen->info.marketing_name, "Frontier");
 }
 
 static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
@@ -1395,7 +1403,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
       sscreen->use_ngg = !(sscreen->debug_flags & DBG(NO_NGG)) &&
                          sscreen->info.gfx_level >= GFX10 &&
                          (sscreen->info.family != CHIP_NAVI14 ||
-                          sscreen->info.is_pro_graphics);
+                          is_pro_graphics(sscreen));
       sscreen->use_ngg_culling = sscreen->use_ngg &&
                                  sscreen->info.max_render_backends >= 2 &&
                                  !(sscreen->debug_flags & DBG(NO_NGG_CULLING));
@@ -1416,7 +1424,7 @@ static struct pipe_screen *radeonsi_screen_create_impl(struct radeon_winsys *ws,
    si_init_screen_caps(sscreen);
 
    if (sscreen->debug_flags & DBG(INFO))
-      ac_print_gpu_info(&sscreen->info, stdout);
+      ac_print_gpu_info(stdout, &sscreen->info, ws->get_fd(ws));
 
    slab_create_parent(&sscreen->pool_transfers, sizeof(struct si_transfer), 64);
 

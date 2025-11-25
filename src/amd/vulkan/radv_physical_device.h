@@ -241,7 +241,7 @@ radv_dedicated_sparse_queue_enabled(const struct radv_physical_device *pdev)
    /* Dedicated sparse queue requires VK_QUEUE_SUBMIT_MODE_THREADED, which is incompatible with
     * VK_DEVICE_TIMELINE_MODE_EMULATED. */
    return pdev->info.has_timeline_syncobj &&
-          pdev->info.has_sparse_vm_mappings;
+          pdev->info.has_sparse;
 }
 
 static inline bool
@@ -296,6 +296,12 @@ bool radv_enable_rt(const struct radv_physical_device *pdev);
 bool radv_emulate_rt(const struct radv_physical_device *pdev);
 
 bool radv_use_bvh8(const struct radv_physical_device *pdev);
+
+bool radv_is_dcc_disabled(const struct radv_physical_device *pdev);
+
+bool radv_are_dcc_stores_disabled(const struct radv_physical_device *pdev);
+
+bool radv_are_dcc_mips_disabled(const struct radv_physical_device *pdev);
 
 uint32_t radv_find_memory_index(const struct radv_physical_device *pdev, VkMemoryPropertyFlags flags);
 

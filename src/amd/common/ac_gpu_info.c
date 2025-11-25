@@ -455,10 +455,11 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    info->pci_rev_id = device_info.pci_rev;
    info->vce_harvest_config = device_info.vce_harvest_config;
 
+   info->family = CHIP_UNKNOWN;
+
 #define identify_chip2(asic, chipname)                                                             \
    if (ASICREV_IS(device_info.external_rev, asic)) {                                             \
       info->family = CHIP_##chipname;                                                              \
-      info->name = #chipname;                                                                      \
    }
 #define identify_chip(chipname) identify_chip2(chipname, chipname)
 
@@ -552,6 +553,12 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
          break;
       }
 
+      if (info->family == CHIP_UNKNOWN) {
+         fprintf(stderr, "amdgpu: unknown (family_id, chip_external_rev): (%u, %u)\n",
+               device_info.family, device_info.external_rev);
+         return AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW;
+      }
+
       if (info->ip[AMD_IP_GFX].ver_major == 12 && info->ip[AMD_IP_GFX].ver_minor == 0)
          info->gfx_level = GFX12;
       else if (info->ip[AMD_IP_GFX].ver_major == 11 && info->ip[AMD_IP_GFX].ver_minor == 5)
@@ -579,25 +586,9 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->family_id = device_info.family;
       info->chip_external_rev = device_info.external_rev;
       info->chip_rev = device_info.chip_rev;
-      info->marketing_name = ac_drm_get_marketing_name(dev);
-      info->is_pro_graphics = info->marketing_name && (strstr(info->marketing_name, "Pro") ||
-                                                       strstr(info->marketing_name, "PRO") ||
-                                                       strstr(info->marketing_name, "Frontier"));
+      const char *marketing_name = ac_drm_get_marketing_name(dev);
+      strncpy(info->marketing_name, marketing_name ? marketing_name : "AMD Unknown", sizeof(info->marketing_name));
    }
-
-   if (!info->name) {
-      fprintf(stderr, "amdgpu: unknown (family_id, chip_external_rev): (%u, %u)\n",
-              device_info.family, device_info.external_rev);
-      return AC_QUERY_GPU_INFO_UNIMPLEMENTED_HW;
-   }
-
-   memset(info->lowercase_name, 0, sizeof(info->lowercase_name));
-   for (unsigned i = 0; info->name[i] && i < ARRAY_SIZE(info->lowercase_name) - 1; i++)
-      info->lowercase_name[i] = tolower(info->name[i]);
-
-   char proc_fd[64];
-   snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%u", fd);
-   UNUSED int _result = readlink(proc_fd, info->dev_filename, sizeof(info->dev_filename));
 
 #define VCN_IP_VERSION(mj, mn, rv) (((mj) << 16) | ((mn) << 8) | (rv))
 
@@ -727,13 +718,18 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    ac_drm_query_has_vm_always_valid(dev, info);
    info->has_bo_metadata = true;
    info->has_eqaa_surface_allocator = info->gfx_level < GFX11;
+
    /* Disable sparse mappings on GFX6 due to VM faults in CP DMA. Enable them once
     * these faults are mitigated in software.
     * Disable sparse mappings on GFX7-8 due to GPU hangs in the VK CTS,
     * except Polaris where it happens to work "well enough".
     * Enable them when these are investigated and fixed in the driver.
     */
-   info->has_sparse_vm_mappings = info->family >= CHIP_POLARIS10;
+   info->has_sparse = info->family >= CHIP_POLARIS10;
+   info->has_sparse_image_3d = info->gfx_level >= GFX7;
+   info->has_sparse_image_standard_3d = info->gfx_level >= GFX9;
+   info->has_sparse_unaligned_mip_size = info->gfx_level >= GFX7;
+
    info->has_gang_submit = info->drm_minor >= 49;
    info->has_gpuvm_fault_query = info->drm_minor >= 55;
    info->has_tmz_support = device_info.ids_flags & AMDGPU_IDS_FLAGS_TMZ;
@@ -1068,10 +1064,10 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
     */
    info->has_attr_ring_wait_bug = info->gfx_level == GFX11 || info->gfx_level == GFX11_5;
 
-   /* On GFX8-9, CP DMA is broken with NULL PRT page, it doesn't read 0 and it
-    * doesn't discard writes which causes GPU hangs.
+   /* On GFX8-9, CP DMA doesn't support NULL PRT pages:
+    * it doesn't read 0 and doesn't discard writes, causing GPU hangs.
     */
-   info->has_cp_dma_with_null_prt_bug = info->family >= CHIP_POLARIS10 && info->gfx_level <= GFX9;
+   info->cp_dma_supports_sparse = info->gfx_level >= GFX10;
 
    /* When LLVM is fixed to handle multiparts shaders, this value will depend
     * on the known good versions of LLVM. Until then, enable the equivalent WA
@@ -1646,12 +1642,18 @@ void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t s
    uint_uuid[3] = info->pci.func;
 }
 
-void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
+void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
 {
    fprintf(f, "Device info:\n");
-   fprintf(f, "    name = %s\n", info->name);
+   fprintf(f, "    name = %s\n", ac_get_family_name(info->family));
    fprintf(f, "    marketing_name = %s\n", info->marketing_name);
-   fprintf(f, "    dev_filename = %s\n", info->dev_filename);
+
+   char proc_fd[32];
+   char dev_filename[32];
+   snprintf(proc_fd, sizeof(proc_fd), "/proc/self/fd/%u", fd);
+   if (readlink(proc_fd, dev_filename, sizeof(dev_filename)) != -1)
+      fprintf(f, "    dev_filename = %s\n", dev_filename);
+
    fprintf(f, "    num_se = %i\n", info->num_se);
    fprintf(f, "    num_rb = %i\n", info->num_rb);
    fprintf(f, "    num_cu = %i\n", info->num_cu);
@@ -1714,7 +1716,6 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
 
    fprintf(f, "Flags:\n");
    fprintf(f, "    family_overridden = %u\n", info->family_overridden);
-   fprintf(f, "    is_pro_graphics = %u\n", info->is_pro_graphics);
    fprintf(f, "    has_graphics = %i\n", info->has_graphics);
    fprintf(f, "    has_clear_state = %u\n", info->has_clear_state);
    fprintf(f, "    has_distributed_tess = %u\n", info->has_distributed_tess);
@@ -1847,7 +1848,7 @@ void ac_print_gpu_info(const struct radeon_info *info, FILE *f)
    fprintf(f, "    has_vm_always_valid = %u\n", info->has_vm_always_valid);
    fprintf(f, "    has_bo_metadata = %u\n", info->has_bo_metadata);
    fprintf(f, "    has_eqaa_surface_allocator = %u\n", info->has_eqaa_surface_allocator);
-   fprintf(f, "    has_sparse_vm_mappings = %u\n", info->has_sparse_vm_mappings);
+   fprintf(f, "    has_sparse = %u\n", info->has_sparse);
    fprintf(f, "    has_stable_pstate = %u\n", info->has_stable_pstate);
    fprintf(f, "    has_gang_submit = %u\n", info->has_gang_submit);
    fprintf(f, "    has_gpuvm_fault_query = %u\n", info->has_gpuvm_fault_query);

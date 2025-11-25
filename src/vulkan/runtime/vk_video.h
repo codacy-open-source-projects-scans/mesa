@@ -56,7 +56,7 @@ struct vk_video_h265_sps {
    StdVideoH265ProfileTierLevel tier_level;
    StdVideoH265DecPicBufMgr dec_pic_buf_mgr;
    StdVideoH265ScalingLists scaling_lists;
-   StdVideoH265ShortTermRefPicSet short_term_ref_pic_set;
+   StdVideoH265ShortTermRefPicSet short_term_ref_pic_set[STD_VIDEO_H265_MAX_SHORT_TERM_REF_PIC_SETS];
    StdVideoH265LongTermRefPicsSps long_term_ref_pics_sps;
    StdVideoH265SubLayerHrdParameters hrd_parameters_nal;
    StdVideoH265SubLayerHrdParameters hrd_parameters_vcl;
@@ -304,6 +304,7 @@ struct vk_video_h265_reference {
    StdVideoDecodeH265ReferenceInfoFlags flags;
    uint32_t slot_index;
    int32_t pic_order_cnt;
+   bool lt;
 };
 
 int vk_video_h265_poc_by_slot(const struct VkVideoDecodeInfoKHR *frame_info, int slot);

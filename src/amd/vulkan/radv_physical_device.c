@@ -75,6 +75,15 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
           pdev->info.has_gang_submit;
 }
 
+static bool
+radv_sparse_enabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return pdev->info.has_sparse ||
+          (instance->perftest_flags & RADV_PERFTEST_SPARSE);
+}
+
 bool
 radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
 {
@@ -211,6 +220,30 @@ radv_use_bvh8(const struct radv_physical_device *pdev)
    return pdev->info.gfx_level >= GFX12 && !radv_emulate_rt(pdev) && !(instance->debug_flags & RADV_DEBUG_BVH4);
 }
 
+bool
+radv_is_dcc_disabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return instance->debug_flags & RADV_DEBUG_NO_DCC ||
+          (instance->drirc.debug.disable_dcc && pdev->info.gfx_level < GFX12);
+}
+
+bool
+radv_are_dcc_stores_disabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return instance->drirc.debug.disable_dcc_stores && pdev->info.gfx_level < GFX12;
+}
+
+bool
+radv_are_dcc_mips_disabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return instance->drirc.debug.disable_dcc_mips && pdev->info.gfx_level < GFX12;
+}
 static void
 parse_hex(char *out, const char *in, unsigned length)
 {
@@ -830,6 +863,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
    bool has_shader_image_float_minmax = pdev->info.gfx_level != GFX8 && pdev->info.gfx_level != GFX9 &&
                                         pdev->info.gfx_level != GFX11 && pdev->info.gfx_level != GFX11_5;
    bool has_fragment_shader_interlock = radv_has_pops(pdev);
+   const bool enable_sparse = radv_sparse_enabled(pdev);
 
    *features = (struct vk_features){
       /* Vulkan 1.0 */
@@ -875,14 +909,14 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderFloat64 = true,
       .shaderInt64 = true,
       .shaderInt16 = true,
-      .sparseBinding = pdev->info.has_sparse_vm_mappings,
-      .sparseResidencyBuffer = pdev->info.family >= CHIP_POLARIS10,
-      .sparseResidencyImage2D = pdev->info.family >= CHIP_POLARIS10,
-      .sparseResidencyImage3D = pdev->info.family >= CHIP_POLARIS10,
-      .sparseResidencyAliased = pdev->info.family >= CHIP_POLARIS10,
+      .sparseBinding = enable_sparse,
+      .sparseResidencyBuffer = enable_sparse,
+      .sparseResidencyImage2D = enable_sparse,
+      .sparseResidencyImage3D = enable_sparse && pdev->info.has_sparse_image_3d,
+      .sparseResidencyAliased = enable_sparse,
       .variableMultisampleRate = true,
-      .shaderResourceMinLod = true,
-      .shaderResourceResidency = true,
+      .shaderResourceMinLod = enable_sparse,
+      .shaderResourceResidency = enable_sparse,
       .inheritedQueries = true,
 
       /* Vulkan 1.1 */
@@ -1062,8 +1096,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderSharedFloat64AtomicAdd = false,
       .shaderImageFloat32Atomics = true,
       .shaderImageFloat32AtomicAdd = pdev->info.gfx_level >= GFX12 && !pdev->use_llvm,
-      .sparseImageFloat32Atomics = true,
-      .sparseImageFloat32AtomicAdd = pdev->info.gfx_level >= GFX12 && !pdev->use_llvm,
+      .sparseImageFloat32Atomics = enable_sparse,
+      .sparseImageFloat32AtomicAdd = enable_sparse && pdev->info.gfx_level >= GFX12 && !pdev->use_llvm,
 
       /* VK_EXT_4444_formats */
       .formatA4R4G4B4 = true,
@@ -1071,7 +1105,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_EXT_shader_image_atomic_int64 */
       .shaderImageInt64Atomics = true,
-      .sparseImageInt64Atomics = true,
+      .sparseImageInt64Atomics = enable_sparse,
 
       /* VK_EXT_mutable_descriptor_type */
       .mutableDescriptorType = true,
@@ -1135,7 +1169,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderSharedFloat32AtomicMinMax = true,
       .shaderSharedFloat64AtomicMinMax = true,
       .shaderImageFloat32AtomicMinMax = has_shader_image_float_minmax,
-      .sparseImageFloat32AtomicMinMax = has_shader_image_float_minmax,
+      .sparseImageFloat32AtomicMinMax = enable_sparse && has_shader_image_float_minmax,
 
 #ifdef RADV_USE_WSI_PLATFORM
       /* VK_KHR_present_id */
@@ -1541,6 +1575,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
    }
 
    const bool has_fp16 = radv_shader_fp16_enabled(pdev);
+   const bool enable_sparse = radv_sparse_enabled(pdev);
 
    VkShaderStageFlags taskmesh_stages =
       radv_taskmesh_enabled(pdev) ? VK_SHADER_STAGE_MESH_BIT_EXT | VK_SHADER_STAGE_TASK_BIT_EXT : 0;
@@ -1580,7 +1615,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxMemoryAllocationCount = UINT32_MAX,
       .maxSamplerAllocationCount = 64 * 1024,
       .bufferImageGranularity = 1,
-      .sparseAddressSpaceSize = pdev->info.has_sparse_vm_mappings ? pdev->info.virtual_address_max : 0,
+      .sparseAddressSpaceSize = enable_sparse ? pdev->info.virtual_address_max : 0,
       .maxBoundDescriptorSets = MAX_SETS,
       .maxPerStageDescriptorSamplers = max_descriptor_set_size,
       .maxPerStageDescriptorUniformBuffers = max_descriptor_set_size,
@@ -1674,9 +1709,10 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .optimalBufferCopyOffsetAlignment = 1,
       .optimalBufferCopyRowPitchAlignment = 1,
       .nonCoherentAtomSize = 64,
-      .sparseResidencyNonResidentStrict = pdev->info.family >= CHIP_POLARIS10,
-      .sparseResidencyStandard2DBlockShape = pdev->info.family >= CHIP_POLARIS10,
-      .sparseResidencyStandard3DBlockShape = pdev->info.gfx_level >= GFX9,
+      .sparseResidencyNonResidentStrict = enable_sparse,
+      .sparseResidencyAlignedMipSize = enable_sparse && !pdev->info.has_sparse_unaligned_mip_size,
+      .sparseResidencyStandard2DBlockShape = enable_sparse,
+      .sparseResidencyStandard3DBlockShape = enable_sparse && pdev->info.has_sparse_image_standard_3d,
 
       /* Vulkan 1.1 */
       .driverID = VK_DRIVER_ID_MESA_RADV,
@@ -2105,7 +2141,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .deviceGeneratedCommandsMultiDrawIndirectCount = true,
 
       /* VK_KHR_maintenance9 */
-      .image2DViewOf3DSparse = pdev->info.gfx_level >= GFX8,
+      .image2DViewOf3DSparse = enable_sparse && pdev->info.has_sparse_image_3d,
       .defaultVertexAttributeValue = VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ZERO_KHR,
 
       /* VK_NV_cooperative_matrix2 */
@@ -2326,7 +2362,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       /* Allow all devices on a virtual winsys, otherwise do a basic support check. */
       if (!radv_is_gpu_supported(&pdev->info)) {
          if (instance->debug_flags & RADV_DEBUG_STARTUP)
-            fprintf(stderr, "radv: info: device '%s' is not supported by RADV.\n", pdev->info.name);
+            fprintf(stderr, "radv: info: device '%s' is not supported by RADV.\n",
+                    ac_get_family_name(pdev->info.family));
          result = VK_ERROR_INCOMPATIBLE_DRIVER;
          goto fail_wsi;
       }
@@ -2358,9 +2395,9 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    pdev->emulate_astc = instance->drirc.features.vk_require_astc;
 #endif
 
-   snprintf(pdev->name, sizeof(pdev->name), "AMD RADV %s%s", pdev->info.name, radv_get_compiler_string(pdev));
-   snprintf(pdev->marketing_name, sizeof(pdev->name), "%s (RADV %s%s)",
-            pdev->info.marketing_name ? pdev->info.marketing_name : "AMD Unknown", pdev->info.name,
+   const char *name = ac_get_family_name(pdev->info.family);
+   snprintf(pdev->name, sizeof(pdev->name), "AMD RADV %s%s", name, radv_get_compiler_string(pdev));
+   snprintf(pdev->marketing_name, sizeof(pdev->name), "%s (RADV %s%s)", pdev->info.marketing_name, name,
             radv_get_compiler_string(pdev));
 
    if (pdev->info.gfx_level >= GFX12)
@@ -2435,7 +2472,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
       if (instance->perftest_flags & RADV_PERFTEST_RT_WAVE_32 || pdev->info.gfx_level < GFX11)
          pdev->rt_wave_size = 32;
 
-      if (instance->perftest_flags & RADV_PERFTEST_RT_WAVE_64)
+      if (radv_is_rt_wave64_enabled(instance))
          pdev->rt_wave_size = 64;
    }
 
@@ -2494,7 +2531,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    radv_get_physical_device_properties(pdev);
 
    if ((instance->debug_flags & RADV_DEBUG_INFO))
-      ac_print_gpu_info(&pdev->info, stdout);
+      ac_print_gpu_info(stdout, &pdev->info, pdev->local_fd);
 
    radv_init_physical_device_decoder(pdev);
    radv_init_physical_device_encoder(pdev);

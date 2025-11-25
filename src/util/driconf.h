@@ -367,6 +367,9 @@
    DRI_CONF_OPT_B(intel_sampler_route_to_lsc, def, \
                   "Intel specific toggle to enable sampler route to LSC")
 
+#define DRI_CONF_INTEL_DISABLE_THREADED_CONTEXT(def) \
+   DRI_CONF_OPT_B(intel_disable_threaded_context, def, "Disable threaded context")
+
 #define DRI_CONF_VK_REQUIRE_ETC2(def) \
   DRI_CONF_OPT_B(vk_require_etc2, def, \
                  "Implement emulated ETC2 on HW that does not support it")
@@ -720,11 +723,11 @@
 
 #define DRI_CONF_RADV_DISABLE_DCC(def) \
    DRI_CONF_OPT_B(radv_disable_dcc, def, \
-                  "Disable DCC for color images")
+                  "Disable DCC for color images on GFX8-GFX11.5")
 
 #define DRI_CONF_RADV_DISABLE_DCC_MIPS(def) \
    DRI_CONF_OPT_B(radv_disable_dcc_mips, def, \
-                  "Disable DCC for color images with mips")
+                  "Disable DCC for color images with mips on GFX8-GFX11.5")
 
 #define DRI_CONF_RADV_DISABLE_DCC_STORES(def) \
    DRI_CONF_OPT_B(radv_disable_dcc_stores, def, \
