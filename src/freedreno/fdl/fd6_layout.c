@@ -157,7 +157,11 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
 
    assert(!params->force_ubwc || layout->ubwc);
 
-   if (!params->force_ubwc && params->width0 < FDL_MIN_UBWC_WIDTH) {
+   layout->linear_fallback_threshold_texels =
+      fdl_linear_fallback_threshold_texels(layout, info);
+
+   if (!params->force_ubwc &&
+       layout->width0 < layout->linear_fallback_threshold_texels) {
       layout->ubwc = false;
       /* Linear D/S is not supported by HW. */
       if (!util_format_is_depth_or_stencil(params->format))
@@ -170,6 +174,11 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
 
    if (layout->ubwc && !info->props.has_ubwc_linear_mipmap_fallback)
       layout->tile_all = true;
+
+   if (layout->tile_mode != TILE6_LINEAR &&
+       params->force_disable_linear_fallback) {
+      layout->tile_all = true;
+   }
 
    /* in layer_first layout, the level (slice) contains just one
     * layer (since in fact the layer contains the slices)

@@ -8,7 +8,7 @@
  */
 #include "hk_shader.h"
 
-#include "poly/nir/poly_nir_lower_gs.h"
+#include "poly/nir/poly_nir.h"
 #include "agx_debug.h"
 #include "agx_device.h"
 #include "agx_helpers.h"
@@ -1153,7 +1153,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    shader->info.set_count = set_count;
 
    /* XXX: rename */
-   NIR_PASS(_, nir, hk_lower_uvs_index, nr_vbos);
+   NIR_PASS(_, nir, hk_lower_uvs_index, sw_stage, nr_vbos);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
             nir_metadata_control_flow, &root);
 

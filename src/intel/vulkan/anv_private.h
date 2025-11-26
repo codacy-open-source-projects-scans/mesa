@@ -2173,6 +2173,7 @@ struct anv_gfx_dynamic_state {
    /* 3DSTATE_TE */
    struct {
       uint32_t TEDomain;
+      uint32_t PatchHeaderLayout;
       uint32_t Partitioning;
       uint32_t OutputTopology;
       uint32_t TessellationDistributionMode;
@@ -5611,7 +5612,6 @@ struct anv_image {
    struct anv_image_binding {
       struct anv_image_memory_range memory_range;
       struct anv_address address;
-      struct anv_sparse_binding_data sparse_data;
       void *host_map;
       uint64_t map_delta;
       uint64_t map_size;
@@ -5660,6 +5660,8 @@ struct anv_image {
       } aux_tt;
    } planes[3];
 
+   struct anv_sparse_binding_data sparse_data;
+
    /* Array pitch of video coding private surfaces */
    uint32_t vid_dmv_top_surface_pitch_B;
    uint32_t av1_cdf_table_pitch_B;
@@ -5674,7 +5676,7 @@ struct anv_image {
 };
 
 struct anv_image_opaque_capture_data {
-   uint64_t planes[3];
+   uint64_t main_binding;
    uint64_t private_binding;
 };
 

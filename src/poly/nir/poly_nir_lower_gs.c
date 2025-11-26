@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "poly/nir/poly_nir_lower_gs.h"
+#include "poly/nir/poly_nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "gallium/include/pipe/p_defines.h"
 #include "poly/cl/libpoly.h"
@@ -170,6 +170,23 @@ struct lower_gs_state {
    struct poly_gs_info *info;
 };
 
+/* Helpers for loading from the vertex state buffer */
+static nir_def *
+load_vertex_param_offset(nir_builder *b, uint32_t offset, uint8_t bytes)
+{
+   nir_def *base = nir_load_vertex_param_buffer_poly(b);
+   nir_def *addr = nir_iadd_imm(b, base, offset);
+
+   assert((offset % bytes) == 0 && "must be naturally aligned");
+
+   return nir_load_global_constant(b, 1, bytes * 8, addr);
+}
+
+#define load_vertex_param(b, field)                                            \
+   load_vertex_param_offset(                                                   \
+      b, offsetof(struct poly_vertex_params, field),                           \
+      sizeof(((struct poly_vertex_params *)0)->field))
+
 /* Helpers for loading from the geometry state buffer */
 static nir_def *
 load_geometry_param_offset(nir_builder *b, uint32_t offset, uint8_t bytes)
@@ -249,7 +266,7 @@ vertex_id_for_topology_class(nir_builder *b, nir_def *vert, enum mesa_prim cls)
 {
    nir_def *prim = nir_load_primitive_id(b);
    nir_def *flatshade_first = nir_ieq_imm(b, nir_load_provoking_last(b), 0);
-   nir_def *nr = load_geometry_param(b, gs_grid[0]);
+   nir_def *nr = load_geometry_param(b, grid[0]);
    nir_def *topology = nir_load_input_topology_poly(b);
 
    switch (cls) {
@@ -285,18 +302,20 @@ poly_load_per_vertex_input(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *location = nir_iadd_imm(b, intr->src[1].ssa, sem.location);
    nir_def *addr;
 
+   nir_def *vp = nir_load_vertex_param_buffer_poly(b);
+
+   nir_def *input_mask;
    if (b->shader->info.stage == MESA_SHADER_GEOMETRY) {
       /* GS may be preceded by VS or TES so specified as param */
-      addr = poly_geometry_input_address(
-         b, nir_load_geometry_param_buffer_poly(b), vertex, location);
+      input_mask = poly_vertex_outputs(b, vp);
    } else {
       assert(b->shader->info.stage == MESA_SHADER_TESS_CTRL);
 
       /* TCS always preceded by VS so we use the VS state directly */
-      addr = poly_vertex_output_address(b, nir_load_vs_output_buffer_poly(b),
-                                        nir_load_vs_outputs_poly(b), vertex,
-                                        location);
+      input_mask = nir_load_vs_outputs_poly(b);
    }
+
+   addr = poly_vertex_output_address(b, vp, input_mask, vertex, location);
 
    addr = nir_iadd_imm(b, addr, 4 * nir_intrinsic_component(intr));
    return nir_load_global_constant(b, intr->def.num_components,
@@ -316,7 +335,7 @@ lower_gs_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *_)
    nir_def *vertex = vertex_id_for_topology_class(
       b, vert_in_prim, b->shader->info.gs.input_primitive);
 
-   nir_def *verts = load_geometry_param(b, vs_grid[0]);
+   nir_def *verts = load_vertex_param(b, grid[0]);
    nir_def *unrolled =
       nir_iadd(b, nir_imul(b, nir_load_instance_id(b), verts), vertex);
 
@@ -333,7 +352,7 @@ static nir_def *
 calc_unrolled_id(nir_builder *b)
 {
    return nir_iadd(
-      b, nir_imul(b, load_instance_id(b), load_geometry_param(b, gs_grid[0])),
+      b, nir_imul(b, load_instance_id(b), load_geometry_param(b, grid[0])),
       load_primitive_id(b));
 }
 
@@ -671,7 +690,7 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
 
    case POLY_GS_SHAPE_STATIC_INDEXED:
    case POLY_GS_SHAPE_STATIC_PER_PRIM: {
-      nir_def *stride = load_geometry_param(b, gs_grid[0]);
+      nir_def *stride = load_geometry_param(b, grid[0]);
 
       rs.output_id = raw_vertex_id;
       rs.instance_id = nir_udiv(b, rs.raw_instance_id, stride);
@@ -726,7 +745,7 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
       struct nir_xfb_info *xfb = gs->xfb_info;
 
       nir_def *unrolled = nir_iadd(
-         b, nir_imul(b, rs.instance_id, load_geometry_param(b, gs_grid[0])),
+         b, nir_imul(b, rs.instance_id, load_geometry_param(b, grid[0])),
          rs.primitive_id);
 
       nir_def *n = nir_imm_int(b, n_);
@@ -1401,18 +1420,13 @@ lower_vs_before_gs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
    nir_def *location = nir_iadd_imm(b, intr->src[1].ssa, sem.location);
 
-   nir_def *buffer, *nr_verts, *instance_id, *primitive_id;
-   if (b->shader->info.stage == MESA_SHADER_VERTEX) {
-      buffer = nir_load_vs_output_buffer_poly(b);
-      nr_verts = poly_input_vertices(b, nir_load_input_assembly_buffer_poly(b));
-   } else {
-      assert(b->shader->info.stage == MESA_SHADER_TESS_EVAL);
+   nir_def *vp = nir_load_vertex_param_buffer_poly(b);
 
-      /* Instancing is unrolled during tessellation so nr_verts is ignored. */
-      nr_verts = nir_imm_int(b, 0);
-      buffer = poly_tes_buffer(b, nir_load_tess_param_buffer_poly(b));
-   }
+   /* Instancing is unrolled during tessellation so nr_verts is ignored. */
+   nir_def *nr_verts = b->shader->info.stage == MESA_SHADER_VERTEX ?
+                       poly_input_vertices(b, vp) : nir_imm_int(b, 0);
 
+   nir_def *instance_id, *primitive_id;
    if (b->shader->info.stage == MESA_SHADER_VERTEX &&
        !b->shader->info.vs.tes_poly) {
       primitive_id = nir_load_vertex_id_zero_base(b);
@@ -1426,7 +1440,7 @@ lower_vs_before_gs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_iadd(b, nir_imul(b, instance_id, nr_verts), primitive_id);
 
    nir_def *addr = poly_vertex_output_address(
-      b, buffer, nir_imm_int64(b, b->shader->info.outputs_written), linear_id,
+      b, vp, nir_imm_int64(b, b->shader->info.outputs_written), linear_id,
       location);
 
    assert(nir_src_bit_size(intr->src[0]) == 32);

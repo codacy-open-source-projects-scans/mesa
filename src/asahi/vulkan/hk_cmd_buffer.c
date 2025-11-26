@@ -144,7 +144,6 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->current_cs.pre_gfx = NULL;
 
    assert(!cmd->in_meta);
-   cmd->geom_indirect = 0;
    cmd->geom_index_buffer = 0;
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
@@ -723,8 +722,8 @@ hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 
       if (linked->sw_indexing) {
          agx_usc_uniform(
-            &b, AGX_ABI_VUNI_INPUT_ASSEMBLY(count), 4,
-            root_ptr + hk_root_descriptor_offset(draw.input_assembly));
+            &b, AGX_ABI_VUNI_VERTEX_PARAMS(count), 4,
+            root_ptr + hk_root_descriptor_offset(draw.vertex_params));
       }
 
       root_unif = AGX_ABI_VUNI_COUNT_VK(count);

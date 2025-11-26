@@ -4997,7 +4997,7 @@ void _nir_assert_no_progress(bool progress, const char *when);
    } while (0)
 
 #else
-#define NIR_ASSERT_PASS_NO_PROGRESS(nir, pass, ...)
+#define NIR_PASS_ASSERT_NO_PROGRESS(nir, pass, ...)
 #endif
 
 /** An instruction filtering callback with writemask
@@ -6092,7 +6092,7 @@ bool nir_lower_wpos_center(nir_shader *shader);
 bool nir_lower_pntc_ytransform(nir_shader *shader,
                                const gl_state_index16 clipplane_state_tokens[][STATE_LENGTH]);
 
-bool nir_lower_wrmasks(nir_shader *shader, nir_instr_filter_cb cb, const void *data);
+bool nir_lower_wrmasks(nir_shader *shader);
 
 bool nir_lower_fb_read(nir_shader *shader);
 

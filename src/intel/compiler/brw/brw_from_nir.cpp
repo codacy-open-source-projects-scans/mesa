@@ -2170,6 +2170,11 @@ emit_pixel_interpolater_alu_at_offset(const brw_builder &bld,
    const brw_reg off_y = bld.vgrf(BRW_TYPE_F);
    bld.ADD(off_y, offset(offs, bld, 1), brw_imm_f(0.5));
 
+   const brw_reg pixel_x = bld.vgrf(BRW_TYPE_F);
+   bld.MOV(pixel_x, shader->uw_pixel_x);
+   const brw_reg pixel_y = bld.vgrf(BRW_TYPE_F);
+   bld.MOV(pixel_y, shader->uw_pixel_y);
+
    /* Process no more than two polygons at a time to avoid hitting
     * regioning restrictions.
     */
@@ -2212,11 +2217,11 @@ emit_pixel_interpolater_alu_at_offset(const brw_builder &bld,
 
       /* Compute X/Y coordinate deltas relative to the origin of the polygon. */
       const brw_reg delta_x = ibld.vgrf(BRW_TYPE_F);
-      ibld.ADD(delta_x, offset(shader->pixel_x, ibld, i), negate(start_x));
+      ibld.ADD(delta_x, offset(pixel_x, ibld, i), negate(start_x));
       ibld.ADD(delta_x, delta_x, offset(off_x, ibld, i));
 
       const brw_reg delta_y = ibld.vgrf(BRW_TYPE_F);
-      ibld.ADD(delta_y, offset(shader->pixel_y, ibld, i), negate(start_y));
+      ibld.ADD(delta_y, offset(pixel_y, ibld, i), negate(start_y));
       ibld.ADD(delta_y, delta_y, offset(off_y, ibld, i));
 
       /* Evaluate the plane equations obtained above for the
@@ -2839,30 +2844,6 @@ emit_gs_input_load(nir_to_brw_state &ntb, const brw_reg &dst,
       urb->offset *= 16;
 }
 
-static brw_reg
-get_indirect_offset(nir_to_brw_state &ntb, nir_intrinsic_instr *instr)
-{
-   const intel_device_info *devinfo = ntb.devinfo;
-   nir_src *offset_src = nir_get_io_offset_src(instr);
-
-   if (nir_src_is_const(*offset_src)) {
-      /* The only constant offset we should find is 0.  brw_nir.c's
-       * add_const_offset_to_base() will fold other constant offsets
-       * into the "base" index.
-       */
-      assert(nir_src_as_uint(*offset_src) == 0);
-      return brw_reg();
-   }
-
-   brw_reg offset = get_nir_src(ntb, *offset_src, 0);
-
-   if (devinfo->ver < 20)
-      return offset;
-
-   /* Convert Owords (16-bytes) to bytes */
-   return ntb.bld.SHL(retype(offset, BRW_TYPE_UD), brw_imm_ud(4u));
-}
-
 static void
 brw_from_nir_emit_vs_intrinsic(nir_to_brw_state &ntb,
                          nir_intrinsic_instr *instr)
@@ -3104,7 +3085,6 @@ static void
 brw_from_nir_emit_tcs_intrinsic(nir_to_brw_state &ntb,
                           nir_intrinsic_instr *instr)
 {
-   const intel_device_info *devinfo = ntb.devinfo;
    const brw_builder &bld = ntb.bld;
    brw_shader &s = ntb.s;
 
@@ -3133,180 +3113,20 @@ brw_from_nir_emit_tcs_intrinsic(nir_to_brw_state &ntb,
       }
       break;
 
-   case nir_intrinsic_load_input:
-      UNREACHABLE("nir_lower_io should never give us these.");
-      break;
-
-   case nir_intrinsic_load_per_vertex_input: {
-      assert(instr->def.bit_size == 32);
-      brw_reg indirect_offset = get_indirect_offset(ntb, instr);
-      unsigned imm_offset = nir_intrinsic_base(instr);
-      brw_urb_inst *urb;
-
+   case nir_intrinsic_load_urb_input_handle_indexed_intel: {
       const bool multi_patch =
          vue_prog_data->dispatch_mode == INTEL_DISPATCH_MODE_TCS_MULTI_PATCH;
 
       brw_reg icp_handle = multi_patch ?
          get_tcs_multi_patch_icp_handle(ntb, bld, instr) :
          get_tcs_single_patch_icp_handle(ntb, bld, instr);
-
-      /* We can only read two double components with each URB read, so
-       * we send two read messages in that case, each one loading up to
-       * two double components.
-       */
-      unsigned num_components = instr->num_components;
-      unsigned first_component = nir_intrinsic_component(instr);
-
-      brw_reg srcs[URB_LOGICAL_NUM_SRCS];
-      srcs[URB_LOGICAL_SRC_HANDLE] = icp_handle;
-
-      if (indirect_offset.file == BAD_FILE) {
-         /* Constant indexing - use global offset. */
-         if (first_component != 0) {
-            unsigned read_components = num_components + first_component;
-            brw_reg tmp = bld.vgrf(dst.type, read_components);
-            urb = bld.URB_READ(tmp, srcs, ARRAY_SIZE(srcs));
-            brw_combine_with_vec(bld, dst, offset(tmp, bld, first_component),
-                                 num_components);
-         } else {
-            urb = bld.URB_READ(dst, srcs, ARRAY_SIZE(srcs));
-         }
-         urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-      } else {
-         /* Indirect indexing - use per-slot offsets as well. */
-         srcs[URB_LOGICAL_SRC_PER_SLOT_OFFSETS] = indirect_offset;
-
-         if (first_component != 0) {
-            unsigned read_components = num_components + first_component;
-            brw_reg tmp = bld.vgrf(dst.type, read_components);
-            urb = bld.URB_READ(tmp, srcs, ARRAY_SIZE(srcs));
-            brw_combine_with_vec(bld, dst, offset(tmp, bld, first_component),
-                                 num_components);
-         } else {
-            urb = bld.URB_READ(dst, srcs, ARRAY_SIZE(srcs));
-         }
-         urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-      }
-      urb->size_written = (num_components + first_component) *
-                           urb->dst.component_size(urb->exec_size);
-
-      /* Copy the temporary to the destination to deal with writemasking.
-       *
-       * Also attempt to deal with gl_PointSize being in the .w component.
-       */
-      if (urb->offset == 0 && indirect_offset.file == BAD_FILE) {
-         assert(brw_type_size_bytes(dst.type) == 4);
-         urb->dst = bld.vgrf(dst.type, 4);
-         urb->size_written = 4 * REG_SIZE * reg_unit(devinfo);
-         bld.MOV(dst, offset(urb->dst, bld, 3));
-      }
+      bld.MOV(retype(dst, BRW_TYPE_UD), icp_handle);
       break;
    }
 
-   case nir_intrinsic_load_output:
-   case nir_intrinsic_load_per_vertex_output: {
-      assert(instr->def.bit_size == 32);
-      brw_reg indirect_offset = get_indirect_offset(ntb, instr);
-      unsigned imm_offset = nir_intrinsic_base(instr);
-      unsigned first_component = nir_intrinsic_component(instr);
-
-      brw_urb_inst *urb;
-      if (indirect_offset.file == BAD_FILE) {
-         /* This MOV replicates the output handle to all enabled channels
-          * is SINGLE_PATCH mode.
-          */
-         brw_reg patch_handle = bld.MOV(s.tcs_payload().patch_urb_output);
-
-         {
-            brw_reg srcs[URB_LOGICAL_NUM_SRCS];
-            srcs[URB_LOGICAL_SRC_HANDLE] = patch_handle;
-
-            if (first_component != 0) {
-               unsigned read_components =
-                  instr->num_components + first_component;
-               brw_reg tmp = bld.vgrf(dst.type, read_components);
-               urb = bld.URB_READ(tmp, srcs, ARRAY_SIZE(srcs));
-               urb->size_written = read_components * REG_SIZE * reg_unit(devinfo);
-               brw_combine_with_vec(bld, dst, offset(tmp, bld, first_component),
-                                    instr->num_components);
-            } else {
-               urb = bld.URB_READ(dst, srcs, ARRAY_SIZE(srcs));
-               urb->size_written = instr->num_components * REG_SIZE * reg_unit(devinfo);
-            }
-            urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-         }
-      } else {
-         /* Indirect indexing - use per-slot offsets as well. */
-         brw_reg srcs[URB_LOGICAL_NUM_SRCS];
-         srcs[URB_LOGICAL_SRC_HANDLE] = s.tcs_payload().patch_urb_output;
-         srcs[URB_LOGICAL_SRC_PER_SLOT_OFFSETS] = indirect_offset;
-
-         if (first_component != 0) {
-            unsigned read_components =
-               instr->num_components + first_component;
-            brw_reg tmp = bld.vgrf(dst.type, read_components);
-            urb = bld.URB_READ(tmp, srcs, ARRAY_SIZE(srcs));
-            urb->size_written = read_components * REG_SIZE * reg_unit(devinfo);
-            brw_combine_with_vec(bld, dst, offset(tmp, bld, first_component),
-                                 instr->num_components);
-         } else {
-            urb = bld.URB_READ(dst, srcs, ARRAY_SIZE(srcs));
-            urb->size_written = instr->num_components * REG_SIZE * reg_unit(devinfo);
-         }
-         urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-      }
+   case nir_intrinsic_load_urb_output_handle_intel:
+      bld.MOV(retype(dst, BRW_TYPE_UD), s.tcs_payload().patch_urb_output);
       break;
-   }
-
-   case nir_intrinsic_store_output:
-   case nir_intrinsic_store_per_vertex_output: {
-      assert(nir_src_bit_size(instr->src[0]) == 32);
-      brw_reg value = get_nir_src(ntb, instr->src[0], -1);
-      brw_reg indirect_offset = get_indirect_offset(ntb, instr);
-      unsigned imm_offset = nir_intrinsic_base(instr);
-      unsigned mask = nir_intrinsic_write_mask(instr);
-
-      if (mask == 0)
-         break;
-
-      unsigned num_components = util_last_bit(mask);
-      unsigned first_component = nir_intrinsic_component(instr);
-      assert((first_component + num_components) <= 4);
-
-      mask = mask << first_component;
-
-      const bool has_urb_lsc = devinfo->ver >= 20;
-
-      brw_reg mask_reg;
-      if (mask != WRITEMASK_XYZW)
-         mask_reg = brw_imm_ud(mask);
-
-      brw_reg sources[4];
-
-      unsigned m = has_urb_lsc ? 0 : first_component;
-      for (unsigned i = 0; i < num_components; i++) {
-         int c = i + first_component;
-         if (mask & (1 << c)) {
-            sources[m++] = offset(value, bld, i);
-         } else if (devinfo->ver < 20) {
-            m++;
-         }
-      }
-
-      assert(has_urb_lsc || m == (first_component + num_components));
-
-      brw_reg srcs[URB_LOGICAL_NUM_SRCS];
-      srcs[URB_LOGICAL_SRC_HANDLE] = s.tcs_payload().patch_urb_output;
-      srcs[URB_LOGICAL_SRC_PER_SLOT_OFFSETS] = indirect_offset;
-      srcs[URB_LOGICAL_SRC_CHANNEL_MASK] = mask_reg;
-      srcs[URB_LOGICAL_SRC_DATA] = bld.vgrf(BRW_TYPE_F, m);
-      bld.LOAD_PAYLOAD(srcs[URB_LOGICAL_SRC_DATA], sources, m, 0);
-
-      brw_urb_inst *urb = bld.URB_WRITE(srcs, ARRAY_SIZE(srcs));
-      urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-      urb->components = m;
-      break;
-   }
 
    case nir_intrinsic_load_tess_config_intel:
       bld.MOV(retype(dst, BRW_TYPE_UD),
@@ -3323,7 +3143,6 @@ static void
 brw_from_nir_emit_tes_intrinsic(nir_to_brw_state &ntb,
                           nir_intrinsic_instr *instr)
 {
-   const intel_device_info *devinfo = ntb.devinfo;
    const brw_builder &bld = ntb.bld;
    brw_shader &s = ntb.s;
 
@@ -3344,79 +3163,20 @@ brw_from_nir_emit_tes_intrinsic(nir_to_brw_state &ntb,
          bld.MOV(offset(dest, bld, i), s.tes_payload().coords[i]);
       break;
 
-   case nir_intrinsic_load_input:
-   case nir_intrinsic_load_per_vertex_input: {
-      assert(instr->def.bit_size == 32);
-      brw_reg indirect_offset = get_indirect_offset(ntb, instr);
-      unsigned imm_offset = nir_intrinsic_base(instr);
-      unsigned first_component = nir_intrinsic_component(instr);
-
-      brw_urb_inst *urb;
-      if (indirect_offset.file == BAD_FILE) {
-         /* Arbitrarily only push up to 32 vec4 slots worth of data,
-          * which is 16 registers (since each holds 2 vec4 slots).
-          */
-         const unsigned max_push_slots = 32;
-         if (imm_offset < max_push_slots) {
-            const brw_reg src = horiz_offset(brw_attr_reg(0, dest.type),
-                                            4 * imm_offset + first_component);
-            brw_reg comps[NIR_MAX_VEC_COMPONENTS];
-            for (unsigned i = 0; i < instr->num_components; i++) {
-               comps[i] = component(src, i);
-            }
-            bld.VEC(dest, comps, instr->num_components);
-
-            tes_prog_data->base.urb_read_length =
-               MAX2(tes_prog_data->base.urb_read_length,
-                    (imm_offset / 2) + 1);
-         } else {
-            /* Replicate the patch handle to all enabled channels */
-            brw_reg srcs[URB_LOGICAL_NUM_SRCS];
-            srcs[URB_LOGICAL_SRC_HANDLE] = s.tes_payload().patch_urb_input;
-
-            if (first_component != 0) {
-               unsigned read_components =
-                  instr->num_components + first_component;
-               brw_reg tmp = bld.vgrf(dest.type, read_components);
-               urb = bld.URB_READ(tmp, srcs, ARRAY_SIZE(srcs));
-               urb->size_written = read_components * REG_SIZE * reg_unit(devinfo);
-               brw_combine_with_vec(bld, dest, offset(tmp, bld, first_component),
-                                    instr->num_components);
-            } else {
-               urb = bld.URB_READ(dest, srcs, ARRAY_SIZE(srcs));
-               urb->size_written = instr->num_components * REG_SIZE * reg_unit(devinfo);
-            }
-            urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-         }
-      } else {
-         /* Indirect indexing - use per-slot offsets as well. */
-
-         /* We can only read two double components with each URB read, so
-          * we send two read messages in that case, each one loading up to
-          * two double components.
-          */
-         unsigned num_components = instr->num_components;
-
-         brw_reg srcs[URB_LOGICAL_NUM_SRCS];
-         srcs[URB_LOGICAL_SRC_HANDLE] = s.tes_payload().patch_urb_input;
-         srcs[URB_LOGICAL_SRC_PER_SLOT_OFFSETS] = indirect_offset;
-
-         if (first_component != 0) {
-            unsigned read_components =
-                num_components + first_component;
-            brw_reg tmp = bld.vgrf(dest.type, read_components);
-            urb = bld.URB_READ(tmp, srcs, ARRAY_SIZE(srcs));
-            brw_combine_with_vec(bld, dest, offset(tmp, bld, first_component),
-                                 num_components);
-         } else {
-            urb = bld.URB_READ(dest, srcs, ARRAY_SIZE(srcs));
-         }
-         urb->offset = imm_offset * (devinfo->ver >= 20 ? 16 : 1);
-         urb->size_written = (num_components + first_component) *
-                              urb->dst.component_size(urb->exec_size);
-      }
+   case nir_intrinsic_load_urb_input_handle_intel:
+      bld.MOV(retype(dest, BRW_TYPE_UD), s.tes_payload().patch_urb_input);
       break;
-   }
+
+   case nir_intrinsic_load_urb_output_handle_intel:
+      bld.MOV(retype(dest, BRW_TYPE_UD), s.tes_payload().urb_output);
+      break;
+
+   case nir_intrinsic_load_attribute_payload_intel:
+      tes_prog_data->base.urb_read_length =
+         MAX2(tes_prog_data->base.urb_read_length,
+              DIV_ROUND_UP(nir_src_as_uint(instr->src[0]) + 1, 8));
+      brw_from_nir_emit_intrinsic(ntb, bld, instr);
+      break;
 
    case nir_intrinsic_load_tess_config_intel:
       bld.MOV(retype(dest, BRW_TYPE_UD),
@@ -4101,6 +3861,20 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       dest = get_nir_def(ntb, instr->def);
 
    switch (instr->intrinsic) {
+   case nir_intrinsic_load_pixel_coord: {
+      brw_reg comps[2] = { s.uw_pixel_x, s.uw_pixel_y };
+      bld.VEC(retype(dest, BRW_TYPE_UW), comps, 2);
+      break;
+   }
+
+   case nir_intrinsic_load_frag_coord_z:
+      bld.MOV(dest, s.pixel_z);
+      break;
+
+   case nir_intrinsic_load_frag_coord_w:
+      bld.MOV(dest, s.wpos_w);
+      break;
+
    case nir_intrinsic_load_front_face:
       bld.MOV(retype(dest, BRW_TYPE_D), emit_frontfacing_interpolation(ntb));
       break;
@@ -4443,12 +4217,6 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       break;
    }
 
-   case nir_intrinsic_load_frag_coord: {
-      brw_reg comps[4] = { s.pixel_x, s.pixel_y, s.pixel_z, s.wpos_w };
-      bld.VEC(dest, comps, 4);
-      break;
-   }
-
    case nir_intrinsic_load_interpolated_input: {
       assert(nir_src_is_intrinsic(instr->src[0]));
       nir_intrinsic_instr *bary_intrinsic = nir_src_as_intrinsic(instr->src[0]);
@@ -4491,14 +4259,6 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       bld.MOV(retype(dest, BRW_TYPE_UD),
               brw_dynamic_per_primitive_remap(brw_wm_prog_data(s.prog_data)));
       break;
-
-   case nir_intrinsic_read_attribute_payload_intel: {
-      const brw_reg offset = retype(
-         bld.emit_uniformize(get_nir_src(ntb, instr->src[0], 0)),
-         BRW_TYPE_UD);
-      bld.emit(FS_OPCODE_READ_ATTRIBUTE_PAYLOAD, retype(dest, BRW_TYPE_UD), offset);
-      break;
-   }
 
    default:
       brw_from_nir_emit_intrinsic(ntb, bld, instr);
@@ -5150,9 +4910,8 @@ adjust_handle_and_offset(const brw_builder &bld,
    unsigned adjustment = (urb_global_offset >> 11) << 11;
 
    if (adjustment) {
-      brw_builder ubld8 = bld.group(8, 0).exec_all();
       /* Allocate new register to not overwrite the shared URB handle. */
-      urb_handle = ubld8.ADD(urb_handle, brw_imm_ud(adjustment));
+      urb_handle = bld.ADD(urb_handle, brw_imm_ud(adjustment));
       urb_global_offset -= adjustment;
    }
 }
@@ -5907,6 +5666,107 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
    case nir_intrinsic_store_scratch:
       brw_from_nir_emit_memory_access(ntb, bld, xbld, instr);
       break;
+
+   case nir_intrinsic_load_attribute_payload_intel: {
+      assert(instr->def.bit_size == 32);
+
+      if (nir_src_is_const(instr->src[0])) {
+         const brw_reg src = byte_offset(brw_attr_reg(0, dest.type),
+                                         nir_src_as_uint(instr->src[0]));
+         brw_reg comps[NIR_MAX_VEC_COMPONENTS];
+         for (unsigned i = 0; i < instr->num_components; i++) {
+            comps[i] = component(src, i);
+         }
+         bld.VEC(dest, comps, instr->num_components);
+      } else {
+         assert(instr->def.num_components == 1);
+
+         const brw_reg offset = retype(
+            bld.emit_uniformize(get_nir_src(ntb, instr->src[0], 0)),
+            BRW_TYPE_UD);
+         bld.emit(SHADER_OPCODE_LOAD_ATTRIBUTE_PAYLOAD,
+                  retype(dest, BRW_TYPE_UD), offset);
+      }
+      break;
+   }
+
+   case nir_intrinsic_load_urb_vec4_intel: {
+      assert(devinfo->ver < 20);
+      brw_reg srcs[URB_LOGICAL_NUM_SRCS];
+      unsigned urb_global_offset = nir_intrinsic_base(instr);
+
+      if (nir_src_is_const(instr->src[1])) {
+         urb_global_offset += nir_src_as_uint(instr->src[1]);
+      } else {
+         srcs[URB_LOGICAL_SRC_PER_SLOT_OFFSETS] =
+            get_nir_src(ntb, instr->src[1], -1);
+      }
+      brw_reg urb_handle = get_nir_src(ntb, instr->src[0], -1);
+      adjust_handle_and_offset(bld, urb_handle, urb_global_offset);
+      srcs[URB_LOGICAL_SRC_HANDLE] = urb_handle;
+
+      brw_urb_inst *urb = bld.URB_READ(dest, srcs, ARRAY_SIZE(srcs));
+      urb->offset = urb_global_offset;
+      urb->size_written = instr->num_components *
+                          urb->dst.component_size(urb->exec_size);
+      break;
+   }
+
+   case nir_intrinsic_store_urb_vec4_intel: {
+      assert(devinfo->ver < 20);
+      brw_reg srcs[URB_LOGICAL_NUM_SRCS];
+      unsigned urb_global_offset = nir_intrinsic_base(instr);
+
+      if (nir_src_is_const(instr->src[2])) {
+         urb_global_offset += nir_src_as_uint(instr->src[2]);
+      } else {
+         srcs[URB_LOGICAL_SRC_PER_SLOT_OFFSETS] =
+            get_nir_src(ntb, instr->src[2], -1);
+      }
+
+      brw_reg urb_handle = get_nir_src(ntb, instr->src[1], -1);
+      adjust_handle_and_offset(bld, urb_handle, urb_global_offset);
+
+      srcs[URB_LOGICAL_SRC_HANDLE] = urb_handle;
+      srcs[URB_LOGICAL_SRC_DATA] = get_nir_src(ntb, instr->src[0], -1);
+
+      if (!nir_src_is_const(instr->src[3]) ||
+          nir_src_as_uint(instr->src[3]) != 0xf) {
+         srcs[URB_LOGICAL_SRC_CHANNEL_MASK] =
+            retype(get_nir_src_imm(ntb, instr->src[3]), BRW_TYPE_UD);
+      }
+
+      brw_urb_inst *urb = bld.URB_WRITE(srcs, ARRAY_SIZE(srcs));
+      urb->components = instr->src[0].ssa->num_components;
+      urb->offset = urb_global_offset;
+      break;
+   }
+
+   case nir_intrinsic_load_urb_lsc_intel: {
+      assert(devinfo->ver >= 20);
+
+      brw_reg srcs[URB_LOGICAL_NUM_SRCS];
+      srcs[URB_LOGICAL_SRC_HANDLE] = get_nir_src(ntb, instr->src[0], -1);
+
+      brw_urb_inst *urb = bld.URB_READ(dest, srcs, ARRAY_SIZE(srcs));
+      urb->offset = nir_intrinsic_base(instr);
+      urb->size_written = instr->num_components *
+                          urb->dst.component_size(urb->exec_size);
+      break;
+   }
+
+   case nir_intrinsic_store_urb_lsc_intel: {
+      assert(devinfo->ver >= 20);
+
+      brw_reg srcs[URB_LOGICAL_NUM_SRCS];
+      srcs[URB_LOGICAL_SRC_HANDLE] = get_nir_src(ntb, instr->src[1], -1);
+      srcs[URB_LOGICAL_SRC_DATA] = get_nir_src(ntb, instr->src[0], -1);
+
+      brw_urb_inst *urb = bld.URB_WRITE(srcs, ARRAY_SIZE(srcs));
+      urb->components = instr->src[0].ssa->num_components;
+      urb->offset = nir_intrinsic_base(instr);
+      break;
+   }
 
    case nir_intrinsic_image_size:
    case nir_intrinsic_bindless_image_size: {
