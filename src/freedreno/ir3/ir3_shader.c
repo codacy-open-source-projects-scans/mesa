@@ -1090,9 +1090,22 @@ print_raw(FILE *out, const BITSET_WORD *data, size_t size) {
    fprintf(out, "raw 0x%X%X\n", data[0], data[1]);
 }
 
-void
-ir3_shader_disasm(struct ir3_shader_variant *so, uint32_t *bin, FILE *out)
+static void
+pre_instr_cb(void *d, unsigned n, void *instr)
 {
+   struct ir3_disasm_options *options = d;
+
+   if (options->print_raw) {
+      uint32_t *dwords = instr;
+      fprintf(options->out, "%3d[%08x_%08x] ", n, dwords[1], dwords[0]);
+   }
+}
+
+void
+ir3_shader_disasm_options(struct ir3_shader_variant *so, uint32_t *bin,
+                          struct ir3_disasm_options *options)
+{
+   FILE *out = options->out;
    struct ir3 *ir = so->ir;
    struct ir3_register *reg;
    const char *type = ir3_shader_stage(so);
@@ -1141,6 +1154,8 @@ ir3_shader_disasm(struct ir3_shader_variant *so, uint32_t *bin, FILE *out)
                      .show_errors = true,
                      .branch_labels = true,
                      .no_match_cb = print_raw,
+                     .pre_instr_cb = pre_instr_cb,
+                     .cbdata = options,
                   });
 
    fprintf(out, "; %s: outputs:", type);
@@ -1241,6 +1256,17 @@ ir3_shader_disasm(struct ir3_shader_variant *so, uint32_t *bin, FILE *out)
    }
 
    fprintf(out, "\n");
+}
+
+void
+ir3_shader_disasm(struct ir3_shader_variant *so, uint32_t *bin, FILE *out)
+{
+   struct ir3_disasm_options options = {
+      .out = out,
+      .print_raw = false,
+   };
+
+   ir3_shader_disasm_options(so, bin, &options);
 }
 
 uint64_t
