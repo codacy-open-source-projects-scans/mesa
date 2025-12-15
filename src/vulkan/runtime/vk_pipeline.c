@@ -261,8 +261,9 @@ vk_pipeline_hash_shader_stage_blake3(VkPipelineCreateFlags2KHR pipeline_flags,
 
    _mesa_blake3_init(&ctx);
 
-   /* We only care about one of the pipeline flags */
-   pipeline_flags &= VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT_KHR;
+   /* Hash pipeline flags that might affect compilation */
+   pipeline_flags &= (VK_PIPELINE_CREATE_2_VIEW_INDEX_FROM_DEVICE_INDEX_BIT_KHR |
+                      VK_PIPELINE_CREATE_2_UNALIGNED_DISPATCH_BIT_MESA);
    _mesa_blake3_update(&ctx, &pipeline_flags, sizeof(pipeline_flags));
 
    _mesa_blake3_update(&ctx, &info->flags, sizeof(info->flags));
@@ -1215,7 +1216,8 @@ vk_graphics_pipeline_cmd_bind(struct vk_command_buffer *cmd_buffer,
 
 static VkShaderCreateFlagsEXT
 vk_pipeline_to_shader_flags(VkPipelineCreateFlags2KHR pipeline_flags,
-                            mesa_shader_stage stage)
+                            mesa_shader_stage stage,
+                            struct vk_pipeline_layout *pipeline_layout)
 {
    VkShaderCreateFlagsEXT shader_flags = 0;
 
@@ -1240,6 +1242,15 @@ vk_pipeline_to_shader_flags(VkPipelineCreateFlags2KHR pipeline_flags,
       if (pipeline_flags & VK_PIPELINE_CREATE_2_UNALIGNED_DISPATCH_BIT_MESA)
          shader_flags |= VK_SHADER_CREATE_UNALIGNED_DISPATCH_BIT_MESA;
    }
+
+   /* Independent sets has no impact on compute shaders since there is only
+    * ever one shader in the pipeline.
+    */
+   if (stage != MESA_SHADER_COMPUTE &&
+       pipeline_layout != NULL &&
+       (pipeline_layout->create_flags &
+        VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT))
+      shader_flags |= VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_MESA;
 
    return shader_flags;
 }
@@ -1349,7 +1360,8 @@ vk_get_graphics_pipeline_compile_info(struct vk_graphics_pipeline_compile_info *
       }
    }
 
-   VkResult result = vk_graphics_pipeline_state_fill(device, info->state,
+   ASSERTED VkResult result = vk_graphics_pipeline_state_fill(device,
+                                                     info->state,
                                                      pCreateInfo,
                                                      NULL /* driver_rp */,
                                                      0 /* driver_rp_flags */,
@@ -1527,7 +1539,8 @@ vk_get_graphics_pipeline_compile_info(struct vk_graphics_pipeline_compile_info *
                              sizeof(stage->precomp_key));
 
          VkShaderCreateFlagsEXT shader_flags =
-            vk_pipeline_to_shader_flags(pipeline_flags, stage->stage);
+            vk_pipeline_to_shader_flags(pipeline_flags, stage->stage,
+                                        pipeline_layout);
          _mesa_blake3_update(&blake3_ctx, &shader_flags, sizeof(shader_flags));
       }
 
@@ -1718,7 +1731,8 @@ vk_graphics_pipeline_compile_shaders(struct vk_device *device,
          struct vk_pipeline_stage *stage = &compile_info->stages[i];
 
          VkShaderCreateFlagsEXT shader_flags =
-            vk_pipeline_to_shader_flags(pipeline_flags, stage->stage);
+            vk_pipeline_to_shader_flags(pipeline_flags, stage->stage,
+                                        pipeline_layout);
 
          if (compile_info->partition[p + 1] - compile_info->partition[p] > 1)
             shader_flags |= VK_SHADER_CREATE_LINK_STAGE_BIT_EXT;
@@ -2312,7 +2326,8 @@ vk_get_compute_pipeline_compile_info(struct vk_pipeline_stage *stage,
          vk_compute_pipeline_create_flags(pCreateInfo);
 
       const VkShaderCreateFlagsEXT shader_flags =
-         vk_pipeline_to_shader_flags(pipeline_flags, MESA_SHADER_COMPUTE);
+         vk_pipeline_to_shader_flags(pipeline_flags, MESA_SHADER_COMPUTE,
+                                     pipeline_layout);
 
       vk_pipeline_hash_precomp_shader_stage(device, pipeline_flags, pCreateInfo->pNext,
                                             &pCreateInfo->stage, stage);
@@ -2387,7 +2402,8 @@ vk_pipeline_compile_compute_stage(struct vk_device *device,
       get_push_range_for_stage(pipeline_layout, MESA_SHADER_COMPUTE);
 
    VkShaderCreateFlagsEXT shader_flags =
-      vk_pipeline_to_shader_flags(pipeline->base.flags, MESA_SHADER_COMPUTE);
+      vk_pipeline_to_shader_flags(pipeline->base.flags, MESA_SHADER_COMPUTE,
+                                  pipeline_layout);
 
    /* vk_device_shader_ops::compile() consumes the NIR regardless of whether
     * or not it succeeds and only generates shaders on success. Once compile()
@@ -2678,6 +2694,8 @@ struct vk_rt_pipeline {
    VkDeviceSize stack_size;
    VkDeviceSize scratch_size;
    uint32_t ray_queries;
+
+   uint8_t dynamic_descriptor_offsets[MESA_VK_MAX_DESCRIPTOR_SETS];
 };
 
 static struct vk_rt_stage
@@ -2735,7 +2753,8 @@ vk_rt_pipeline_cmd_bind(struct vk_command_buffer *cmd_buffer,
 
       ops->cmd_set_rt_state(cmd_buffer,
                             rt_pipeline->scratch_size,
-                            rt_pipeline->ray_queries);
+                            rt_pipeline->ray_queries,
+                            rt_pipeline->dynamic_descriptor_offsets);
 
       if (rt_pipeline->stack_size > 0)
          ops->cmd_set_stack_size(cmd_buffer, rt_pipeline->stack_size);
@@ -2806,7 +2825,8 @@ vk_pipeline_hash_rt_shader(struct vk_device *device,
                        sizeof(stage->stage));
 
    VkShaderCreateFlagsEXT shader_flags =
-      vk_pipeline_to_shader_flags(pipeline_flags, stage->stage);
+      vk_pipeline_to_shader_flags(pipeline_flags, stage->stage,
+                                  pipeline_layout);
 
    hash_rt_parameters(&blake3_ctx, shader_flags,
                       pipeline_flags,
@@ -2853,7 +2873,8 @@ vk_pipeline_rehash_rt_linked_shaders(struct vk_device *device,
             get_push_range_for_stage(pipeline_layout, stages[i].stage);
 
          VkShaderCreateFlagsEXT shader_flags =
-            vk_pipeline_to_shader_flags(pipeline_flags, stages[i].stage);
+            vk_pipeline_to_shader_flags(pipeline_flags, stages[i].stage,
+                                        pipeline_layout);
 
          hash_rt_parameters(&blake3_ctx, shader_flags, pipeline_flags,
                             push_range, pipeline_layout);
@@ -3166,7 +3187,8 @@ vk_pipeline_compile_rt_shader(struct vk_device *device,
       get_push_range_for_stage(pipeline_layout, stage->stage);
 
    VkShaderCreateFlagsEXT shader_flags =
-      vk_pipeline_to_shader_flags(pipeline_flags, stage->stage);
+      vk_pipeline_to_shader_flags(pipeline_flags, stage->stage,
+                                  pipeline_layout);
 
    /* vk_device_shader_ops::compile() consumes the NIR regardless of
     * whether or not it succeeds and only generates shaders on success.
@@ -3284,7 +3306,8 @@ vk_pipeline_compile_rt_shader_group(struct vk_device *device,
       compile_info[i] = (struct vk_shader_compile_info) {
          .stage = stages[i].stage,
          .flags = vk_pipeline_to_shader_flags(pipeline_flags,
-                                              stages[i].stage),
+                                              stages[i].stage,
+                                              pipeline_layout),
          .rt_flags = pipeline_flags & MESA_VK_PIPELINE_RAY_TRACING_FLAGS,
          .next_stage_mask = 0,
          .nir = vk_pipeline_precomp_shader_get_nir(precomp, nir_options),
@@ -3487,6 +3510,17 @@ vk_create_rt_pipeline(struct vk_device *device,
    if (pipeline == NULL) {
       result = vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto fail_pipeline;
+   }
+
+   if (pipeline_layout != NULL) {
+      uint32_t dynamic_desc_offset = 0;
+      for (uint32_t i = 0; i < pipeline_layout->set_count; i++) {
+         if (pipeline_layout->set_layouts[i] != NULL) {
+            pipeline->dynamic_descriptor_offsets[i] = dynamic_desc_offset;
+            dynamic_desc_offset +=
+               pipeline_layout->set_layouts[i]->dynamic_descriptor_count;
+         }
+      }
    }
 
    pipeline->stages = pipeline_stages;

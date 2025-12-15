@@ -65,8 +65,7 @@ pvr_create_compute_secondary_prog(struct pvr_device *device,
                                   unsigned const_shared_regs,
                                   struct pvr_compute_query_shader *query_prog)
 {
-   const size_t size =
-      pvr_pds_get_max_descriptor_upload_const_map_size_in_bytes();
+   const size_t size = PVR_PDS_MAX_DESC_UPLOAD_BYTES;
    struct pvr_pds_descriptor_program_input sec_pds_program;
    struct pvr_pds_info *info = &query_prog->info;
    uint32_t staging_buffer_size;
@@ -412,6 +411,10 @@ VkResult pvr_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
    if (result != VK_SUCCESS)
       return result;
 
+   cmd_buffer->state.current_sub_cmd->is_dynamic_render =
+      query_info->is_dynamic_render;
+   cmd_buffer->state.current_sub_cmd->is_suspend = query_info->is_suspend;
+
    switch (query_info->type) {
    case PVR_QUERY_TYPE_AVAILABILITY_WRITE:
       /* Adds a compute shader (fenced on the last 3D) that writes a non-zero
@@ -481,11 +484,11 @@ VkResult pvr_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
 
    case PVR_QUERY_TYPE_COPY_QUERY_RESULTS: {
       VK_FROM_HANDLE(pvr_query_pool,
-                      pool,
-                      query_info->copy_query_results.query_pool);
+                     pool,
+                     query_info->copy_query_results.query_pool);
       VK_FROM_HANDLE(pvr_buffer,
-                      buffer,
-                      query_info->copy_query_results.dst_buffer);
+                     buffer,
+                     query_info->copy_query_results.dst_buffer);
 
       pvr_dev_addr_t dev_addr;
 
@@ -529,8 +532,8 @@ VkResult pvr_add_query_program(struct pvr_cmd_buffer *cmd_buffer,
 
    case PVR_QUERY_TYPE_RESET_QUERY_POOL: {
       VK_FROM_HANDLE(pvr_query_pool,
-                      pool,
-                      query_info->reset_query_pool.query_pool);
+                     pool,
+                     query_info->reset_query_pool.query_pool);
 
       uint64_t offset =
          query_info->reset_query_pool.first_query * sizeof(uint32_t);

@@ -136,8 +136,10 @@ cmd_buffer_flush_compute_state(struct anv_cmd_buffer *cmd_buffer)
        *    sufficient."
        */
       anv_add_pending_pipe_bits(cmd_buffer,
-                              ANV_PIPE_CS_STALL_BIT,
-                              "flush compute state");
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                ANV_PIPE_CS_STALL_BIT,
+                                "flush compute state");
       genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 #endif
 
@@ -256,7 +258,7 @@ genX(cmd_buffer_flush_compute_state)(struct anv_cmd_buffer *cmd_buffer)
 
 static void
 anv_cmd_buffer_push_workgroups(struct anv_cmd_buffer *cmd_buffer,
-                               const struct brw_cs_prog_data *prog_data,
+                               const struct anv_pipeline_bind_map *bind_map,
                                uint32_t baseGroupX,
                                uint32_t baseGroupY,
                                uint32_t baseGroupZ,
@@ -281,7 +283,8 @@ anv_cmd_buffer_push_workgroups(struct anv_cmd_buffer *cmd_buffer,
    }
 
    /* On Gfx12.5+ this value goes into the inline parameter register */
-   if (GFX_VERx10 < 125 && prog_data->uses_num_work_groups) {
+   if (GFX_VERx10 < 125 &&
+       (bind_map->binding_mask & ANV_PIPELINE_BIND_MASK_USES_NUM_WORKGROUP)) {
       if (anv_address_is_null(indirect_group)) {
          if (push->cs.num_work_groups[0] != groupCountX ||
              push->cs.num_work_groups[1] != groupCountY ||
@@ -639,6 +642,7 @@ void genX(CmdDispatchBase)(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
+   const struct anv_pipeline_bind_map *bind_map = &comp_state->shader->bind_map;
    const struct brw_cs_prog_data *prog_data = get_cs_prog_data(comp_state);
    struct intel_cs_dispatch_info dispatch =
       brw_cs_get_dispatch_info(cmd_buffer->device->info, prog_data, NULL);
@@ -646,7 +650,7 @@ void genX(CmdDispatchBase)(
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
 
-   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
+   anv_cmd_buffer_push_workgroups(cmd_buffer, bind_map,
                                   baseGroupX, baseGroupY, baseGroupZ,
                                   groupCountX, groupCountY, groupCountZ,
                                   ANV_NULL_ADDRESS);
@@ -699,6 +703,7 @@ genX(cmd_dispatch_unaligned)(
 {
    ANV_FROM_HANDLE(anv_cmd_buffer, cmd_buffer, commandBuffer);
    struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
+   const struct anv_pipeline_bind_map *bind_map = &comp_state->shader->bind_map;
    const struct brw_cs_prog_data *prog_data = get_cs_prog_data(comp_state);
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
@@ -711,7 +716,7 @@ genX(cmd_dispatch_unaligned)(
    struct intel_cs_dispatch_info dispatch =
       brw_cs_get_dispatch_info(cmd_buffer->device->info, prog_data, NULL);
 
-   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data, 0, 0, 0, groupCountX,
+   anv_cmd_buffer_push_workgroups(cmd_buffer, bind_map, 0, 0, 0, groupCountX,
                                   groupCountY, groupCountZ, ANV_NULL_ADDRESS);
 
    /* RT shaders have Y and Z local size set to 1 always. */
@@ -728,7 +733,8 @@ genX(cmd_dispatch_unaligned)(
 
    trace_intel_begin_compute(&cmd_buffer->trace);
 
-   assert(!prog_data->uses_num_work_groups);
+   assert((bind_map->binding_mask &
+           ANV_PIPELINE_BIND_MASK_USES_NUM_WORKGROUP) == 0);
    genX(cmd_buffer_flush_compute_state)(cmd_buffer);
    if (cmd_buffer->state.conditional_render_enabled)
       genX(cmd_emit_conditional_render_predicate)(cmd_buffer);
@@ -757,6 +763,7 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
                                    bool is_unaligned_size_x)
 {
    struct anv_cmd_compute_state *comp_state = &cmd_buffer->state.compute;
+   const struct anv_pipeline_bind_map *bind_map = &comp_state->shader->bind_map;
    const struct brw_cs_prog_data *prog_data = get_cs_prog_data(comp_state);
    UNUSED struct anv_batch *batch = &cmd_buffer->batch;
    struct intel_cs_dispatch_info dispatch =
@@ -765,7 +772,7 @@ genX(cmd_buffer_dispatch_indirect)(struct anv_cmd_buffer *cmd_buffer,
    if (anv_batch_has_error(&cmd_buffer->batch))
       return;
 
-   anv_cmd_buffer_push_workgroups(cmd_buffer, prog_data,
+   anv_cmd_buffer_push_workgroups(cmd_buffer, bind_map,
                                   0, 0, 0, 0, 0, 0, indirect_addr);
 
    anv_measure_snapshot(cmd_buffer,

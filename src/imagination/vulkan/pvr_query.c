@@ -76,8 +76,7 @@ VkResult pvr_CreateQueryPool(VkDevice _device,
    if (!pool)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   pool->result_stride =
-      ALIGN_POT(query_size, ROGUE_CR_ISP_OCLQRY_BASE_ADDR_ALIGNMENT);
+   pool->result_stride = ALIGN_POT(query_size, ROGUE_OQUERY_ALIGN);
 
    pool->query_count = pCreateInfo->queryCount;
 
@@ -88,7 +87,7 @@ VkResult pvr_CreateQueryPool(VkDevice _device,
 
    result = pvr_bo_suballoc(&device->suballoc_vis_test,
                             alloc_size,
-                            ROGUE_CR_ISP_OCLQRY_BASE_ADDR_ALIGNMENT,
+                            ROGUE_OQUERY_ALIGN,
                             false,
                             &pool->result_buffer);
    if (result != VK_SUCCESS)
@@ -410,7 +409,7 @@ pvr_cmd_buffer_state_get_view_count(const struct pvr_cmd_buffer_state *state)
    const struct pvr_sub_cmd_gfx *gfx_sub_cmd = &state->current_sub_cmd->gfx;
    const uint32_t hw_render_idx = gfx_sub_cmd->hw_render_idx;
    const struct pvr_renderpass_hwsetup_render *hw_render =
-      &render_pass_info->pass->hw_setup->renders[hw_render_idx];
+      pvr_pass_info_get_hw_render(render_pass_info, hw_render_idx);
    const uint32_t view_count = util_bitcount(hw_render->view_mask);
 
    assert(state->current_sub_cmd->type == PVR_SUB_CMD_TYPE_GRAPHICS);

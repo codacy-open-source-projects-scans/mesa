@@ -708,6 +708,8 @@ if dep_va.found()
                           dependencies: dep_va_headers)
     pre_args += '-DHAVE_VA_SURFACE_ATTRIB_DRM_FORMAT_MODIFIERS'
   endif
+  libva_version = cc.get_define('VA_VERSION', prefix: '#include "va/va_version.h"',
+                                dependencies: dep_va_headers).split('.')
 endif
 with_gallium_va = dep_va.found()
 
@@ -1167,6 +1169,7 @@ if cc.get_argument_syntax() == 'msvc'
     '/we4024',  # Error when passing different type of parameter
     '/we4189',  # 'identifier' : local variable is initialized but not referenced
     '/Zc:__cplusplus', #Set __cplusplus macro to match the /std:c++<version> on the command line
+    '/Zc:enumTypes', # Enables C++ conforming enum underlying type and enumerator type deduction
     '/Zc:preprocessor', # Use the standards-conforming preprocessor
   ]
   c_args += cc.get_supported_arguments(_trial)
@@ -1255,7 +1258,12 @@ else
   # Check for C and C++ arguments for MSVC compatibility. These are only used
   # in parts of the mesa code base that need to compile with MSVC, mainly
   # common code
-  _trial_msvc = ['-Werror=pointer-arith', '-Werror=vla', '-Werror=gnu-empty-initializer']
+  _trial_msvc = [
+    '-Werror=pointer-arith',
+    '-Werror=vla',
+    '-Werror=gnu-empty-initializer',
+    '-Wgnu-pointer-arith',
+  ]
   c_msvc_compat_args += cc.get_supported_arguments(_trial_msvc)
   cpp_msvc_compat_args += cpp.get_supported_arguments(_trial_msvc)
 endif

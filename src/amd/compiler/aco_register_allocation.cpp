@@ -1854,12 +1854,14 @@ compact_linear_vgprs(ra_ctx& ctx, const RegisterFile& reg_file,
  */
 PhysReg
 alloc_linear_vgpr(ra_ctx& ctx, const RegisterFile& reg_file, aco_ptr<Instruction>& instr,
+                  Definition& def,
                   std::vector<parallelcopy>& parallelcopies)
 {
-   assert(instr->opcode == aco_opcode::p_start_linear_vgpr);
-   assert(instr->definitions.size() == 1 && instr->definitions[0].bytes() % 4 == 0);
+   assert(instr->opcode == aco_opcode::p_start_linear_vgpr || instr->opcode == aco_opcode::p_startpgm);
+   if (instr->opcode == aco_opcode::p_start_linear_vgpr)
+      assert(instr->definitions.size() == 1 && instr->definitions[0].bytes() % 4 == 0);
 
-   RegClass rc = instr->definitions[0].regClass();
+   RegClass rc = def.regClass();
 
    /* Try to choose an unused space in the linear VGPR bounds. */
    for (unsigned i = rc.size(); i <= ctx.num_linear_vgprs; i++) {
@@ -3210,7 +3212,7 @@ get_affinities(ra_ctx& ctx)
                affinity_related->emplace_back(op.getTemp());
                if (ctx.assignments[def.id()].precolor_affinity)
                   ctx.assignments[op.tempId()].set_precolor_affinity(ctx.assignments[def.id()].reg);
-               if (block.kind & block_kind_loop_header)
+               if (block.kind & block_kind_loop_header && &op != &instr->operands[0])
                   continue;
                temp_to_phi_resources[op.tempId()] = index;
             }
@@ -3250,11 +3252,20 @@ get_affinities(ra_ctx& ctx)
          }
       }
    }
+
    /* create affinities */
    for (std::vector<Temp>& vec : phi_resources) {
-      for (unsigned i = 1; i < vec.size(); i++)
-         if (vec[i].id() != vec[0].id())
-            ctx.assignments[vec[i].id()].affinity = vec[0].id();
+      for (unsigned i = 1; i < vec.size(); i++) {
+         if (vec[i].id() == vec[0].id())
+            continue;
+
+         ctx.assignments[vec[i].id()].affinity = vec[0].id();
+
+         /* Propagate vector-info up the affinity-chain */
+         auto it = ctx.vectors.find(vec[i].id());
+         if (it != ctx.vectors.end() && !ctx.vectors.count(vec[0].id()))
+            ctx.vectors[vec[0].id()] = it->second;
+      }
    }
 }
 
@@ -3908,9 +3919,11 @@ register_allocation(Program* program, ra_test_policy policy)
                continue;
 
             /* find free reg */
-            if (instr->opcode == aco_opcode::p_start_linear_vgpr) {
+            if (instr->opcode == aco_opcode::p_start_linear_vgpr ||
+                (instr->opcode == aco_opcode::p_startpgm &&
+                 definition->regClass().is_linear_vgpr())) {
                /* Allocation of linear VGPRs is special. */
-               definition->setFixed(alloc_linear_vgpr(ctx, register_file, instr, parallelcopy));
+               definition->setFixed(alloc_linear_vgpr(ctx, register_file, instr, *definition, parallelcopy));
                update_renames(ctx, register_file, parallelcopy, instr);
             } else if (instr->opcode == aco_opcode::p_split_vector) {
                PhysReg reg = instr->operands[0].physReg();

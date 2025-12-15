@@ -374,7 +374,7 @@ static const xs_config<CHIP> xs_configs[] = {
 
 template <chip CHIP>
 void
-tu6_emit_xs_config(struct tu_cs *cs,
+tu6_emit_xs_config(struct tu_crb &crb,
                    mesa_shader_stage stage, /* xs->type, but xs may be NULL */
                    const struct ir3_shader_variant *xs)
 {
@@ -382,28 +382,27 @@ tu6_emit_xs_config(struct tu_cs *cs,
 
    if (!xs) {
       /* shader stage disabled */
-      tu_cs_emit_pkt4(cs, cfg->reg_sp_xs_config, 1);
-      tu_cs_emit(cs, 0);
-
-      tu_cs_emit_pkt4(cs, cfg->reg_hlsq_xs_ctrl, 1);
-      tu_cs_emit(cs, 0);
+      crb.add(tu_reg_value { .reg = cfg->reg_sp_xs_config, .value = 0 });
+      crb.add(tu_reg_value { .reg = cfg->reg_hlsq_xs_ctrl, .value = 0 });
       return;
    }
 
-   tu_cs_emit_pkt4(cs, cfg->reg_sp_xs_config, 1);
-   tu_cs_emit(cs, A6XX_SP_VS_CONFIG_ENABLED |
-                  COND(xs->bindless_tex, A6XX_SP_VS_CONFIG_BINDLESS_TEX) |
-                  COND(xs->bindless_samp, A6XX_SP_VS_CONFIG_BINDLESS_SAMP) |
-                  COND(xs->bindless_ibo, A6XX_SP_VS_CONFIG_BINDLESS_UAV) |
-                  COND(xs->bindless_ubo, A6XX_SP_VS_CONFIG_BINDLESS_UBO) |
-                  A6XX_SP_VS_CONFIG_NTEX(xs->num_samp) |
-                  A6XX_SP_VS_CONFIG_NSAMP(xs->num_samp));
-
-   tu_cs_emit_pkt4(cs, cfg->reg_hlsq_xs_ctrl, 1);
-   tu_cs_emit(cs, A6XX_SP_VS_CONST_CONFIG_CONSTLEN(xs->constlen) |
-                     A6XX_SP_VS_CONST_CONFIG_ENABLED |
-                     COND(xs->shader_options.push_consts_type == IR3_PUSH_CONSTS_SHARED_PREAMBLE,
-                          A7XX_SP_VS_CONST_CONFIG_READ_IMM_SHARED_CONSTS));
+   crb.add(tu_reg_value {
+      .reg = cfg->reg_sp_xs_config,
+      .value = A6XX_SP_VS_CONFIG_ENABLED |
+               COND(xs->bindless_tex, A6XX_SP_VS_CONFIG_BINDLESS_TEX) |
+               COND(xs->bindless_samp, A6XX_SP_VS_CONFIG_BINDLESS_SAMP) |
+               COND(xs->bindless_ibo, A6XX_SP_VS_CONFIG_BINDLESS_UAV) |
+               COND(xs->bindless_ubo, A6XX_SP_VS_CONFIG_BINDLESS_UBO) |
+               A6XX_SP_VS_CONFIG_NTEX(xs->num_samp) |
+               A6XX_SP_VS_CONFIG_NSAMP(xs->num_samp) });
+   crb.add(tu_reg_value {
+      .reg = cfg->reg_hlsq_xs_ctrl,
+      .value = A6XX_SP_VS_CONST_CONFIG_CONSTLEN(xs->constlen) |
+               A6XX_SP_VS_CONST_CONFIG_ENABLED |
+               COND(xs->shader_options.push_consts_type ==
+                       IR3_PUSH_CONSTS_SHARED_PREAMBLE,
+                    A7XX_SP_VS_CONST_CONFIG_READ_IMM_SHARED_CONSTS) });
 }
 TU_GENX(tu6_emit_xs_config);
 
@@ -466,18 +465,18 @@ tu6_emit_dynamic_offset(struct tu_cs *cs,
 
 template <chip CHIP>
 void
-tu6_emit_shared_consts_enable(struct tu_cs *cs, bool enable)
+tu6_emit_shared_consts_enable(struct tu_crb &crb, bool enable)
 {
    if (CHIP == A6XX) {
       /* Enable/disable shared constants */
-      tu_cs_emit_regs(cs, A6XX_HLSQ_SHARED_CONSTS(.enable = enable));
+      crb.add(HLSQ_SHARED_CONSTS(CHIP, .enable = enable));
    } else {
       assert(!enable);
    }
 
-   tu_cs_emit_regs(cs, A6XX_SP_MODE_CNTL(.constant_demotion_enable = true,
-                                            .isammode = ISAMMODE_GL,
-                                            .shared_consts_enable = enable));
+   crb.add(A6XX_SP_MODE_CNTL(.constant_demotion_enable = true,
+                             .isammode = ISAMMODE_GL,
+                             .shared_consts_enable = enable));
 }
 TU_GENX(tu6_emit_shared_consts_enable);
 
@@ -500,21 +499,11 @@ tu6_setup_streamout(struct tu_cs *cs,
 
    /* no streamout: */
    if (info->num_outputs == 0) {
-      unsigned sizedw = 4;
+      tu_crb crb = cs->crb(3);
+      crb.add(VPC_SO_MAPPING_WPTR(CHIP, 0));
+      crb.add(VPC_SO_CNTL(CHIP, 0));
       if (has_pc_dgen_so_cntl)
-         sizedw += 2;
-
-      tu_cs_emit_pkt7(cs, CP_CONTEXT_REG_BUNCH, sizedw);
-      tu_cs_emit(cs, REG_A6XX_VPC_SO_MAPPING_WPTR);
-      tu_cs_emit(cs, 0);
-      tu_cs_emit(cs, REG_A6XX_VPC_SO_CNTL);
-      tu_cs_emit(cs, 0);
-
-      if (has_pc_dgen_so_cntl) {
-         tu_cs_emit(cs, REG_A6XX_PC_DGEN_SO_CNTL);
-         tu_cs_emit(cs, 0);
-      }
-
+         crb.add(PC_DGEN_SO_CNTL(CHIP, 0));
       return;
    }
 
@@ -563,33 +552,24 @@ tu6_setup_streamout(struct tu_cs *cs,
       prog_count += end - start + 1;
    }
 
-   if (has_pc_dgen_so_cntl)
-      prog_count += 1;
+   tu_crb crb = cs->crb(6 + prog_count);
 
-   tu_cs_emit_pkt7(cs, CP_CONTEXT_REG_BUNCH, 10 + 2 * prog_count);
-   tu_cs_emit(cs, REG_A6XX_VPC_SO_CNTL);
-   tu_cs_emit(cs, A6XX_VPC_SO_CNTL_STREAM_ENABLE(info->streams_written) |
-                  COND(info->stride[0] > 0,
-                       A6XX_VPC_SO_CNTL_BUF0_STREAM(1 + info->buffer_to_stream[0])) |
-                  COND(info->stride[1] > 0,
-                       A6XX_VPC_SO_CNTL_BUF1_STREAM(1 + info->buffer_to_stream[1])) |
-                  COND(info->stride[2] > 0,
-                       A6XX_VPC_SO_CNTL_BUF2_STREAM(1 + info->buffer_to_stream[2])) |
-                  COND(info->stride[3] > 0,
-                       A6XX_VPC_SO_CNTL_BUF3_STREAM(1 + info->buffer_to_stream[3])));
+   crb.add(VPC_SO_CNTL(
+      CHIP,
+      .buf0_stream = info->stride[0] > 0 ? 1 + info->buffer_to_stream[0] : 0,
+      .buf1_stream = info->stride[1] > 0 ? 1 + info->buffer_to_stream[1] : 0,
+      .buf2_stream = info->stride[2] > 0 ? 1 + info->buffer_to_stream[2] : 0,
+      .buf3_stream = info->stride[3] > 0 ? 1 + info->buffer_to_stream[3] : 0,
+      .stream_enable = info->streams_written));
    for (uint32_t i = 0; i < 4; i++) {
-      tu_cs_emit(cs, REG_A6XX_VPC_SO_BUFFER_STRIDE(i));
-      tu_cs_emit(cs, info->stride[i]);
+      crb.add(VPC_SO_BUFFER_STRIDE(CHIP, i, info->stride[i]));
    }
    bool first = true;
    BITSET_FOREACH_RANGE(start, end, valid_dwords,
                         A6XX_SO_PROG_DWORDS * IR3_MAX_SO_STREAMS) {
-      tu_cs_emit(cs, REG_A6XX_VPC_SO_MAPPING_WPTR);
-      tu_cs_emit(cs, COND(first, A6XX_VPC_SO_MAPPING_WPTR_RESET) |
-                     A6XX_VPC_SO_MAPPING_WPTR_ADDR(start));
+      crb.add(VPC_SO_MAPPING_WPTR(CHIP, .addr = start, .reset = first));
       for (unsigned i = start; i < end; i++) {
-         tu_cs_emit(cs, REG_A6XX_VPC_SO_MAPPING_PORT);
-         tu_cs_emit(cs, prog[i]);
+         crb.add(VPC_SO_MAPPING_PORT(CHIP, .dword = prog[i]));
       }
       first = false;
    }
@@ -598,8 +578,7 @@ tu6_setup_streamout(struct tu_cs *cs,
       /* When present, setting this register makes sure that degenerate primitives
        * are included in the stream output and not discarded.
        */
-      tu_cs_emit(cs, REG_A6XX_PC_DGEN_SO_CNTL);
-      tu_cs_emit(cs, A6XX_PC_DGEN_SO_CNTL_STREAM_ENABLE(info->streams_written));
+      crb.add(PC_DGEN_SO_CNTL(CHIP, .stream_enable = info->streams_written));
    }
 }
 
@@ -748,6 +727,7 @@ tu6_vpc_varying_mode(const struct ir3_shader_variant *fs,
    return util_bitcount(compmask) * 2;
 }
 
+template <chip CHIP>
 static void
 tu6_emit_vpc_varying_modes(struct tu_cs *cs,
                            const struct ir3_shader_variant *fs,
@@ -785,10 +765,10 @@ tu6_emit_vpc_varying_modes(struct tu_cs *cs,
    }
 
    if (interp_regs) {
-      tu_cs_emit_pkt4(cs, REG_A6XX_VPC_VARYING_INTERP_MODE_MODE(0), interp_regs);
+      tu_cs_emit_pkt4(cs, VPC_VARYING_INTERP_MODE_MODE(CHIP, 0).reg, interp_regs);
       tu_cs_emit_array(cs, interp_modes, interp_regs);
 
-      tu_cs_emit_pkt4(cs, REG_A6XX_VPC_VARYING_REPLACE_MODE_MODE(0), interp_regs);
+      tu_cs_emit_pkt4(cs, VPC_VARYING_REPLACE_MODE_MODE(CHIP, 0).reg, interp_regs);
       tu_cs_emit_array(cs, ps_repl_modes, interp_regs);
    }
 }
@@ -1065,7 +1045,7 @@ tu6_emit_vpc(struct tu_cs *cs,
    tu_cs_emit(cs, CONDREG(layer_regid, A6XX_GRAS_SU_VS_SIV_CNTL_WRITES_LAYER) |
                   CONDREG(view_regid, A6XX_GRAS_SU_VS_SIV_CNTL_WRITES_VIEW));
 
-   tu6_emit_vpc_varying_modes(cs, fs, last_shader);
+   tu6_emit_vpc_varying_modes<CHIP>(cs, fs, last_shader);
 }
 TU_GENX(tu6_emit_vpc);
 
@@ -1276,23 +1256,23 @@ tu6_emit_program_config(struct tu_cs *cs,
 {
    STATIC_ASSERT(MESA_SHADER_VERTEX == 0);
 
+   tu_crb crb = cs->crb(0);
+
    bool shared_consts_enable =
       prog->shared_consts.type == IR3_PUSH_CONSTS_SHARED;
-   tu6_emit_shared_consts_enable<CHIP>(cs, shared_consts_enable);
+   tu6_emit_shared_consts_enable<CHIP>(crb, shared_consts_enable);
 
-   tu_cs_emit_regs(cs, SP_UPDATE_CNTL(CHIP,
-         .vs_state = true,
-         .hs_state = true,
-         .ds_state = true,
-         .gs_state = true,
-         .fs_state = true,
-         .gfx_uav = true,
-         .gfx_shared_const = shared_consts_enable));
+   crb.add(SP_UPDATE_CNTL(CHIP, .vs_state = true, .hs_state = true,
+                          .ds_state = true, .gs_state = true,
+                          .fs_state = true, .gfx_uav = true,
+                          .gfx_shared_const = shared_consts_enable));
    for (size_t stage_idx = MESA_SHADER_VERTEX;
         stage_idx <= MESA_SHADER_FRAGMENT; stage_idx++) {
       mesa_shader_stage stage = (mesa_shader_stage) stage_idx;
-      tu6_emit_xs_config<CHIP>(cs, stage, variants[stage]);
+      tu6_emit_xs_config<CHIP>(crb, stage, variants[stage]);
    }
+
+   crb.flush();
 
    for (size_t stage_idx = MESA_SHADER_VERTEX;
         stage_idx <= MESA_SHADER_FRAGMENT; stage_idx++) {
@@ -1771,6 +1751,12 @@ tu_pipeline_builder_compile_shaders(struct tu_pipeline_builder *builder,
 
       keys[MESA_SHADER_FRAGMENT].read_only_input_attachments =
          ~attachments_referenced;
+   }
+
+   if (builder->state &
+       VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT) {
+      keys[MESA_SHADER_FRAGMENT].custom_resolve =
+         builder->graphics_state.rp->custom_resolve;
    }
 
    if (builder->create_flags &
@@ -2413,10 +2399,10 @@ tu6_emit_vertex_stride(struct tu_cs *cs, const struct vk_vertex_input_state *vi)
 {
    if (vi->bindings_valid) {
       unsigned bindings_count = util_last_bit(vi->bindings_valid);
-      tu_cs_emit_pkt7(cs, CP_CONTEXT_REG_BUNCH, 2 * bindings_count);
+      tu_crb crb = cs->crb(bindings_count);
       for (unsigned i = 0; i < bindings_count; i++) {
-         tu_cs_emit(cs, REG_A6XX_VFD_VERTEX_BUFFER_STRIDE(i));
-         tu_cs_emit(cs, vi->bindings[i].stride);
+         crb.add(A6XX_VFD_VERTEX_BUFFER_STRIDE(
+            i, .vfd_vertex_buffer_stride = vi->bindings[i].stride));
       }
    }
 }
@@ -2437,10 +2423,10 @@ tu6_emit_vertex_stride_dyn(struct tu_cs *cs, const uint16_t *vi_binding_stride,
 {
    if (bindings_valid) {
       unsigned bindings_count = util_last_bit(bindings_valid);
-      tu_cs_emit_pkt7(cs, CP_CONTEXT_REG_BUNCH, 2 * bindings_count);
+      tu_crb crb = cs->crb(bindings_count);
       for (unsigned i = 0; i < bindings_count; i++) {
-         tu_cs_emit(cs, REG_A6XX_VFD_VERTEX_BUFFER_STRIDE(i));
-         tu_cs_emit(cs, vi_binding_stride[i]);
+         crb.add(A6XX_VFD_VERTEX_BUFFER_STRIDE(
+            i, .vfd_vertex_buffer_stride = vi_binding_stride[i]));
       }
    }
 }
@@ -2470,7 +2456,7 @@ tu6_emit_viewport(struct tu_cs *cs,
 {
    VkExtent2D guardband = {511, 511};
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_CL_VIEWPORT_XOFFSET(0), vp->viewport_count * 6);
+   tu_cs_emit_pkt4(cs, GRAS_CL_VIEWPORT_XOFFSET(CHIP, 0).reg, vp->viewport_count * 6);
    for (uint32_t i = 0; i < vp->viewport_count; i++) {
       const VkViewport *viewport = &vp->viewports[i];
       float offsets[3];
@@ -2502,7 +2488,7 @@ tu6_emit_viewport(struct tu_cs *cs,
          MIN2(guardband.height, fd_calc_guardband(offsets[1], scales[1], false));
    }
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SC_VIEWPORT_SCISSOR_TL(0), vp->viewport_count * 2);
+   tu_cs_emit_pkt4(cs, GRAS_SC_VIEWPORT_SCISSOR_TL(CHIP, 0).reg, vp->viewport_count * 2);
    for (uint32_t i = 0; i < vp->viewport_count; i++) {
       const VkViewport *viewport = &vp->viewports[i];
       VkOffset2D min;
@@ -2531,10 +2517,11 @@ tu6_emit_viewport(struct tu_cs *cs,
       assert(min.x < max.x);
       assert(min.y < max.y);
 
-      tu_cs_emit(cs, A6XX_GRAS_SC_VIEWPORT_SCISSOR_TL_X(min.x) |
-                     A6XX_GRAS_SC_VIEWPORT_SCISSOR_TL_Y(min.y));
-      tu_cs_emit(cs, A6XX_GRAS_SC_VIEWPORT_SCISSOR_BR_X(max.x - 1) |
-                     A6XX_GRAS_SC_VIEWPORT_SCISSOR_BR_Y(max.y - 1));
+      tu_cs_emit(
+         cs, GRAS_SC_VIEWPORT_SCISSOR_TL(CHIP, 0, .x = min.x, .y = min.y).value);
+      tu_cs_emit(
+         cs, GRAS_SC_VIEWPORT_SCISSOR_BR(CHIP, 0, .x = max.x - 1, .y = max.y - 1)
+                .value);
    }
 
    /* A7XX+ doesn't clamp to [0,1] with disabled depth clamp, to support
@@ -2566,8 +2553,8 @@ tu6_emit_viewport(struct tu_cs *cs,
    }
 
    tu_cs_emit_regs(cs,
-                   A6XX_RB_VIEWPORT_ZCLAMP_MIN(z_clamp_min),
-                   A6XX_RB_VIEWPORT_ZCLAMP_MAX(z_clamp_max));
+                   RB_VIEWPORT_ZCLAMP_MIN(CHIP, z_clamp_min),
+                   RB_VIEWPORT_ZCLAMP_MAX(CHIP, z_clamp_max));
 }
 
 struct apply_viewport_state {
@@ -2577,6 +2564,7 @@ struct apply_viewport_state {
    bool share_scale;
    /* See tu_pipeline::fake_single_viewport */
    bool fake_single_viewport;
+   bool custom_resolve;
 };
 
 /* It's a hardware restriction that the window offset (i.e. common_bin_offset)
@@ -2623,7 +2611,8 @@ fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
                     VkOffset2D common_bin_offset,
                     const VkOffset2D *hw_viewport_offsets,
                     unsigned views,
-                    const VkExtent2D *frag_areas, const VkRect2D *bins)
+                    const VkExtent2D *frag_areas, const VkRect2D *bins,
+                    bool binning)
 {
    const struct apply_viewport_state *state =
       (const struct apply_viewport_state *)data;
@@ -2652,9 +2641,16 @@ fdm_apply_viewports(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
        */
       VkViewport viewport =
          state->fake_single_viewport ? state->vp.viewports[0] : state->vp.viewports[i];
-      if (frag_area.width == 1 && frag_area.height == 1 &&
-          common_bin_offset.x == bin.offset.x &&
-          common_bin_offset.y == bin.offset.y) {
+      if ((frag_area.width == 1 && frag_area.height == 1 &&
+           common_bin_offset.x == bin.offset.x &&
+           common_bin_offset.y == bin.offset.y) ||
+          /* When in a custom resolve operation (TODO: and using
+           * non-subsampled images) we switch to framebuffer coordinates so we
+           * shouldn't apply the transform.  However the binning pass isn't
+           * aware of this, so we have to keep applying the transform for
+           * binning.
+           */
+          (state->custom_resolve && !binning)) {
          vp.viewports[i] = viewport;
          continue;
       }
@@ -2691,6 +2687,7 @@ tu6_emit_viewport_fdm(struct tu_cs *cs, struct tu_cmd_buffer *cmd,
       .share_scale = !cmd->state.per_view_viewport &&
          !cmd->state.per_layer_viewport,
       .fake_single_viewport = cmd->state.fake_single_viewport,
+      .custom_resolve = cmd->state.subpass->custom_resolve,
    };
    if (cmd->state.per_view_viewport)
       state.vp.viewport_count = num_views;
@@ -2720,7 +2717,7 @@ template <chip CHIP>
 void
 tu6_emit_scissor(struct tu_cs *cs, const struct vk_viewport_state *vp)
 {
-   tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SC_SCREEN_SCISSOR_TL(0), vp->scissor_count * 2);
+   tu_cs_emit_pkt4(cs, GRAS_SC_SCREEN_SCISSOR_TL(CHIP, 0).reg, vp->scissor_count * 2);
 
    for (uint32_t i = 0; i < vp->scissor_count; i++) {
       const VkRect2D *scissor = &vp->scissors[i];
@@ -2742,10 +2739,8 @@ tu6_emit_scissor(struct tu_cs *cs, const struct vk_viewport_state *vp)
          max_y = MIN2(scissor_max, max_y);
       }
 
-      tu_cs_emit(cs, A6XX_GRAS_SC_SCREEN_SCISSOR_TL_X(min_x) |
-                     A6XX_GRAS_SC_SCREEN_SCISSOR_TL_Y(min_y));
-      tu_cs_emit(cs, A6XX_GRAS_SC_SCREEN_SCISSOR_BR_X(max_x) |
-                     A6XX_GRAS_SC_SCREEN_SCISSOR_BR_Y(max_y));
+      tu_cs_emit(cs, GRAS_SC_SCREEN_SCISSOR_TL(CHIP, i, .x = min_x, .y = min_y).value);
+      tu_cs_emit(cs, GRAS_SC_SCREEN_SCISSOR_BR(CHIP, i, .x = max_x, .y = max_y).value);
    }
 }
 
@@ -2754,7 +2749,8 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
                    VkOffset2D common_bin_offset,
                    const VkOffset2D *hw_viewport_offsets,
                    unsigned views,
-                   const VkExtent2D *frag_areas, const VkRect2D *bins)
+                   const VkExtent2D *frag_areas, const VkRect2D *bins,
+                   bool binning)
 {
    const struct apply_viewport_state *state =
       (const struct apply_viewport_state *)data;
@@ -2782,6 +2778,19 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
                                                 common_bin_offset);
       offset.x -= hw_viewport_offset.x;
       offset.y -= hw_viewport_offset.y;
+
+      /* Disable scaling and offset when doing a custom resolve to a
+       * non-subsampled image and not in the binning pass, because we
+       * use framebuffer coordinates.
+       *
+       * TODO: When we support subsampled images, only do this for
+       * non-subsampled images.
+       */
+      if (state->custom_resolve && !binning) {
+         offset = (VkOffset2D) {};
+         frag_area = (VkExtent2D) {1, 1};
+      }
+
       VkOffset2D min = {
          scissor.offset.x / frag_area.width + offset.x,
          scissor.offset.y / frag_area.width + offset.y,
@@ -2792,12 +2801,20 @@ fdm_apply_scissors(struct tu_cmd_buffer *cmd, struct tu_cs *cs, void *data,
       };
 
       /* Intersect scissor with the scaled bin, this essentially replaces the
-       * window scissor.
+       * window scissor. With custom resolve (TODO: and non-subsampled images)
+       * we have to use the unscaled bin instead.
        */
       uint32_t scaled_width = bin.extent.width / frag_area.width;
       uint32_t scaled_height = bin.extent.height / frag_area.height;
-      uint32_t bin_x = common_bin_offset.x - hw_viewport_offset.x;
-      uint32_t bin_y = common_bin_offset.y - hw_viewport_offset.y;
+      int32_t bin_x;
+      int32_t bin_y;
+      if (state->custom_resolve && !binning) {
+         bin_x = bin.offset.x;
+         bin_y = bin.offset.y;
+      } else {
+         bin_x = common_bin_offset.x - hw_viewport_offset.x;
+         bin_y = common_bin_offset.y - hw_viewport_offset.y;
+      }
       vp.scissors[i].offset.x = MAX2(min.x, bin_x);
       vp.scissors[i].offset.y = MAX2(min.y, bin_y);
       vp.scissors[i].extent.width =
@@ -2819,6 +2836,7 @@ tu6_emit_scissor_fdm(struct tu_cs *cs, struct tu_cmd_buffer *cmd,
       .share_scale = !cmd->state.per_view_viewport &&
          !cmd->state.per_layer_viewport,
       .fake_single_viewport = cmd->state.fake_single_viewport,
+      .custom_resolve = cmd->state.subpass->custom_resolve,
    };
    if (cmd->state.per_view_viewport)
       state.vp.scissor_count = num_views;
@@ -2911,10 +2929,10 @@ template <chip CHIP>
 void
 tu6_emit_depth_bias(struct tu_cs *cs, const struct vk_rasterization_state *rs)
 {
-   tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SU_POLY_OFFSET_SCALE, 3);
-   tu_cs_emit(cs, A6XX_GRAS_SU_POLY_OFFSET_SCALE(rs->depth_bias.slope_factor).value);
-   tu_cs_emit(cs, A6XX_GRAS_SU_POLY_OFFSET_OFFSET(rs->depth_bias.constant_factor).value);
-   tu_cs_emit(cs, A6XX_GRAS_SU_POLY_OFFSET_OFFSET_CLAMP(rs->depth_bias.clamp).value);
+   tu_cs_emit_regs(cs,
+      GRAS_SU_POLY_OFFSET_SCALE(CHIP, rs->depth_bias.slope_factor),
+      GRAS_SU_POLY_OFFSET_OFFSET(CHIP, rs->depth_bias.constant_factor),
+      GRAS_SU_POLY_OFFSET_OFFSET_CLAMP(CHIP, rs->depth_bias.clamp));
 }
 
 static const enum mesa_vk_dynamic_graphics_state tu_bandwidth_state[] = {
@@ -3161,8 +3179,8 @@ tu6_emit_blend(struct tu_cs *cs,
 
    bool dual_src_blend = tu_blend_state_is_dual_src(cb);
 
-   tu_cs_emit_regs(cs, A6XX_SP_BLEND_CNTL(.enable_blend = blend_enable_mask,
-                                          .unk8 = true,
+   tu_cs_emit_regs(cs, SP_BLEND_CNTL(CHIP, .enable_blend = blend_enable_mask,
+                                          .independent_blend_en = true,
                                           .dual_color_in_enable =
                                              dual_src_blend,
                                           .alpha_to_coverage =
@@ -3213,8 +3231,8 @@ tu6_emit_blend(struct tu_cs *cs,
 
          tu_cs_emit_regs(cs,
                          A6XX_RB_MRT_CONTROL(remapped_idx,
-                                             .blend = blend_enable,
-                                             .blend2 = blend_enable,
+                                             .color_blend_en = blend_enable,
+                                             .alpha_blend_en = blend_enable,
                                              .rop_enable = logic_op_enable,
                                              .rop_code = rop,
                                              .component_enable = att->write_mask),
@@ -3316,7 +3334,7 @@ tu6_emit_rast(struct tu_cs *cs,
    bool depth_clip_enable = vk_rasterization_state_depth_clip_enable(rs);
 
    tu_cs_emit_regs(cs,
-                   A6XX_GRAS_CL_CNTL(
+                   GRAS_CL_CNTL(CHIP,
                      .znear_clip_disable = !depth_clip_enable,
                      .zfar_clip_disable = !depth_clip_enable,
                      /* To support VK_EXT_depth_clamp_zero_one on a7xx+ */
@@ -3326,25 +3344,23 @@ tu6_emit_rast(struct tu_cs *cs,
 
    enum a6xx_polygon_mode polygon_mode = tu6_polygon_mode(rs->polygon_mode);
 
-   tu_cs_emit_regs(cs,
-                   A6XX_VPC_RAST_CNTL(polygon_mode));
+   tu_cs_emit_regs(cs, VPC_RAST_CNTL(CHIP, polygon_mode));
 
    tu_cs_emit_regs(cs,
                    PC_DGEN_RAST_CNTL(CHIP, polygon_mode));
 
    if (CHIP == A7XX || cs->device->physical_device->info->props.is_a702) {
-      tu_cs_emit_regs(cs,
-                     A6XX_VPC_PS_RAST_CNTL(polygon_mode));
+      tu_cs_emit_regs(cs, VPC_PS_RAST_CNTL(CHIP, polygon_mode));
    }
 
    tu_cs_emit_regs(cs, VPC_RAST_STREAM_CNTL(CHIP,
       .stream = rs->rasterization_stream,
       .discard = rs->rasterizer_discard_enable));
    if (CHIP == A6XX) {
-      tu_cs_emit_regs(cs, A6XX_VPC_UNKNOWN_9107(
+      tu_cs_emit_regs(cs, VPC_UNKNOWN_9107(CHIP,
          .raster_discard = rs->rasterizer_discard_enable));
    } else {
-      tu_cs_emit_regs(cs, A7XX_VPC_RAST_STREAM_CNTL_V2(
+      tu_cs_emit_regs(cs, VPC_RAST_STREAM_CNTL_V2(CHIP,
          .stream = rs->rasterization_stream,
          .discard = rs->rasterizer_discard_enable));
 
@@ -3364,11 +3380,14 @@ tu6_emit_rast(struct tu_cs *cs,
             .raster_mode = TYPE_TILED,
             .raster_direction = LR_TB,
             .conservativerasen = conservative_ras_en));
-      tu_cs_emit_regs(cs, A7XX_GRAS_SU_RENDER_CNTL(.fs_disable = disable_fs));
-      tu_cs_emit_regs(cs, A7XX_SP_RENDER_CNTL(.fs_disable = disable_fs));
 
-      tu_cs_emit_regs(cs,
-                      A6XX_PC_DGEN_SU_CONSERVATIVE_RAS_CNTL(conservative_ras_en));
+      if (CHIP >= A7XX) {
+         tu_cs_emit_regs(cs, GRAS_SU_RENDER_CNTL(CHIP, .fs_disable = disable_fs));
+         tu_cs_emit_regs(cs, SP_RENDER_CNTL(CHIP, .fs_disable = disable_fs));
+      }
+
+      tu_cs_emit_regs(
+         cs, PC_DGEN_SU_CONSERVATIVE_RAS_CNTL(CHIP, conservative_ras_en));
 
       /* There are only two conservative rasterization modes:
        * - shift_amount = 0 (NO_SHIFT) - normal rasterization
@@ -3385,21 +3404,21 @@ tu6_emit_rast(struct tu_cs *cs,
       enum a6xx_shift_amount shift_amount = conservative_ras_en ?
          (rs->extra_primitive_overestimation_size != 0. ?
             FULL_PIXEL_SHIFT : HALF_PIXEL_SHIFT) : NO_SHIFT;
-      tu_cs_emit_regs(cs, A6XX_GRAS_SU_CONSERVATIVE_RAS_CNTL(
+      tu_cs_emit_regs(cs, GRAS_SU_CONSERVATIVE_RAS_CNTL(CHIP,
             .conservativerasen = conservative_ras_en,
             .shiftamount = shift_amount));
    }
 
    /* move to hw ctx init? */
    tu_cs_emit_regs(cs,
-                   A6XX_GRAS_SU_POINT_MINMAX(.min = 1.0f / 16.0f, .max = 4092.0f),
-                   A6XX_GRAS_SU_POINT_SIZE(1.0f));
+                   GRAS_SU_POINT_MINMAX(CHIP, .min = 1.0f / 16.0f, .max = 4092.0f),
+                   GRAS_SU_POINT_SIZE(CHIP, 1.0f));
 
    if (CHIP == A6XX && cs->device->physical_device->info->props.has_legacy_pipeline_shading_rate) {
-      tu_cs_emit_regs(cs, A6XX_RB_UNKNOWN_8A00());
-      tu_cs_emit_regs(cs, A6XX_RB_UNKNOWN_8A10());
-      tu_cs_emit_regs(cs, A6XX_RB_UNKNOWN_8A20());
-      tu_cs_emit_regs(cs, A6XX_RB_UNKNOWN_8A30());
+      tu_cs_emit_regs(cs, RB_UNKNOWN_8A00(CHIP));
+      tu_cs_emit_regs(cs, RB_UNKNOWN_8A10(CHIP));
+      tu_cs_emit_regs(cs, RB_UNKNOWN_8A20(CHIP));
+      tu_cs_emit_regs(cs, RB_UNKNOWN_8A30(CHIP));
    }
 }
 
@@ -3455,7 +3474,7 @@ tu6_emit_ds(struct tu_cs *cs,
       .fail_bf = tu6_stencil_op((VkStencilOp)ds->stencil.back.op.fail),
       .zpass_bf = tu6_stencil_op((VkStencilOp)ds->stencil.back.op.pass),
       .zfail_bf = tu6_stencil_op((VkStencilOp)ds->stencil.back.op.depth_fail)));
-   tu_cs_emit_regs(cs, A6XX_GRAS_SU_STENCIL_CNTL(stencil_test_enable));
+   tu_cs_emit_regs(cs, GRAS_SU_STENCIL_CNTL(CHIP, stencil_test_enable));
 
    tu_cs_emit_regs(cs, A6XX_RB_STENCIL_MASK(
       .mask = ds->stencil.front.compare_mask,
@@ -3526,10 +3545,10 @@ tu6_emit_rb_depth_cntl(struct tu_cs *cs,
             (ds->depth.test_enable && (zfunc != FUNC_NEVER && zfunc != FUNC_ALWAYS)) ||
             ds->depth.bounds_test.enable,
          .z_bounds_enable = ds->depth.bounds_test.enable));
-      tu_cs_emit_regs(cs, A6XX_GRAS_SU_DEPTH_CNTL(depth_test));
+      tu_cs_emit_regs(cs, GRAS_SU_DEPTH_CNTL(CHIP, depth_test));
    } else {
       tu_cs_emit_regs(cs, A6XX_RB_DEPTH_CNTL());
-      tu_cs_emit_regs(cs, A6XX_GRAS_SU_DEPTH_CNTL());
+      tu_cs_emit_regs(cs, GRAS_SU_DEPTH_CNTL(CHIP));
    }
 }
 
@@ -3580,8 +3599,10 @@ tu6_emit_prim_mode_sysmem(struct tu_cs *cs,
    if (sysmem_prim_mode == FLUSH_PER_OVERLAP_AND_OVERWRITE)
       *sysmem_single_prim_mode = true;
 
-   tu_cs_emit_regs(cs, A6XX_GRAS_SC_CNTL(.ccusinglecachelinesize = 2,
-                                         .single_prim_mode = sysmem_prim_mode));
+   tu_cs_emit_regs(cs, GRAS_SC_CNTL(CHIP,
+      .single_prim_mode = sysmem_prim_mode,
+      .ccusinglecachelinesize = 2,
+   ));
 }
 
 static const enum mesa_vk_dynamic_graphics_state tu_fragment_shading_rate_state[] = {
@@ -3612,7 +3633,7 @@ tu6_emit_fragment_shading_rate(struct tu_cs *cs,
     */
    if (!fsr || (!fs_reads_fsr && vk_fragment_shading_rate_is_disabled(fsr))) {
       tu_cs_emit_regs(cs, A6XX_RB_VRS_CONFIG());
-      tu_cs_emit_regs(cs, A7XX_SP_VRS_CONFIG());
+      tu_cs_emit_regs(cs, SP_VRS_CONFIG(CHIP));
       tu_cs_emit_regs(cs, GRAS_VRS_CONFIG(CHIP));
       return;
    }
@@ -3646,10 +3667,10 @@ tu6_emit_fragment_shading_rate(struct tu_cs *cs,
       A6XX_RB_VRS_CONFIG(.unk2 = true, .pipeline_fsr_enable = enable_draw_fsr,
                          .attachment_fsr_enable = enable_att_fsr,
                          .primitive_fsr_enable = enable_prim_fsr));
-   tu_cs_emit_regs(
-      cs, A7XX_SP_VRS_CONFIG(.pipeline_fsr_enable = enable_draw_fsr,
-                             .attachment_fsr_enable = enable_att_fsr,
-                             .primitive_fsr_enable = enable_prim_fsr));
+   tu_cs_emit_regs(cs,
+                   SP_VRS_CONFIG(CHIP, .pipeline_fsr_enable = enable_draw_fsr,
+                                 .attachment_fsr_enable = enable_att_fsr,
+                                 .primitive_fsr_enable = enable_prim_fsr));
    tu_cs_emit_regs(
       cs, GRAS_VRS_CONFIG(CHIP,
                 .pipeline_fsr_enable = enable_draw_fsr,
@@ -4167,6 +4188,7 @@ tu_pipeline_builder_parse_multisample_and_color_blend(
    }
 }
 
+template <chip CHIP>
 static void
 tu_pipeline_builder_parse_rasterization_order(
    struct tu_pipeline_builder *builder, struct tu_pipeline *pipeline)
@@ -4198,9 +4220,10 @@ tu_pipeline_builder_parse_rasterization_order(
    struct tu_cs cs;
 
    pipeline->prim_order.state_gmem = tu_cs_draw_state(&pipeline->cs, &cs, 2);
-   tu_cs_emit_write_reg(&cs, REG_A6XX_GRAS_SC_CNTL,
-                        A6XX_GRAS_SC_CNTL_CCUSINGLECACHELINESIZE(2) |
-                        A6XX_GRAS_SC_CNTL_SINGLE_PRIM_MODE(gmem_prim_mode));
+   tu_cs_emit_regs(&cs, GRAS_SC_CNTL(CHIP,
+      .single_prim_mode = gmem_prim_mode,
+      .ccusinglecachelinesize = 2,
+   ));
 }
 
 static void
@@ -4352,7 +4375,7 @@ tu_pipeline_builder_build(struct tu_pipeline_builder *builder,
    if (set_combined_state(builder, *pipeline,
                           VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT |
                           VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_OUTPUT_INTERFACE_BIT_EXT)) {
-      tu_pipeline_builder_parse_rasterization_order(builder, *pipeline);
+      tu_pipeline_builder_parse_rasterization_order<CHIP>(builder, *pipeline);
    }
 
    tu_pipeline_builder_emit_state<CHIP>(builder, *pipeline);
@@ -4426,6 +4449,8 @@ tu_fill_render_pass_state(struct vk_render_pass_state *rp,
       rp->color_attachment_formats[i] = pass->attachments[a].format;
       rp->attachments |= MESA_VK_RP_ATTACHMENT_COLOR_BIT(i);
    }
+
+   rp->custom_resolve = subpass->custom_resolve;
 }
 
 static void
@@ -4819,6 +4844,7 @@ fail:
    if (shader)
       vk_pipeline_cache_object_unref(&dev->vk, &shader->base);
 
+   ralloc_free(pipeline->base.executables_mem_ctx);
    ralloc_free(pipeline_mem_ctx);
 
    vk_object_free(&dev->vk, pAllocator, pipeline);
@@ -4951,6 +4977,7 @@ tu_GetPipelineExecutableStatisticsKHR(
    stats.sy = exe->stats.sy;
    stats.ss_stall = exe->stats.sstall;
    stats.sy_stall = exe->stats.systall;
+   stats.loops = exe->stats.loops;
    stats.stps = exe->stats.stp_count;
    stats.ldps = exe->stats.ldp_count;
    stats.preamble_inst = exe->stats.preamble_instrs_count;

@@ -92,8 +92,8 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
 {
    assert(caps->sType == VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR);
 
-   const VkSurfacePresentModeEXT *present_mode =
-      (const VkSurfacePresentModeEXT *)vk_find_struct_const(info_next, SURFACE_PRESENT_MODE_EXT);
+   const VkSurfacePresentModeKHR *present_mode =
+      (const VkSurfacePresentModeKHR *)vk_find_struct_const(info_next, SURFACE_PRESENT_MODE_KHR);
 
    VkResult result =
       wsi_metal_surface_get_capabilities(surface, wsi_device,
@@ -107,10 +107,10 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
          break;
       }
 
-      case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_EXT: {
+      case VK_STRUCTURE_TYPE_SURFACE_PRESENT_SCALING_CAPABILITIES_KHR: {
          /* TODO: support scaling */
-         VkSurfacePresentScalingCapabilitiesEXT *scaling =
-            (VkSurfacePresentScalingCapabilitiesEXT *)ext;
+         VkSurfacePresentScalingCapabilitiesKHR *scaling =
+            (VkSurfacePresentScalingCapabilitiesKHR *)ext;
          scaling->supportedPresentScaling = 0;
          scaling->supportedPresentGravityX = 0;
          scaling->supportedPresentGravityY = 0;
@@ -119,10 +119,10 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
          break;
       }
 
-      case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_EXT: {
+      case VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_COMPATIBILITY_KHR: {
          /* Unsupported, just report the input present mode. */
-         VkSurfacePresentModeCompatibilityEXT *compat =
-            (VkSurfacePresentModeCompatibilityEXT *)ext;
+         VkSurfacePresentModeCompatibilityKHR *compat =
+            (VkSurfacePresentModeCompatibilityKHR *)ext;
          if (compat->pPresentModes) {
             if (compat->presentModeCount) {
                assert(present_mode);
@@ -131,8 +131,8 @@ wsi_metal_surface_get_capabilities2(VkIcdSurfaceBase *surface,
             }
          } else {
             if (!present_mode)
-               wsi_common_vk_warn_once("Use of VkSurfacePresentModeCompatibilityEXT "
-                                       "without a VkSurfacePresentModeEXT set. This is an "
+               wsi_common_vk_warn_once("Use of VkSurfacePresentModeCompatibilityKHR "
+                                       "without a VkSurfacePresentModeKHR set. This is an "
                                        "application bug.\n");
             compat->presentModeCount = 1;
          }
@@ -329,7 +329,7 @@ wsi_cmd_blit_image_to_image(const struct wsi_swapchain *chain,
       const VkCommandBufferAllocateInfo cmd_buffer_info = {
          .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
          .pNext = NULL,
-         .commandPool = chain->cmd_pools[0],
+         .commandPool = chain->cmd_pools[i],
          .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
          .commandBufferCount = 1,
       };
@@ -525,16 +525,22 @@ wsi_metal_destroy_image(const struct wsi_metal_swapchain *metal_chain,
       return;
    }
 
-   /* Required since we allocate 2 per queue */
+   /* Required since we allocate 2 per queue, stored with the following layout:
+    * cmd_pool 0: 0, queue_count
+    * cmd_pool 1: 1, 1 + queue_count
+    * ...
+    */
    if (image->blit.cmd_buffers) {
-      int cmd_buffer_count =
-         chain->blit.queue != NULL ? 2 : wsi->queue_family_count * 2;
+      int queue_count =
+         chain->blit.queue != NULL ? 1 : wsi->queue_family_count;
 
-      for (uint32_t i = 0; i < cmd_buffer_count; i++) {
+      for (uint32_t i = 0; i < queue_count; i++) {
          if (!chain->cmd_pools[i])
             continue;
          wsi->FreeCommandBuffers(chain->device, chain->cmd_pools[i],
                                  1, &image->blit.cmd_buffers[i]);
+         wsi->FreeCommandBuffers(chain->device, chain->cmd_pools[i],
+                                 1, &image->blit.cmd_buffers[i + queue_count]);
       }
       vk_free(&chain->alloc, image->blit.cmd_buffers);
       image->blit.cmd_buffers = NULL;

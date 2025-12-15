@@ -49,9 +49,8 @@
 #include "util/u_vbuf.h"
 #include "util/perf/cpu_trace.h"
 
-#include "clc/pan_compile.h"
+#include "compiler/pan_compiler.h"
 #include "compiler/nir/nir_serialize.h"
-#include "util/pan_lower_framebuffer.h"
 #include "decode.h"
 #include "pan_device.h"
 #include "pan_fence.h"
@@ -784,7 +783,7 @@ panfrost_get_query_result(struct pipe_context *pipe, struct pipe_query *q,
 
    case PIPE_QUERY_TIMESTAMP_DISJOINT: {
       vresult->timestamp_disjoint.frequency =
-         dev->kmod.props.timestamp_frequency;
+         dev->kmod.dev->props.timestamp_frequency;
       vresult->timestamp_disjoint.disjoint = false;
       break;
    }
@@ -1118,7 +1117,7 @@ panfrost_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    assert(!ret);
 
    ctx->printf.bo =
-      panfrost_bo_create(dev, LIBPAN_PRINTF_BUFFER_SIZE, 0, "Printf Buffer");
+      panfrost_bo_create(dev, PAN_PRINTF_BUFFER_SIZE, 0, "Printf Buffer");
 
    if (ctx->printf.bo == NULL)
       goto failed;

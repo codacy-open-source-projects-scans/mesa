@@ -182,7 +182,7 @@ struct pvr_renderpass_alloc {
    /* Which parts of each tile buffer are allocated. Length is
     * tile_buffers_count.
     */
-   struct pvr_renderpass_alloc_buffer *tile_buffers;
+   struct pvr_renderpass_alloc_buffer tile_buffers[PVR_MAX_TILE_BUFFER_COUNT];
 };
 
 struct pvr_renderpass_subpass {
@@ -291,19 +291,9 @@ static VkResult pvr_copy_alloc(struct pvr_renderpass_context *ctx,
 
    dst->tile_buffers_count = src->tile_buffers_count;
    if (dst->tile_buffers_count > 0U) {
-      dst->tile_buffers =
-         vk_alloc(ctx->allocator,
-                  sizeof(dst->tile_buffers[0U]) * dst->tile_buffers_count,
-                  8,
-                  VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-      if (!dst->tile_buffers)
-         return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
-
       memcpy(dst->tile_buffers,
              src->tile_buffers,
              sizeof(dst->tile_buffers[0U]) * dst->tile_buffers_count);
-   } else {
-      dst->tile_buffers = NULL;
    }
 
    return VK_SUCCESS;
@@ -313,9 +303,6 @@ static VkResult pvr_copy_alloc(struct pvr_renderpass_context *ctx,
 static void pvr_free_alloc(struct pvr_renderpass_context *ctx,
                            struct pvr_renderpass_alloc *alloc)
 {
-   if (alloc->tile_buffers)
-      vk_free(ctx->allocator, alloc->tile_buffers);
-
    memset(alloc, 0U, sizeof(*alloc));
 }
 
@@ -328,40 +315,11 @@ static void pvr_reset_render(struct pvr_renderpass_context *ctx)
    memset(&ctx->alloc.output_reg, 0U, sizeof(ctx->alloc.output_reg));
    ctx->alloc.output_regs_count = 0U;
    ctx->alloc.tile_buffers_count = 0U;
-   ctx->alloc.tile_buffers = NULL;
+   memset(&ctx->alloc.tile_buffers, 0U, sizeof(ctx->alloc.tile_buffers));
 
    ctx->hw_render = NULL;
    ctx->subpasses = NULL;
    ctx->ds_load_surface = NULL;
-}
-
-/** Gets the amount of memory to allocate per-core for a tile buffer. */
-static uint32_t
-pvr_get_tile_buffer_size_per_core(const struct pvr_device *device)
-{
-   uint32_t clusters =
-      PVR_GET_FEATURE_VALUE(&device->pdevice->dev_info, num_clusters, 1U);
-
-   /* Round the number of clusters up to the next power of two. */
-   if (!PVR_HAS_FEATURE(&device->pdevice->dev_info, tile_per_usc))
-      clusters = util_next_power_of_two(clusters);
-
-   /* Tile buffer is (total number of partitions across all clusters) * 16 * 16
-    * (quadrant size in pixels).
-    */
-   return device->pdevice->dev_runtime_info.total_reserved_partition_size *
-          clusters * sizeof(uint32_t);
-}
-
-/**
- * Gets the amount of memory to allocate for a tile buffer on the current BVNC.
- */
-uint32_t pvr_get_tile_buffer_size(const struct pvr_device *device)
-{
-   /* On a multicore system duplicate the buffer for each core. */
-   /* TODO: Optimise tile buffer size to use core_count, not max_num_cores. */
-   return pvr_get_tile_buffer_size_per_core(device) *
-          rogue_get_max_num_cores(&device->pdevice->dev_info);
 }
 
 static void
@@ -371,7 +329,6 @@ pvr_finalise_mrt_setup(const struct pvr_device *device,
 {
    mrt->num_output_regs = hw_render->output_regs_count;
    mrt->num_tile_buffers = hw_render->tile_buffers_count;
-   mrt->tile_buffer_size = pvr_get_tile_buffer_size(device);
 }
 
 /**
@@ -660,17 +617,6 @@ pvr_mark_storage_allocated(struct pvr_renderpass_context *ctx,
       assert(resource->type == USC_MRT_RESOURCE_TYPE_MEMORY);
 
       if (resource->mem.tile_buffer >= alloc->tile_buffers_count) {
-         /* Grow the number of tile buffers. */
-         struct pvr_renderpass_alloc_buffer *new_tile_buffers = vk_realloc(
-            ctx->allocator,
-            alloc->tile_buffers,
-            sizeof(alloc->tile_buffers[0U]) * (resource->mem.tile_buffer + 1U),
-            8U,
-            VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-         if (!new_tile_buffers)
-            return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-         alloc->tile_buffers = new_tile_buffers;
          memset(
             &alloc->tile_buffers[alloc->tile_buffers_count],
             0U,
@@ -1671,16 +1617,6 @@ static VkResult pvr_merge_alloc(struct pvr_renderpass_context *ctx,
       MAX2(dst->output_regs_count, src->output_regs_count);
 
    if (dst->tile_buffers_count < src->tile_buffers_count) {
-      struct pvr_renderpass_alloc_buffer *new_tile_buffers =
-         vk_realloc(ctx->allocator,
-                    dst->tile_buffers,
-                    sizeof(dst->tile_buffers[0U]) * src->tile_buffers_count,
-                    8U,
-                    VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-      if (!new_tile_buffers)
-         return vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-      dst->tile_buffers = new_tile_buffers;
       memset(dst->tile_buffers + dst->tile_buffers_count,
              0U,
              sizeof(dst->tile_buffers[0U]) *
@@ -1778,7 +1714,6 @@ pvr_is_subpass_space_available(const struct pvr_device_info *dev_info,
 
    /* Mark pointers in return structures as not allocated. */
    sp_dsts->color = NULL;
-   alloc->tile_buffers = NULL;
 
    /* Allocate space for which locations are in use after this subpass. */
    result = pvr_copy_alloc(ctx, alloc, &ctx->alloc);
@@ -1890,7 +1825,6 @@ pvr_can_combine_with_render(const struct pvr_device_info *dev_info,
 
    /* Mark pointers in return structures as not allocated. */
    sp_dsts->color = NULL;
-   new_alloc->tile_buffers = NULL;
 
    if (ctx->hw_render && (ctx->hw_render->view_mask != subpass->view_mask))
       return false;

@@ -74,8 +74,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_atomic_int64 = false,
       .KHR_shader_float_controls = true,
-      .KHR_shader_float16_int8 =
-         false, /* TODO_KOSMICKRISP shaderInt8 shaderFloat16 */
+      .KHR_shader_float16_int8 = true,
       .KHR_shader_subgroup_extended_types = true,
       .KHR_spirv_1_4 = true,
       .KHR_timeline_semaphore = true,
@@ -98,7 +97,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_shader_terminate_invocation = true,
       .KHR_synchronization2 = true,
       .KHR_zero_initialize_workgroup_memory = true,
-      .EXT_4444_formats = false,
+      .EXT_4444_formats = true,
       .EXT_extended_dynamic_state = true,
       .EXT_extended_dynamic_state2 = false,
       .EXT_image_robustness = true,
@@ -110,11 +109,13 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_shader_stencil_export = true,
       .EXT_subgroup_size_control = true,
       .EXT_texel_buffer_alignment = false,
-      .EXT_texture_compression_astc_hdr = false,
+      .EXT_texture_compression_astc_hdr = true,
       .EXT_tooling_info = true,
-      .EXT_ycbcr_2plane_444_formats = false,
+      .EXT_ycbcr_2plane_444_formats = true,
 
       /* Vulkan 1.4 */
+      .KHR_load_store_op_none = true,
+      .KHR_map_memory2 = true,
       .KHR_push_descriptor = true,
       .KHR_shader_expect_assume = true,
       .KHR_vertex_attribute_divisor = true,
@@ -131,6 +132,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .KHR_workgroup_memory_explicit_layout = true,
 
       .EXT_external_memory_metal = true,
+      .EXT_load_store_op_none = true,
       .EXT_mutable_descriptor_type = true,
       .EXT_shader_atomic_float = true,
       .EXT_shader_replicated_composites = true,
@@ -152,33 +154,26 @@ kk_get_device_features(
       .depthClamp = true,
       .drawIndirectFirstInstance = true,
       .dualSrcBlend = true,
-      /* TODO_KOSMICKRISP
-       * Enabling fragmentStoresAndAtomics fails the following CTS tests, need
-       * to investigate:
-       * dEQP-VK.fragment_operations.early_fragment.discard_no_early_fragment_tests_depth
-       * dEQP-VK.robustness.image_robustness.bind.notemplate.*i.unroll.nonvolatile.sampled_image.no_fmt_qual.img.samples_1.*d_array.frag
-       */
-      .fragmentStoresAndAtomics = false,
+      .fragmentStoresAndAtomics = true,
+      .fullDrawIndexUint32 = true,
       .imageCubeArray = true,
       .independentBlend = true,
+      .inheritedQueries = true,
       .logicOp = true,
       .multiViewport = true,
       .robustBufferAccess = true,
       .samplerAnisotropy = true,
+      .shaderClipDistance = true,
+      .shaderImageGatherExtended = true,
       .shaderInt16 = true,
       .shaderInt64 = true,
       .shaderResourceMinLod = true,
       .shaderSampledImageArrayDynamicIndexing = true,
       .shaderStorageBufferArrayDynamicIndexing = true,
       .shaderStorageImageArrayDynamicIndexing = true,
-      /* TODO_KOSMICKRISP
-       * Disabled because the following test
-       * dEQP-VK.api.format_feature_flags2.r8_unorm and similars fail, need to
-       * set VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT and
-       * VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT for those formats.
-       * This may trigger more tests that haven't been run yet */
-      .shaderStorageImageReadWithoutFormat = false,
-      .shaderStorageImageWriteWithoutFormat = false,
+      .shaderStorageImageExtendedFormats = true,
+      .shaderStorageImageReadWithoutFormat = true,
+      .shaderStorageImageWriteWithoutFormat = true,
       .shaderUniformBufferArrayDynamicIndexing = true,
       .textureCompressionASTC_LDR = true,
       .textureCompressionBC = true,
@@ -218,25 +213,10 @@ kk_get_device_features(
       .samplerMirrorClampToEdge = true,
       .scalarBlockLayout = true,
       .separateDepthStencilLayouts = true,
-      /* TODO_KOSMICKRISP shaderFloat16
-       * Failing:
-       * dEQP-VK.spirv_assembly.instruction.*.float16.opcompositeinsert.*
-       * dEQP-VK.memory_model.shared.16bit.nested_structs_arrays.*
-       */
-      .shaderFloat16 = false,
+      .shaderFloat16 = true,
       .shaderInputAttachmentArrayDynamicIndexing = true,
       .shaderInputAttachmentArrayNonUniformIndexing = true,
-      /* TODO_KOSMICKRISP shaderInt8
-       * Multiple MSL compiler crashes if we enable shaderInt8, need to
-       * understand why and a workaround:
-       * dEQP-VK.memory_model.shared.8bit.vector_types.9
-       * dEQP-VK.memory_model.shared.8bit.basic_types.8
-       * dEQP-VK.memory_model.shared.8bit.basic_arrays.2
-       * dEQP-VK.memory_model.shared.8bit.arrays_of_arrays.1
-       * dEQP-VK.memory_model.shared.8bit.arrays_of_arrays.8
-       * Probably more
-       */
-      .shaderInt8 = false,
+      .shaderInt8 = true,
       .shaderOutputLayer = true,
       .shaderOutputViewportIndex = true,
       .shaderSampledImageArrayNonUniformIndexing = true,
@@ -270,6 +250,7 @@ kk_get_device_features(
       .shaderZeroInitializeWorkgroupMemory = true,
       .subgroupSizeControl = true,
       .synchronization2 = true,
+      .textureCompressionASTC_HDR = true,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
 
@@ -295,6 +276,10 @@ kk_get_device_features(
       .workgroupMemoryExplicitLayout8BitAccess = true,
       .workgroupMemoryExplicitLayout16BitAccess = true,
 
+      /* EXT_4444_formats */
+      .formatA4R4G4B4 = true,
+      .formatA4B4G4R4 = true,
+
       /* VK_EXT_shader_replicated_composites */
       .shaderReplicatedComposites = true,
 
@@ -305,6 +290,9 @@ kk_get_device_features(
       .shaderBufferFloat32Atomics = true,
       .shaderBufferFloat32AtomicAdd = true,
       .shaderSharedFloat32Atomics = true,
+
+      /* EXT_ycbcr_2plane_444_formats */
+      .ycbcr2plane444Formats = true,
    };
 }
 
@@ -410,8 +398,8 @@ kk_get_device_properties(const struct kk_physical_device *pdev,
       .minStorageBufferOffsetAlignment = KK_MIN_SSBO_ALIGNMENT,
       .minTexelOffset = -8,
       .maxTexelOffset = 7,
-      .minTexelGatherOffset = -32,
-      .maxTexelGatherOffset = 31,
+      .minTexelGatherOffset = -8,
+      .maxTexelGatherOffset = 7,
       .minInterpolationOffset = -0.5,
       .maxInterpolationOffset = 0.4375,
       .subPixelInterpolationOffsetBits = 4,

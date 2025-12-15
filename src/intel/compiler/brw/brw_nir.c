@@ -643,10 +643,8 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4,
             nir_lower_io_lower_64bit_to_32_new);
 
-   /* This pass needs actual constants */
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in);
 
    /* Update shader_info::dual_slot_inputs */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -784,10 +782,8 @@ brw_nir_lower_vue_inputs(nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4,
             nir_lower_io_lower_64bit_to_32);
 
-   /* This pass needs actual constants */
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in);
 
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
@@ -837,11 +833,10 @@ brw_nir_lower_tes_inputs(nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4,
             nir_lower_io_lower_64bit_to_32);
 
-   /* Run add_const_offset_to_base to allow update base/io_semantic::location
+   /* Run nir_opt_constant_folding to allow update base/io_semantic::location
     * for the remapping pass to look into the VUE mapping.
     */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in);
 
    NIR_PASS(_, nir, remap_tess_levels, devinfo,
             nir->info.tess._primitive_mode);
@@ -852,8 +847,6 @@ brw_nir_lower_tes_inputs(nir_shader *nir,
     */
    NIR_PASS(_, nir, nir_opt_algebraic);
    NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in);
 
    NIR_PASS(_, nir, lower_inputs_to_urb_intrinsics, devinfo);
 }
@@ -1071,7 +1064,10 @@ brw_nir_lower_fs_inputs(nir_shader *nir,
       brw_nir_lower_fs_barycentrics(nir);
 
    if (key->multisample_fbo == INTEL_NEVER) {
-      NIR_PASS(_, nir, nir_lower_single_sampled);
+      nir_lower_single_sampled_options lss_opts = {
+         .lower_sample_mask_in = key->coarse_pixel == INTEL_NEVER,
+      };
+      NIR_PASS(_, nir, nir_lower_single_sampled, &lss_opts);
    } else if (key->persample_interp == INTEL_ALWAYS) {
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                lower_barycentric_per_sample,
@@ -1093,10 +1089,8 @@ brw_nir_lower_fs_inputs(nir_shader *nir,
                indirect_primitive_id);
    }
 
-   /* This pass needs actual constants */
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in);
 }
 
 void
@@ -1137,11 +1131,10 @@ brw_nir_lower_tcs_outputs(nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out, type_size_vec4,
             nir_lower_io_lower_64bit_to_32);
 
-   /* Run add_const_offset_to_base to allow update base/io_semantic::location
+   /* Run nir_opt_constant_folding to allow update base/io_semantic::location
     * for the remapping pass to look into the VUE mapping.
     */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_out);
 
    NIR_PASS(_, nir, remap_tess_levels, devinfo, tes_primitive_mode);
    NIR_PASS(_, nir, remap_patch_urb_offsets, vue_map);
@@ -1150,7 +1143,6 @@ brw_nir_lower_tcs_outputs(nir_shader *nir,
     * just fold it for the backend.
     */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_out);
 
    NIR_PASS(_, nir, lower_outputs_to_urb_intrinsics, devinfo);
 }
@@ -1165,6 +1157,7 @@ brw_nir_lower_fs_outputs(nir_shader *nir)
    }
 
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out, type_size_vec4, 0);
+   nir->info.disable_output_offset_src_constant_folding = true;
 }
 
 static bool
@@ -1225,11 +1218,6 @@ brw_nir_optimize(nir_shader *nir,
                  const struct intel_device_info *devinfo)
 {
    bool progress;
-   unsigned lower_flrp =
-      (nir->options->lower_flrp16 ? 16 : 0) |
-      (nir->options->lower_flrp32 ? 32 : 0) |
-      (nir->options->lower_flrp64 ? 64 : 0);
-
    unsigned long opt_line = 0;
    do {
       progress = false;
@@ -1305,15 +1293,6 @@ brw_nir_optimize(nir_shader *nir,
 
       LOOP_OPT(nir_lower_constant_convert_alu_types);
       LOOP_OPT(nir_opt_constant_folding);
-
-      if (lower_flrp != 0) {
-         LOOP_OPT(nir_lower_flrp, lower_flrp, false /* always_precise */);
-
-         /* Nothing should rematerialize any flrps, so we only need to do this
-          * lowering once.
-          */
-         lower_flrp = 0;
-      }
 
       LOOP_OPT(nir_opt_dead_cf);
       if (LOOP_OPT(nir_opt_loop)) {
@@ -1560,6 +1539,13 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    OPT(nir_split_struct_vars, nir_var_function_temp);
 
    brw_nir_optimize(nir, devinfo);
+
+   unsigned lower_flrp =
+      (nir->options->lower_flrp16 ? 16 : 0) |
+      (nir->options->lower_flrp32 ? 32 : 0) |
+      (nir->options->lower_flrp64 ? 64 : 0);
+
+   OPT(nir_lower_flrp, lower_flrp, false /* always_precise */);
 
    struct nir_opt_16bit_tex_image_options options = {
       .rounding_mode = nir_rounding_mode_undef,

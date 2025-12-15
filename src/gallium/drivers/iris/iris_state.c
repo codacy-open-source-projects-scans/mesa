@@ -3726,11 +3726,11 @@ iris_set_scissor_states(struct pipe_context *ctx,
           * a min > max scissor inside the bounds, which produces the expected
           * no rendering.
           */
-         ice->state.scissors[start_slot + i] = (struct pipe_scissor_state) {
+         ice->state.scissors[start_slot + i] = (struct iris_scissor_state) {
             .minx = 1, .maxx = 0, .miny = 1, .maxy = 0,
          };
       } else {
-         ice->state.scissors[start_slot + i] = (struct pipe_scissor_state) {
+         ice->state.scissors[start_slot + i] = (struct iris_scissor_state) {
             .minx = rects[i].minx,     .miny = rects[i].miny,
             .maxx = rects[i].maxx - 1, .maxy = rects[i].maxy - 1,
          };
@@ -5859,7 +5859,7 @@ iris_populate_binding_table(struct iris_context *ice,
 
 #define foreach_surface_used(index, group) \
    bt_assert(group); \
-   for (int index = 0; index < bt->sizes[group]; index++) \
+   for (int index = 0; index < bt->surf_count[group]; index++) \
       if (iris_group_index_to_bti(bt, group, index) != \
           IRIS_SURFACE_NOT_USED)
 
@@ -6937,6 +6937,120 @@ setup_autostrip_state(struct iris_context *ice,
 }
 
 static void
+iris_emit_binding_tables(struct iris_context *ice, struct iris_batch *batch,
+                         uint64_t stage_dirty)
+{
+   struct iris_binder *binder = &ice->state.binder;
+
+   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
+      if (stage_dirty & (IRIS_STAGE_DIRTY_BINDINGS_VS << stage)) {
+         iris_populate_binding_table(ice, batch, stage, false);
+      }
+
+      /* Gfx9 requires 3DSTATE_BINDING_TABLE_POINTERS_XS to be re-emitted
+       * in order to commit constants.  TODO: Investigate "Disable Gather
+       * at Set Shader" to go back to legacy mode...
+       */
+      if (stage_dirty & ((IRIS_STAGE_DIRTY_BINDINGS_VS |
+                          (GFX_VER == 9 ? IRIS_STAGE_DIRTY_CONSTANTS_VS : 0))
+                            << stage)) {
+         iris_emit_cmd(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_VS), ptr) {
+            ptr._3DCommandSubOpcode = 38 + stage;
+            ptr.PointertoVSBindingTable =
+               binder->bt_offset[stage] >> IRIS_BT_OFFSET_SHIFT;
+         }
+      }
+
+      if (stage_dirty & (IRIS_STAGE_DIRTY_SAMPLER_STATES_VS << stage) &&
+          ice->shaders.prog[stage]) {
+         iris_upload_sampler_states(ice, stage);
+
+         struct iris_shader_state *shs = &ice->state.shaders[stage];
+         struct pipe_resource *res = shs->sampler_table.res;
+         if (res)
+            iris_use_pinned_bo(batch, iris_resource_bo(res), false,
+                              IRIS_DOMAIN_NONE);
+
+         iris_emit_cmd(batch, GENX(3DSTATE_SAMPLER_STATE_POINTERS_VS), ptr) {
+            ptr._3DCommandSubOpcode = 43 + stage;
+            ptr.PointertoVSSamplerState = shs->sampler_table.offset;
+         }
+      }
+   }
+}
+
+static void
+iris_emit_push_constants(struct iris_context *ice, struct iris_batch *batch,
+                         uint64_t dirty, uint64_t stage_dirty)
+{
+   /* Wa_1604061319
+    *
+    *    3DSTATE_CONSTANT_* needs to be programmed before BTP_*
+    *
+    * Testing shows that all the 3DSTATE_CONSTANT_XS need to be emitted if
+    * any stage has a dirty binding table.
+    */
+   const bool emit_const_wa = INTEL_NEEDS_WA_1604061319 &&
+      ((dirty & IRIS_DIRTY_RENDER_BUFFER) ||
+       (stage_dirty & IRIS_ALL_STAGE_DIRTY_BINDINGS_FOR_RENDER));
+
+#if GFX_VER >= 12
+   uint32_t nobuffer_stages = 0;
+#endif
+
+   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
+      if (!(stage_dirty & (IRIS_STAGE_DIRTY_CONSTANTS_VS << stage)) &&
+          !emit_const_wa)
+         continue;
+
+      struct iris_shader_state *shs = &ice->state.shaders[stage];
+      struct iris_compiled_shader *shader = ice->shaders.prog[stage];
+
+      if (!shader)
+         continue;
+
+      if (shs->sysvals_need_upload)
+         upload_sysvals(ice, stage, NULL);
+
+      struct push_bos push_bos = {};
+      setup_constant_buffers(ice, batch, stage, &push_bos);
+
+#if GFX_VER >= 12
+      /* If this stage doesn't have any push constants, emit it later in a
+       * single CONSTANT_ALL packet with all the other stages.
+       */
+      if (push_bos.buffer_count == 0) {
+         nobuffer_stages |= 1 << stage;
+         continue;
+      }
+
+      /* The Constant Buffer Read Length field from 3DSTATE_CONSTANT_ALL
+       * contains only 5 bits, so we can only use it for buffers smaller than
+       * 32.
+       *
+       * According to Wa_16011448509, Gfx12.0 misinterprets some address bits
+       * in 3DSTATE_CONSTANT_ALL.  It should still be safe to use the command
+       * for disabling stages, where all address bits are zero.  However, we
+       * can't safely use it for general buffers with arbitrary addresses.
+       * Just fall back to the individual 3DSTATE_CONSTANT_XS commands in that
+       * case.
+       */
+      if (push_bos.max_length < 32 && GFX_VERx10 > 120) {
+         emit_push_constant_packet_all(ice, batch, 1 << stage, &push_bos);
+         continue;
+      }
+#endif
+      emit_push_constant_packets(ice, batch, stage, &push_bos);
+   }
+
+#if GFX_VER >= 12
+   if (nobuffer_stages)
+      /* Wa_16011448509: all address bits are zero */
+      emit_push_constant_packet_all(ice, batch, nobuffer_stages, NULL);
+#endif
+}
+
+static void
 iris_upload_dirty_render_state(struct iris_context *ice,
                                struct iris_batch *batch,
                                const struct pipe_draw_info *draw,
@@ -6967,7 +7081,6 @@ iris_upload_dirty_render_state(struct iris_context *ice,
       return;
 
    struct iris_genx_state *genx = ice->state.genx;
-   struct iris_binder *binder = &ice->state.binder;
    struct iris_fs_data *fs_data =
       iris_fs_data(ice->shaders.prog[MESA_SHADER_FRAGMENT]);
 
@@ -7279,87 +7392,8 @@ iris_upload_dirty_render_state(struct iris_context *ice,
    }
 #endif
 
-   /* Wa_1604061319
-    *
-    *    3DSTATE_CONSTANT_* needs to be programmed before BTP_*
-    *
-    * Testing shows that all the 3DSTATE_CONSTANT_XS need to be emitted if
-    * any stage has a dirty binding table.
-    */
-   const bool emit_const_wa = INTEL_NEEDS_WA_1604061319 &&
-      ((dirty & IRIS_DIRTY_RENDER_BUFFER) ||
-       (stage_dirty & IRIS_ALL_STAGE_DIRTY_BINDINGS_FOR_RENDER));
-
-#if GFX_VER >= 12
-   uint32_t nobuffer_stages = 0;
-#endif
-
-   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      if (!(stage_dirty & (IRIS_STAGE_DIRTY_CONSTANTS_VS << stage)) &&
-          !emit_const_wa)
-         continue;
-
-      struct iris_shader_state *shs = &ice->state.shaders[stage];
-      struct iris_compiled_shader *shader = ice->shaders.prog[stage];
-
-      if (!shader)
-         continue;
-
-      if (shs->sysvals_need_upload)
-         upload_sysvals(ice, stage, NULL);
-
-      struct push_bos push_bos = {};
-      setup_constant_buffers(ice, batch, stage, &push_bos);
-
-#if GFX_VER >= 12
-      /* If this stage doesn't have any push constants, emit it later in a
-       * single CONSTANT_ALL packet with all the other stages.
-       */
-      if (push_bos.buffer_count == 0) {
-         nobuffer_stages |= 1 << stage;
-         continue;
-      }
-
-      /* The Constant Buffer Read Length field from 3DSTATE_CONSTANT_ALL
-       * contains only 5 bits, so we can only use it for buffers smaller than
-       * 32.
-       *
-       * According to Wa_16011448509, Gfx12.0 misinterprets some address bits
-       * in 3DSTATE_CONSTANT_ALL.  It should still be safe to use the command
-       * for disabling stages, where all address bits are zero.  However, we
-       * can't safely use it for general buffers with arbitrary addresses.
-       * Just fall back to the individual 3DSTATE_CONSTANT_XS commands in that
-       * case.
-       */
-      if (push_bos.max_length < 32 && GFX_VERx10 > 120) {
-         emit_push_constant_packet_all(ice, batch, 1 << stage, &push_bos);
-         continue;
-      }
-#endif
-      emit_push_constant_packets(ice, batch, stage, &push_bos);
-   }
-
-#if GFX_VER >= 12
-   if (nobuffer_stages)
-      /* Wa_16011448509: all address bits are zero */
-      emit_push_constant_packet_all(ice, batch, nobuffer_stages, NULL);
-#endif
-
-   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      /* Gfx9 requires 3DSTATE_BINDING_TABLE_POINTERS_XS to be re-emitted
-       * in order to commit constants.  TODO: Investigate "Disable Gather
-       * at Set Shader" to go back to legacy mode...
-       */
-      if (stage_dirty & ((IRIS_STAGE_DIRTY_BINDINGS_VS |
-                          (GFX_VER == 9 ? IRIS_STAGE_DIRTY_CONSTANTS_VS : 0))
-                            << stage)) {
-         iris_emit_cmd(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_VS), ptr) {
-            ptr._3DCommandSubOpcode = 38 + stage;
-            ptr.PointertoVSBindingTable =
-               binder->bt_offset[stage] >> IRIS_BT_OFFSET_SHIFT;
-         }
-      }
-   }
+   iris_emit_push_constants(ice, batch, dirty, stage_dirty);
+   iris_emit_binding_tables(ice, batch, stage_dirty);
 
    if (GFX_VER >= 11 && (dirty & IRIS_DIRTY_RENDER_BUFFER)) {
       // XXX: we may want to flag IRIS_DIRTY_MULTISAMPLE (or SAMPLE_MASK?)
@@ -7381,31 +7415,6 @@ iris_upload_dirty_render_state(struct iris_context *ice,
 
    if (dirty & IRIS_DIRTY_RENDER_BUFFER)
       trace_framebuffer_state(&batch->trace, NULL, &ice->state.framebuffer);
-
-   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      if (stage_dirty & (IRIS_STAGE_DIRTY_BINDINGS_VS << stage)) {
-         iris_populate_binding_table(ice, batch, stage, false);
-      }
-   }
-
-   for (int stage = 0; stage <= MESA_SHADER_FRAGMENT; stage++) {
-      if (!(stage_dirty & (IRIS_STAGE_DIRTY_SAMPLER_STATES_VS << stage)) ||
-          !ice->shaders.prog[stage])
-         continue;
-
-      iris_upload_sampler_states(ice, stage);
-
-      struct iris_shader_state *shs = &ice->state.shaders[stage];
-      struct pipe_resource *res = shs->sampler_table.res;
-      if (res)
-         iris_use_pinned_bo(batch, iris_resource_bo(res), false,
-                            IRIS_DOMAIN_NONE);
-
-      iris_emit_cmd(batch, GENX(3DSTATE_SAMPLER_STATE_POINTERS_VS), ptr) {
-         ptr._3DCommandSubOpcode = 43 + stage;
-         ptr.PointertoVSSamplerState = shs->sampler_table.offset;
-      }
-   }
 
    if (ice->state.need_border_colors)
       iris_use_pinned_bo(batch, border_color_pool->bo, false, IRIS_DOMAIN_NONE);
@@ -10412,7 +10421,12 @@ iris_emit_raw_pipe_control(struct iris_batch *batch,
 #endif
       pc.LRIPostSyncOperation = NoLRIOperation;
       pc.PipeControlFlushEnable = flags & PIPE_CONTROL_FLUSH_ENABLE;
+#if GFX_VER >= 20
+      pc.ForceDeviceCoherency = flags & (PIPE_CONTROL_TILE_CACHE_FLUSH |
+                                         PIPE_CONTROL_DATA_CACHE_FLUSH);
+#else
       pc.DCFlushEnable = flags & PIPE_CONTROL_DATA_CACHE_FLUSH;
+#endif
       pc.StoreDataIndex = 0;
       pc.CommandStreamerStallEnable = flags & PIPE_CONTROL_CS_STALL;
 #if GFX_VERx10 < 125
@@ -10775,7 +10789,7 @@ genX(init_state)(struct iris_context *ice)
 
    /* Default all scissor rectangles to be empty regions. */
    for (int i = 0; i < IRIS_MAX_VIEWPORTS; i++) {
-      ice->state.scissors[i] = (struct pipe_scissor_state) {
+      ice->state.scissors[i] = (struct iris_scissor_state) {
          .minx = 1, .maxx = 0, .miny = 1, .maxy = 0,
       };
    }

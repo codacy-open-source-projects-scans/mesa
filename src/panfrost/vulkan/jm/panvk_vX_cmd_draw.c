@@ -323,6 +323,11 @@ panvk_draw_prepare_fs_rsd(struct panvk_cmd_buffer *cmdbuf,
             pan_earlyzs_get(fs->fs.earlyzs_lut, writes_zs || oq,
                             alpha_to_coverage, zs_always_passes, zs_read);
 
+         /* early ZS check for FPK is performed by HW on v7+ */
+         cfg.properties.allow_forward_pixel_to_be_killed =
+            !fs->info.writes_global &&
+            ((PAN_ARCH > 6) || earlyzs.kill != MALI_PIXEL_KILL_FORCE_LATE);
+
          cfg.properties.pixel_kill_operation = earlyzs.kill;
          cfg.properties.zs_update_operation = earlyzs.update;
          cfg.multisample_misc.evaluate_per_sample =
@@ -409,36 +414,6 @@ panvk_draw_prepare_tiler_context(struct panvk_cmd_buffer *cmdbuf,
 
    draw->tiler_ctx = &batch->tiler.ctx;
    return VK_SUCCESS;
-}
-
-static mali_pixel_format
-panvk_varying_hw_format(mesa_shader_stage stage, gl_varying_slot loc,
-                        enum pipe_format pfmt)
-{
-   switch (loc) {
-   case VARYING_SLOT_PNTC:
-   case VARYING_SLOT_PSIZ:
-#if PAN_ARCH <= 6
-      return (MALI_R16F << 12) | pan_get_default_swizzle(1);
-#else
-      return (MALI_R16F << 12) | MALI_RGB_COMPONENT_ORDER_R000;
-#endif
-   case VARYING_SLOT_POS:
-#if PAN_ARCH <= 6
-      return (MALI_SNAP_4 << 12) | pan_get_default_swizzle(4);
-#else
-      return (MALI_SNAP_4 << 12) | MALI_RGB_COMPONENT_ORDER_RGBA;
-#endif
-   default:
-      if (pfmt != PIPE_FORMAT_NONE)
-         return GENX(pan_format_from_pipe_format)(pfmt)->hw;
-
-#if PAN_ARCH >= 7
-      return (MALI_CONSTANT << 12) | MALI_RGB_COMPONENT_ORDER_0000;
-#else
-      return (MALI_CONSTANT << 12) | PAN_V6_SWIZZLE(0, 0, 0, 0);
-#endif
-   }
 }
 
 static VkResult
@@ -1445,7 +1420,7 @@ panvk_cmd_draw(struct panvk_cmd_buffer *cmdbuf, struct panvk_draw_data *draw)
    VkResult result;
 
    /* If there's no vertex shader, we can skip the draw. */
-   if (!panvk_priv_mem_dev_addr(vs->rsd))
+   if (!panvk_priv_mem_check_alloc(vs->rsd))
       return;
 
    /* Needs to be done before get_fs() is called because it depends on
@@ -1553,7 +1528,7 @@ panvk_cmd_draw_indirect(struct panvk_cmd_buffer *cmdbuf,
    VkResult result;
 
    /* If there's no vertex shader, we can skip the draw. */
-   if (!panvk_priv_mem_dev_addr(vs->rsd))
+   if (!panvk_priv_mem_check_alloc(vs->rsd))
       return;
 
    /* Needs to be done before get_fs() is called because it depends on

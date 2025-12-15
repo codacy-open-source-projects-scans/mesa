@@ -101,18 +101,50 @@ struct pvr_compute_kernel_info {
    uint32_t max_instances;
 };
 
+static void
+pvr_dynamic_render_info_destroy(const struct pvr_device *device,
+                                struct pvr_cmd_buffer *cmd_buffer,
+                                struct pvr_dynamic_render_info *dr_info);
+
+static void pvr_cmd_buffer_clear_values_free(struct pvr_cmd_buffer *cmd_buffer);
+
+static void pvr_cmd_buffer_attachments_free(struct pvr_cmd_buffer *cmd_buffer);
+
+struct pvr_renderpass_hwsetup_render *
+pvr_pass_info_get_hw_render(const struct pvr_render_pass_info *render_pass_info,
+                            uint32_t idx)
+{
+   if (render_pass_info->dr_info)
+      return &render_pass_info->dr_info->hw_render;
+
+   return &render_pass_info->pass->hw_setup->renders[idx];
+}
+
 static void pvr_cmd_buffer_free_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
                                         struct pvr_sub_cmd *sub_cmd)
 {
+   bool secondary_cont;
+
    if (sub_cmd->owned) {
       switch (sub_cmd->type) {
       case PVR_SUB_CMD_TYPE_GRAPHICS:
+         secondary_cont = cmd_buffer->vk.level ==
+                             VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
+                          (cmd_buffer->usage_flags &
+                           VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT);
+
          util_dynarray_fini(&sub_cmd->gfx.sec_query_indices);
          pvr_csb_finish(&sub_cmd->gfx.control_stream);
          pvr_bo_free(cmd_buffer->device, sub_cmd->gfx.terminate_ctrl_stream);
          pvr_bo_free(cmd_buffer->device, sub_cmd->gfx.multiview_ctrl_stream);
          pvr_bo_suballoc_free(sub_cmd->gfx.depth_bias_bo);
          pvr_bo_suballoc_free(sub_cmd->gfx.scissor_bo);
+         if (sub_cmd->is_dynamic_render && !secondary_cont) {
+            pvr_rstate_entry_remove(cmd_buffer->device, sub_cmd->gfx.rstate);
+            pvr_dynamic_render_info_destroy(cmd_buffer->device,
+                                            cmd_buffer,
+                                            sub_cmd->gfx.dr_info);
+         }
          break;
 
       case PVR_SUB_CMD_TYPE_COMPUTE:
@@ -126,8 +158,7 @@ static void pvr_cmd_buffer_free_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
                                    sub_cmd->transfer.transfer_cmds,
                                    link) {
             list_del(&transfer_cmd->link);
-            if (!transfer_cmd->is_deferred_clear)
-               vk_free(&cmd_buffer->vk.pool->alloc, transfer_cmd);
+            vk_free(&cmd_buffer->vk.pool->alloc, transfer_cmd);
          }
          break;
 
@@ -157,10 +188,8 @@ static void pvr_cmd_buffer_free_sub_cmds(struct pvr_cmd_buffer *cmd_buffer)
 
 static void pvr_cmd_buffer_free_resources(struct pvr_cmd_buffer *cmd_buffer)
 {
-   vk_free(&cmd_buffer->vk.pool->alloc,
-           cmd_buffer->state.render_pass_info.attachments);
-   vk_free(&cmd_buffer->vk.pool->alloc,
-           cmd_buffer->state.render_pass_info.clear_values);
+   pvr_cmd_buffer_attachments_free(cmd_buffer);
+   pvr_cmd_buffer_clear_values_free(cmd_buffer);
 
    util_dynarray_fini(&cmd_buffer->state.query_indices);
 
@@ -174,7 +203,9 @@ static void pvr_cmd_buffer_free_resources(struct pvr_cmd_buffer *cmd_buffer)
       pvr_bo_suballoc_free(suballoc_bo);
    }
 
-   util_dynarray_fini(&cmd_buffer->deferred_clears);
+   /* At the end of any graphics job, all of these get moved elsewhere */
+   assert(list_is_empty(&cmd_buffer->deferred_clears));
+
    util_dynarray_fini(&cmd_buffer->deferred_csb_commands);
    util_dynarray_fini(&cmd_buffer->scissor_array);
    util_dynarray_fini(&cmd_buffer->depth_bias_array);
@@ -241,8 +272,8 @@ static VkResult pvr_cmd_buffer_create(struct pvr_device *device,
    cmd_buffer->depth_bias_array = UTIL_DYNARRAY_INIT;
    cmd_buffer->scissor_array = UTIL_DYNARRAY_INIT;
    cmd_buffer->deferred_csb_commands = UTIL_DYNARRAY_INIT;
-   cmd_buffer->deferred_clears = UTIL_DYNARRAY_INIT;
 
+   list_inithead(&cmd_buffer->deferred_clears);
    list_inithead(&cmd_buffer->sub_cmds);
    list_inithead(&cmd_buffer->bo_list);
 
@@ -369,8 +400,8 @@ static VkResult
 pvr_cmd_buffer_emit_ppp_state(const struct pvr_cmd_buffer *const cmd_buffer,
                               struct pvr_csb *const csb)
 {
-   const struct pvr_framebuffer *const framebuffer =
-      cmd_buffer->state.render_pass_info.framebuffer;
+   const struct pvr_render_state *const rstate =
+      cmd_buffer->state.render_pass_info.rstate;
 
    assert(csb->stream_type == PVR_CMD_STREAM_TYPE_GRAPHICS ||
           csb->stream_type == PVR_CMD_STREAM_TYPE_GRAPHICS_DEFERRED);
@@ -378,12 +409,12 @@ pvr_cmd_buffer_emit_ppp_state(const struct pvr_cmd_buffer *const cmd_buffer,
    pvr_csb_set_relocation_mark(csb);
 
    pvr_csb_emit (csb, VDMCTRL_PPP_STATE0, state0) {
-      state0.addrmsb = framebuffer->ppp_state_bo->dev_addr;
-      state0.word_count = framebuffer->ppp_state_size;
+      state0.addrmsb = rstate->ppp_state_bo->dev_addr;
+      state0.word_count = rstate->ppp_state_size;
    }
 
    pvr_csb_emit (csb, VDMCTRL_PPP_STATE1, state1) {
-      state1.addrlsb = framebuffer->ppp_state_bo->dev_addr;
+      state1.addrlsb = rstate->ppp_state_bo->dev_addr;
    }
 
    pvr_csb_clear_relocation_mark(csb);
@@ -688,8 +719,7 @@ static VkResult pvr_setup_texture_state_words(
 
    pvr_csb_pack (&descriptor->sampler.words[1],
                  TEXSTATE_SAMPLER_WORD1,
-                 sampler) {
-   }
+                 sampler) {}
 
    return VK_SUCCESS;
 }
@@ -1060,7 +1090,7 @@ static inline uint32_t pvr_stride_from_pitch(uint32_t pitch, VkFormat vk_format)
 
 static void pvr_setup_pbe_state(
    const struct pvr_device_info *dev_info,
-   const struct pvr_framebuffer *framebuffer,
+   const struct pvr_render_state *rstate,
    uint32_t mrt_index,
    const struct usc_mrt_resource *mrt_resource,
    const struct pvr_image_view *const iview,
@@ -1165,15 +1195,15 @@ static void pvr_setup_pbe_state(
       break;
    }
 
-#define PVR_DEC_IF_NOT_ZERO(_v) (((_v) > 0) ? (_v)-1 : 0)
+#define PVR_DEC_IF_NOT_ZERO(_v) (((_v) > 0) ? (_v) - 1 : 0)
 
    render_params.min_x_clip = MAX2(0, render_area->offset.x);
    render_params.min_y_clip = MAX2(0, render_area->offset.y);
    render_params.max_x_clip = MIN2(
-      framebuffer->width - 1,
+      rstate->width - 1,
       PVR_DEC_IF_NOT_ZERO(render_area->offset.x + render_area->extent.width));
    render_params.max_y_clip = MIN2(
-      framebuffer->height - 1,
+      rstate->height - 1,
       PVR_DEC_IF_NOT_ZERO(render_area->offset.y + render_area->extent.height));
 
 #undef PVR_DEC_IF_NOT_ZERO
@@ -1190,12 +1220,9 @@ static void pvr_setup_pbe_state(
 }
 
 static struct pvr_render_target *
-pvr_get_render_target(const struct pvr_render_pass *pass,
-                      const struct pvr_framebuffer *framebuffer,
-                      uint32_t idx)
+pvr_get_render_target(const struct pvr_renderpass_hwsetup_render *hw_render,
+                      const struct pvr_render_state *rstate)
 {
-   const struct pvr_renderpass_hwsetup_render *hw_render =
-      &pass->hw_setup->renders[idx];
    uint32_t rt_idx = 0;
 
    switch (hw_render->sample_count) {
@@ -1211,16 +1238,13 @@ pvr_get_render_target(const struct pvr_render_pass *pass,
       break;
    }
 
-   return &framebuffer->render_targets[rt_idx];
+   return &rstate->render_targets[rt_idx];
 }
 
-static uint32_t
-pvr_pass_get_pixel_output_width(const struct pvr_render_pass *pass,
-                                uint32_t idx,
-                                const struct pvr_device_info *dev_info)
+static uint32_t pvr_get_pixel_output_width(
+   const struct pvr_renderpass_hwsetup_render *hw_render,
+   const struct pvr_device_info *dev_info)
 {
-   const struct pvr_renderpass_hwsetup_render *hw_render =
-      &pass->hw_setup->renders[idx];
    /* Default value based on the maximum value found in all existing cores. The
     * maximum is used as this is being treated as a lower bound, making it a
     * "safer" choice than the minimum value found in all existing cores.
@@ -1484,8 +1508,7 @@ pvr_setup_emit_state(const struct pvr_device_info *dev_info,
         resource_type <= USC_MRT_RESOURCE_TYPE_MEMORY;
         resource_type++) {
       for (uint32_t i = 0; i < hw_render->eot_surface_count; i++) {
-         const struct pvr_framebuffer *framebuffer =
-            render_pass_info->framebuffer;
+         const struct pvr_render_state *rstate = render_pass_info->rstate;
          const struct pvr_renderpass_hwsetup_eot_surface *surface =
             &hw_render->eot_surfaces[i];
          const struct pvr_image_view *iview =
@@ -1522,7 +1545,7 @@ pvr_setup_emit_state(const struct pvr_device_info *dev_info,
                : ~0;
 
          pvr_setup_pbe_state(dev_info,
-                             framebuffer,
+                             rstate,
                              emit_state->emit_count,
                              mrt_resource,
                              iview,
@@ -1551,6 +1574,11 @@ pvr_is_render_area_tile_aligned(const struct pvr_cmd_buffer *cmd_buffer,
           render_area->extent.width == iview->vk.extent.width;
 }
 
+static VkResult pvr_render_targets_dataset_init(
+   struct pvr_device *device,
+   struct pvr_render_state *rstate,
+   const struct pvr_renderpass_hwsetup_render *hw_render);
+
 static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
                                          struct pvr_cmd_buffer *cmd_buffer,
                                          struct pvr_sub_cmd_gfx *sub_cmd)
@@ -1565,13 +1593,13 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
    struct pvr_render_pass_info *render_pass_info =
       &cmd_buffer->state.render_pass_info;
    const struct pvr_renderpass_hwsetup_render *hw_render =
-      &render_pass_info->pass->hw_setup->renders[sub_cmd->hw_render_idx];
+      pvr_pass_info_get_hw_render(render_pass_info, sub_cmd->hw_render_idx);
    struct pvr_render_job *job = &sub_cmd->job;
-   struct pvr_framebuffer *framebuffer = render_pass_info->framebuffer;
+   struct pvr_render_state *rstate = render_pass_info->rstate;
    struct pvr_spm_bgobj_state *spm_bgobj_state =
-      &framebuffer->spm_bgobj_state_per_render[sub_cmd->hw_render_idx];
+      &rstate->spm_bgobj_state_per_render[sub_cmd->hw_render_idx];
    struct pvr_spm_eot_state *spm_eot_state =
-      &framebuffer->spm_eot_state_per_render[sub_cmd->hw_render_idx];
+      &rstate->spm_eot_state_per_render[sub_cmd->hw_render_idx];
    struct pvr_render_target *render_target;
    VkResult result;
 
@@ -1622,9 +1650,7 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
                               &emit_state);
 
          unsigned pixel_output_width =
-            pvr_pass_get_pixel_output_width(render_pass_info->pass,
-                                            sub_cmd->hw_render_idx,
-                                            dev_info);
+            pvr_get_pixel_output_width(hw_render, dev_info);
 
          result = pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
             cmd_buffer,
@@ -1703,10 +1729,17 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
          spm_eot_state->pixel_event_program_data_offset;
    }
 
-   render_target = pvr_get_render_target(render_pass_info->pass,
-                                         framebuffer,
-                                         sub_cmd->hw_render_idx);
+   render_target = pvr_get_render_target(hw_render, rstate);
    job->view_state.rt_datasets = &render_target->rt_dataset[0];
+
+   if (cmd_buffer->state.current_sub_cmd->is_dynamic_render) {
+      result =
+         pvr_render_targets_dataset_init(cmd_buffer->device, rstate, hw_render);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         return result;
+      }
+   }
 
    job->ctrl_stream_addr = pvr_csb_get_start_address(&sub_cmd->control_stream);
 
@@ -1720,10 +1753,7 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
    else
       job->scissor_table_addr = PVR_DEV_ADDR_INVALID;
 
-   job->pixel_output_width =
-      pvr_pass_get_pixel_output_width(render_pass_info->pass,
-                                      sub_cmd->hw_render_idx,
-                                      dev_info);
+   job->pixel_output_width = pvr_get_pixel_output_width(hw_render, dev_info);
 
    /* Setup depth/stencil job information. */
    if (hw_render->ds_attach_idx != VK_ATTACHMENT_UNUSED) {
@@ -1930,8 +1960,13 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
    job->frag_uses_atomic_ops = sub_cmd->frag_uses_atomic_ops;
    job->disable_compute_overlap = false;
    job->max_shared_registers = cmd_buffer->state.max_shared_regs;
-   job->run_frag = true;
-   job->geometry_terminate = true;
+
+   if (!cmd_buffer->state.current_sub_cmd->is_suspend) {
+      assert(cmd_buffer->state.current_sub_cmd->type ==
+             PVR_SUB_CMD_TYPE_GRAPHICS);
+      job->geometry_terminate = true;
+      job->run_frag = true;
+   }
 
    /* TODO: Enable pixel merging when it's safe to do. */
    job->disable_pixel_merging = true;
@@ -2240,11 +2275,13 @@ void pvr_compute_generate_fence(struct pvr_cmd_buffer *cmd_buffer,
 static VkResult
 pvr_cmd_buffer_process_deferred_clears(struct pvr_cmd_buffer *cmd_buffer)
 {
-   util_dynarray_foreach (&cmd_buffer->deferred_clears,
-                          struct pvr_transfer_cmd,
-                          transfer_cmd) {
+   list_for_each_entry_safe (struct pvr_transfer_cmd,
+                             transfer_cmd,
+                             &cmd_buffer->deferred_clears,
+                             link) {
       VkResult result;
 
+      list_del(&transfer_cmd->link);
       result = pvr_cmd_buffer_add_transfer_cmd(cmd_buffer, transfer_cmd);
       if (result != VK_SUCCESS)
          return result;
@@ -2333,6 +2370,7 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
    const struct pvr_query_pool *query_pool = NULL;
    struct pvr_suballoc_bo *query_bo = NULL;
    size_t query_indices_size = 0;
+   bool suspend, dynamic_render;
    VkResult result;
 
    /* FIXME: Is this NULL check required because this function is called from
@@ -2350,16 +2388,15 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
    switch (sub_cmd->type) {
    case PVR_SUB_CMD_TYPE_GRAPHICS: {
       struct pvr_sub_cmd_gfx *const gfx_sub_cmd = &sub_cmd->gfx;
+      const bool secondary_cont =
+         cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
+         cmd_buffer->usage_flags &
+            VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
 
       query_indices_size =
          util_dynarray_num_elements(&state->query_indices, char);
 
       if (query_indices_size > 0) {
-         const bool secondary_cont =
-            cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY &&
-            cmd_buffer->usage_flags &
-               VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT;
-
          assert(gfx_sub_cmd->query_pool);
 
          if (secondary_cont) {
@@ -2378,12 +2415,14 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
             query_pool = gfx_sub_cmd->query_pool;
          }
 
+         dynamic_render = sub_cmd->is_dynamic_render;
+         suspend = sub_cmd->is_suspend;
          gfx_sub_cmd->has_query = true;
 
          util_dynarray_clear(&state->query_indices);
       }
 
-      if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
+      if (secondary_cont) {
          result = pvr_csb_emit_return(&gfx_sub_cmd->control_stream);
          if (result != VK_SUCCESS)
             return pvr_cmd_buffer_set_error_unwarned(cmd_buffer, result);
@@ -2392,7 +2431,7 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
       }
 
       /* TODO: Check if the sub_cmd can be skipped based on
-       * sub_cmd->gfx.empty_cmd flag.
+       * sub_cmd->gfx.empty_cmd flag and if dynamic rendering isn't enabled.
        */
 
       /* TODO: Set the state in the functions called with the command buffer
@@ -2501,6 +2540,9 @@ VkResult pvr_cmd_buffer_end_sub_cmd(struct pvr_cmd_buffer *cmd_buffer)
       query_info.availability_write.availability_bo =
          query_pool->availability_buffer;
 
+      query_info.is_dynamic_render = dynamic_render;
+      query_info.is_suspend = suspend;
+
       /* Insert a barrier after the graphics sub command and before the
        * query sub command so that the availability write program waits for the
        * fragment shader to complete.
@@ -2603,9 +2645,8 @@ static inline uint32_t
 pvr_render_pass_info_get_view_mask(const struct pvr_render_pass_info *rp_info)
 {
    const uint32_t hw_render_idx = rp_info->current_hw_subpass;
-   const struct pvr_render_pass *pass = rp_info->pass;
    const struct pvr_renderpass_hwsetup_render *hw_render =
-      &pass->hw_setup->renders[hw_render_idx];
+      pvr_pass_info_get_hw_render(rp_info, hw_render_idx);
 
    return hw_render->view_mask;
 }
@@ -2659,13 +2700,27 @@ VkResult pvr_cmd_buffer_start_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
          PVR_GET_FEATURE_VALUE(&device->pdevice->dev_info,
                                isp_max_tiles_in_flight,
                                1);
-      sub_cmd->gfx.hw_render_idx = state->render_pass_info.current_hw_subpass;
-      sub_cmd->gfx.framebuffer = state->render_pass_info.framebuffer;
+      sub_cmd->gfx.rstate = state->render_pass_info.rstate;
       sub_cmd->gfx.empty_cmd = true;
       sub_cmd->gfx.view_mask =
          pvr_render_pass_info_get_view_mask(&state->render_pass_info);
-      sub_cmd->gfx.multiview_enabled =
-         state->render_pass_info.pass->multiview_enabled;
+      if (state->render_pass_info.dynamic_render) {
+         sub_cmd->is_suspend = state->render_pass_info.suspend;
+         sub_cmd->is_resume = state->render_pass_info.resume;
+         sub_cmd->is_dynamic_render = true;
+         sub_cmd->gfx.hw_render = state->render_pass_info.hw_render;
+         sub_cmd->gfx.multiview_enabled =
+            state->render_pass_info.hw_render->multiview_enabled;
+         sub_cmd->gfx.hw_render_idx = 0;
+         sub_cmd->gfx.dr_info = state->render_pass_info.dr_info;
+      } else {
+         sub_cmd->gfx.hw_render_idx =
+            state->render_pass_info.current_hw_subpass;
+         sub_cmd->gfx.multiview_enabled =
+            state->render_pass_info.pass
+               ? state->render_pass_info.pass->multiview_enabled
+               : false;
+      }
 
       if (state->vis_test_enabled)
          sub_cmd->gfx.query_pool = state->query_pool;
@@ -3044,38 +3099,70 @@ void pvr_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
    }
 }
 
+static void pvr_cmd_buffer_attachments_free(struct pvr_cmd_buffer *cmd_buffer)
+{
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+
+   if (!state->render_pass_info.attachments) {
+      assert(!state->render_pass_info.attachment_count);
+      return;
+   }
+
+   vk_free(&cmd_buffer->vk.pool->alloc, state->render_pass_info.attachments);
+   state->render_pass_info.attachment_count = 0;
+   state->render_pass_info.attachments = NULL;
+}
+
+static VkResult
+pvr_cmd_buffer_attachments_alloc(struct pvr_cmd_buffer *cmd_buffer,
+                                 uint32_t attachment_count)
+{
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_render_pass_info *info = &state->render_pass_info;
+
+   /* Free any previously allocated attachments. */
+   pvr_cmd_buffer_attachments_free(cmd_buffer);
+
+   state->render_pass_info.attachment_count = attachment_count;
+   if (attachment_count == 0) {
+      info->attachments = NULL;
+      return VK_SUCCESS;
+   }
+
+   const size_t size = attachment_count * sizeof(*info->attachments);
+
+   info->attachments = vk_zalloc(&cmd_buffer->vk.pool->alloc,
+                                 size,
+                                 8,
+                                 VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!info->attachments) {
+      return vk_command_buffer_set_error(&cmd_buffer->vk,
+                                         VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   return VK_SUCCESS;
+}
+
 static VkResult pvr_cmd_buffer_attachments_setup(
    struct pvr_cmd_buffer *cmd_buffer,
    const struct pvr_render_pass *pass,
    const struct pvr_framebuffer *framebuffer,
    const VkRenderPassBeginInfo *pRenderPassBeginInfo)
 {
-   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
-   struct pvr_render_pass_info *info = &state->render_pass_info;
    const VkRenderPassAttachmentBeginInfo *pImageless =
       vk_find_struct_const(pRenderPassBeginInfo->pNext,
                            RENDER_PASS_ATTACHMENT_BEGIN_INFO);
+   struct pvr_render_pass_info *info = &cmd_buffer->state.render_pass_info;
+
+   VkResult result;
 
    if (!pImageless)
       assert(pass->attachment_count == framebuffer->attachment_count);
 
-   /* Free any previously allocated attachments. */
-   vk_free(&cmd_buffer->vk.pool->alloc, state->render_pass_info.attachments);
-
-   if (pass->attachment_count == 0) {
-      info->attachments = NULL;
-      return VK_SUCCESS;
-   }
-
-   info->attachments =
-      vk_zalloc(&cmd_buffer->vk.pool->alloc,
-                pass->attachment_count * sizeof(*info->attachments),
-                8,
-                VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
-   if (!info->attachments) {
-      return vk_command_buffer_set_error(&cmd_buffer->vk,
-                                         VK_ERROR_OUT_OF_HOST_MEMORY);
-   }
+   result =
+      pvr_cmd_buffer_attachments_alloc(cmd_buffer, pass->attachment_count);
+   if (result != VK_SUCCESS)
+      return result;
 
    for (uint32_t i = 0; i < pass->attachment_count; i++) {
       if (pImageless && pImageless->attachmentCount) {
@@ -3087,18 +3174,18 @@ static VkResult pvr_cmd_buffer_attachments_setup(
       }
    }
 
-   return VK_SUCCESS;
+   return result;
 }
 
 static inline VkResult pvr_render_targets_datasets_create(
    struct pvr_device *device,
-   struct pvr_framebuffer *framebuffer,
+   struct pvr_render_state *rstate,
    const struct pvr_renderpass_hwsetup_render *hw_render,
    struct pvr_render_target *render_target)
 {
    const struct pvr_device_info *const dev_info = &device->pdevice->dev_info;
    const uint32_t layers =
-      PVR_HAS_FEATURE(dev_info, gs_rta_support) ? framebuffer->layers : 1;
+      PVR_HAS_FEATURE(dev_info, gs_rta_support) ? rstate->layers : 1;
 
    pthread_mutex_lock(&render_target->mutex);
 
@@ -3110,8 +3197,8 @@ static inline VkResult pvr_render_targets_datasets_create(
          continue;
 
       result = pvr_render_target_dataset_create(device,
-                                                framebuffer->width,
-                                                framebuffer->height,
+                                                rstate->width,
+                                                rstate->height,
                                                 hw_render->sample_count,
                                                 layers,
                                                 &rt_dataset);
@@ -3130,21 +3217,33 @@ static inline VkResult pvr_render_targets_datasets_create(
    return VK_SUCCESS;
 }
 
-static VkResult pvr_render_targets_init(struct pvr_device *device,
-                                        struct pvr_render_pass *pass,
-                                        struct pvr_framebuffer *framebuffer)
+static VkResult pvr_render_targets_dataset_init(
+   struct pvr_device *device,
+   struct pvr_render_state *rstate,
+   const struct pvr_renderpass_hwsetup_render *hw_render)
+{
+   struct pvr_render_target *render_target =
+      pvr_get_render_target(hw_render, rstate);
+
+   return pvr_render_targets_datasets_create(device,
+                                             rstate,
+                                             hw_render,
+                                             render_target);
+}
+
+static VkResult
+pvr_render_targets_init_for_render(struct pvr_device *device,
+                                   struct pvr_render_pass *pass,
+                                   struct pvr_framebuffer *framebuffer)
 {
    for (uint32_t i = 0; i < pass->hw_setup->render_count; i++) {
-      struct pvr_render_target *render_target =
-         pvr_get_render_target(pass, framebuffer, i);
       const struct pvr_renderpass_hwsetup_render *hw_render =
          &pass->hw_setup->renders[i];
       VkResult result;
 
-      result = pvr_render_targets_datasets_create(device,
-                                                  framebuffer,
-                                                  hw_render,
-                                                  render_target);
+      result = pvr_render_targets_dataset_init(device,
+                                               framebuffer->rstate,
+                                               hw_render);
       if (result != VK_SUCCESS)
          return result;
    }
@@ -3161,24 +3260,43 @@ pvr_get_hw_subpass(const struct pvr_render_pass *pass, const uint32_t subpass)
    return &pass->hw_setup->renders[map->render].subpasses[map->subpass];
 }
 
-static void pvr_perform_start_of_render_attachment_clear(
-   struct pvr_cmd_buffer *cmd_buffer,
-   const struct pvr_framebuffer *framebuffer,
-   uint32_t index,
-   bool is_depth_stencil,
-   uint32_t *index_list_clear_mask)
+static void
+pvr_perform_start_of_render_attachment_clear(struct pvr_cmd_buffer *cmd_buffer,
+                                             uint32_t layers,
+                                             uint32_t index,
+                                             bool is_depth_stencil,
+                                             uint32_t *index_list_clear_mask,
+                                             bool resume_render)
 {
    ASSERTED static const VkImageAspectFlags dsc_aspect_flags =
       VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT |
       VK_IMAGE_ASPECT_COLOR_BIT;
    struct pvr_render_pass_info *info = &cmd_buffer->state.render_pass_info;
    const struct pvr_render_pass *pass = info->pass;
-   const struct pvr_renderpass_hwsetup *hw_setup = pass->hw_setup;
+   const struct pvr_renderpass_hwsetup *hw_setup = pass ? pass->hw_setup : NULL;
+   const uint32_t hw_render_idx =
+      hw_setup ? hw_setup->subpass_map[info->subpass_idx].render : 0;
    const struct pvr_renderpass_hwsetup_render *hw_render =
-      &hw_setup->renders[hw_setup->subpass_map[info->subpass_idx].render];
+      pvr_pass_info_get_hw_render(info, hw_render_idx);
    VkImageAspectFlags image_aspect;
+   const struct pvr_image *image;
    struct pvr_image_view *iview;
-   uint32_t view_idx;
+   VkFormat vk_format;
+   uint32_t iview_idx;
+
+   if (is_depth_stencil) {
+      assert(hw_render->ds_attach_idx != VK_ATTACHMENT_UNUSED);
+      iview_idx = hw_render->ds_attach_idx;
+   } else {
+      assert(index != VK_ATTACHMENT_UNUSED);
+      iview_idx = hw_render->color_init[index].index;
+   }
+
+   assert(iview_idx != VK_ATTACHMENT_UNUSED);
+
+   iview = info->attachments[iview_idx];
+   image = pvr_image_view_get_image(iview);
+   vk_format = image->vk.format;
 
    if (is_depth_stencil) {
       bool stencil_clear;
@@ -3186,15 +3304,12 @@ static void pvr_perform_start_of_render_attachment_clear(
       bool is_stencil;
       bool is_depth;
 
-      assert(hw_render->ds_attach_idx != VK_ATTACHMENT_UNUSED);
       assert(index == 0);
 
-      view_idx = hw_render->ds_attach_idx;
-
-      is_depth = vk_format_has_depth(pass->attachments[view_idx].vk_format);
-      is_stencil = vk_format_has_stencil(pass->attachments[view_idx].vk_format);
       depth_clear = hw_render->depth_init == VK_ATTACHMENT_LOAD_OP_CLEAR;
       stencil_clear = hw_render->stencil_init == VK_ATTACHMENT_LOAD_OP_CLEAR;
+      is_stencil = vk_format_has_stencil(vk_format);
+      is_depth = vk_format_has_depth(vk_format);
 
       /* Attempt to clear the ds attachment. Do not erroneously discard an
        * attachment that has no depth clear but has a stencil attachment.
@@ -3204,11 +3319,7 @@ static void pvr_perform_start_of_render_attachment_clear(
          return;
    } else if (hw_render->color_init[index].op != VK_ATTACHMENT_LOAD_OP_CLEAR) {
       return;
-   } else {
-      view_idx = hw_render->color_init[index].index;
    }
-
-   iview = info->attachments[view_idx];
 
    /* FIXME: It would be nice if this function and pvr_sub_cmd_gfx_job_init()
     * were doing the same check (even if it's just an assert) to determine if a
@@ -3217,12 +3328,11 @@ static void pvr_perform_start_of_render_attachment_clear(
    /* If this is single-layer fullscreen, we already do the clears in
     * pvr_sub_cmd_gfx_job_init().
     */
-   if (pvr_is_render_area_tile_aligned(cmd_buffer, iview) &&
-       framebuffer->layers == 1) {
+   if (pvr_is_render_area_tile_aligned(cmd_buffer, iview) && layers == 1) {
       return;
    }
 
-   image_aspect = vk_format_aspects(pass->attachments[view_idx].vk_format);
+   image_aspect = vk_format_aspects(vk_format);
    assert((image_aspect & ~dsc_aspect_flags) == 0);
 
    if (image_aspect & VK_IMAGE_ASPECT_DEPTH_BIT &&
@@ -3235,19 +3345,25 @@ static void pvr_perform_start_of_render_attachment_clear(
       image_aspect &= ~VK_IMAGE_ASPECT_STENCIL_BIT;
    }
 
-   if (image_aspect != VK_IMAGE_ASPECT_NONE) {
+   if (image_aspect != VK_IMAGE_ASPECT_NONE && !resume_render) {
       VkClearAttachment clear_attachment = {
          .aspectMask = image_aspect,
          .colorAttachment = index,
-         .clearValue = info->clear_values[view_idx],
+         .clearValue = info->clear_values[iview_idx],
       };
       VkClearRect rect = {
          .rect = info->render_area,
          .baseArrayLayer = 0,
-         .layerCount = info->framebuffer->layers,
+         /* TODO:
+          *
+          * Verify where layers should come from, info->framebuffer
+          * vs layers (function argument). Aren't they the same?
+          * If they are, drop the argument altogether.
+          */
+         .layerCount = info->rstate->layers,
       };
 
-      assert(view_idx < info->clear_value_count);
+      assert(iview_idx < info->clear_value_count);
 
       pvr_clear_attachments_render_init(cmd_buffer, &clear_attachment, &rect);
 
@@ -3256,14 +3372,21 @@ static void pvr_perform_start_of_render_attachment_clear(
 }
 
 static void
-pvr_perform_start_of_render_clears(struct pvr_cmd_buffer *cmd_buffer)
+pvr_perform_start_of_render_clears(struct pvr_cmd_buffer *cmd_buffer,
+                                   bool resume_render)
 {
    struct pvr_render_pass_info *info = &cmd_buffer->state.render_pass_info;
-   const struct pvr_framebuffer *framebuffer = info->framebuffer;
+   const struct pvr_renderpass_hwsetup_render *hw_render;
    const struct pvr_render_pass *pass = info->pass;
-   const struct pvr_renderpass_hwsetup *hw_setup = pass->hw_setup;
-   const struct pvr_renderpass_hwsetup_render *hw_render =
-      &hw_setup->renders[hw_setup->subpass_map[info->subpass_idx].render];
+
+   if (pass) {
+      const struct pvr_renderpass_hwsetup *hw_setup = pass->hw_setup;
+
+      hw_render =
+         &hw_setup->renders[hw_setup->subpass_map[info->subpass_idx].render];
+   } else {
+      hw_render = pvr_pass_info_get_hw_render(info, 0);
+   }
 
    /* Mask of attachment clears using index lists instead of background object
     * to clear.
@@ -3272,10 +3395,11 @@ pvr_perform_start_of_render_clears(struct pvr_cmd_buffer *cmd_buffer)
 
    for (uint32_t i = 0; i < hw_render->color_init_count; i++) {
       pvr_perform_start_of_render_attachment_clear(cmd_buffer,
-                                                   framebuffer,
+                                                   info->rstate->layers,
                                                    i,
                                                    false,
-                                                   &index_list_clear_mask);
+                                                   &index_list_clear_mask,
+                                                   resume_render);
    }
 
    info->enable_bg_tag = !!hw_render->color_init_count;
@@ -3294,19 +3418,20 @@ pvr_perform_start_of_render_clears(struct pvr_cmd_buffer *cmd_buffer)
       uint32_t ds_index_list = 0;
 
       pvr_perform_start_of_render_attachment_clear(cmd_buffer,
-                                                   framebuffer,
+                                                   info->rstate->layers,
                                                    0,
                                                    true,
-                                                   &ds_index_list);
+                                                   &ds_index_list,
+                                                   resume_render);
    }
 }
 
 static void pvr_stash_depth_format(struct pvr_cmd_buffer_state *state,
                                    struct pvr_sub_cmd_gfx *const sub_cmd)
 {
-   const struct pvr_render_pass *pass = state->render_pass_info.pass;
    const struct pvr_renderpass_hwsetup_render *hw_render =
-      &pass->hw_setup->renders[sub_cmd->hw_render_idx];
+      pvr_pass_info_get_hw_render(&state->render_pass_info,
+                                  sub_cmd->hw_render_idx);
 
    if (hw_render->ds_attach_idx != VK_ATTACHMENT_UNUSED) {
       struct pvr_image_view **iviews = state->render_pass_info.attachments;
@@ -3341,40 +3466,71 @@ static bool pvr_loadops_contain_clear(struct pvr_renderpass_hwsetup *hw_setup)
    return false;
 }
 
+static void pvr_cmd_buffer_clear_values_free(struct pvr_cmd_buffer *cmd_buffer)
+{
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+
+   if (!state->render_pass_info.clear_values) {
+      assert(!state->render_pass_info.clear_value_count);
+      return;
+   }
+
+   vk_free(&cmd_buffer->vk.pool->alloc, state->render_pass_info.clear_values);
+   state->render_pass_info.clear_value_count = 0;
+   state->render_pass_info.clear_values = NULL;
+}
+
+static VkResult
+pvr_cmd_buffer_clear_values_alloc(struct pvr_cmd_buffer *cmd_buffer,
+                                  uint32_t clear_value_count)
+{
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+
+   /* Free any previously allocated clear values. */
+   pvr_cmd_buffer_clear_values_free(cmd_buffer);
+
+   state->render_pass_info.clear_value_count = clear_value_count;
+   if (!clear_value_count) {
+      state->render_pass_info.clear_values = NULL;
+      return VK_SUCCESS;
+   }
+
+   const size_t size =
+      clear_value_count * sizeof(*state->render_pass_info.clear_values);
+
+   state->render_pass_info.clear_values =
+      vk_zalloc(&cmd_buffer->vk.pool->alloc,
+                size,
+                8,
+                VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
+   if (!state->render_pass_info.clear_values) {
+      return vk_command_buffer_set_error(&cmd_buffer->vk,
+                                         VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 pvr_cmd_buffer_set_clear_values(struct pvr_cmd_buffer *cmd_buffer,
                                 const VkRenderPassBeginInfo *pRenderPassBegin)
 {
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   const size_t size = pRenderPassBegin->clearValueCount *
+                       sizeof(*state->render_pass_info.clear_values);
+   VkResult result;
 
-   /* Free any previously allocated clear values. */
-   vk_free(&cmd_buffer->vk.pool->alloc, state->render_pass_info.clear_values);
+   result =
+      pvr_cmd_buffer_clear_values_alloc(cmd_buffer,
+                                        pRenderPassBegin->clearValueCount);
+   if (result != VK_SUCCESS)
+      return result;
 
-   if (pRenderPassBegin->clearValueCount) {
-      const size_t size = pRenderPassBegin->clearValueCount *
-                          sizeof(*state->render_pass_info.clear_values);
+   memcpy(state->render_pass_info.clear_values,
+          pRenderPassBegin->pClearValues,
+          size);
 
-      state->render_pass_info.clear_values =
-         vk_zalloc(&cmd_buffer->vk.pool->alloc,
-                   size,
-                   8,
-                   VK_SYSTEM_ALLOCATION_SCOPE_COMMAND);
-      if (!state->render_pass_info.clear_values) {
-         return vk_command_buffer_set_error(&cmd_buffer->vk,
-                                            VK_ERROR_OUT_OF_HOST_MEMORY);
-      }
-
-      memcpy(state->render_pass_info.clear_values,
-             pRenderPassBegin->pClearValues,
-             size);
-   } else {
-      state->render_pass_info.clear_values = NULL;
-   }
-
-   state->render_pass_info.clear_value_count =
-      pRenderPassBegin->clearValueCount;
-
-   return VK_SUCCESS;
+   return result;
 }
 
 /**
@@ -3541,13 +3697,230 @@ static VkResult pvr_cs_write_load_op(struct pvr_cmd_buffer *cmd_buffer,
    return VK_SUCCESS;
 }
 
+static inline enum pvr_resolve_op
+pvr_resolve_mode_to_op(enum VkResolveModeFlagBits mode)
+{
+   switch (mode) {
+   default:
+      UNREACHABLE("invalid resolve mode");
+      FALLTHROUGH;
+   case VK_RESOLVE_MODE_AVERAGE_BIT:
+      return PVR_RESOLVE_BLEND;
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
+      return PVR_RESOLVE_SAMPLE0;
+   case VK_RESOLVE_MODE_MIN_BIT:
+      return PVR_RESOLVE_MIN;
+   case VK_RESOLVE_MODE_MAX_BIT:
+      return PVR_RESOLVE_MAX;
+   }
+}
+
+static inline void
+pvr_resolve_subresource_layer_init(const struct pvr_image_view *const iview,
+                                   VkImageSubresourceLayers *subresource)
+{
+   *subresource = (VkImageSubresourceLayers){
+      .mipLevel = iview->vk.base_mip_level,
+      .baseArrayLayer = iview->vk.base_array_layer,
+      .layerCount = iview->vk.layer_count,
+   };
+}
+
+static inline void
+pvr_resolve_offset_init(const struct pvr_render_pass_info *const info,
+                        VkOffset3D *offset)
+{
+   *offset = (VkOffset3D){
+      .x = info->render_area.offset.x,
+      .y = info->render_area.offset.y,
+   };
+}
+
+/* clang-format off */
+static inline void
+pvr_resolve_image_copy_region_init(const struct pvr_image_view *const src_view,
+                                   const struct pvr_image_view *const dst_view,
+                                   const struct pvr_render_pass_info *const info,
+                                   VkImageCopy2 *region)
+{
+   pvr_resolve_subresource_layer_init(src_view, &region->srcSubresource);
+   pvr_resolve_subresource_layer_init(dst_view, &region->dstSubresource);
+   pvr_resolve_offset_init(info, &region->srcOffset);
+   pvr_resolve_offset_init(info, &region->dstOffset);
+
+   region->extent = (VkExtent3D){
+      .width = info->render_area.extent.width,
+      .height = info->render_area.extent.height,
+      .depth = 1
+   };
+}
+/* clang-format on */
+
+static VkResult
+pvr_resolve_unemitted_resolve_attachments(struct pvr_cmd_buffer *cmd_buffer,
+                                          struct pvr_render_pass_info *info)
+{
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   const struct pvr_renderpass_hwsetup_render *hw_render =
+      pvr_pass_info_get_hw_render(&state->render_pass_info,
+                                  info->current_hw_subpass);
+
+   for (uint32_t i = 0U; i < hw_render->eot_surface_count; i++) {
+      const struct pvr_renderpass_hwsetup_eot_surface *surface =
+         &hw_render->eot_surfaces[i];
+      const uint32_t color_attach_idx = surface->src_attachment_idx;
+      const uint32_t resolve_attach_idx = surface->attachment_idx;
+      struct pvr_image_view *dst_view;
+      struct pvr_image_view *src_view;
+      VkFormat src_format;
+      VkFormat dst_format;
+      VkImageCopy2 region;
+      VkResult result;
+
+      if (!surface->need_resolve ||
+          surface->resolve_type != PVR_RESOLVE_TYPE_TRANSFER) {
+         continue;
+      }
+
+      dst_view = info->attachments[resolve_attach_idx];
+      src_view = info->attachments[color_attach_idx];
+
+      pvr_resolve_image_copy_region_init(src_view, dst_view, info, &region);
+      region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+      /* TODO: if ERN_46863 is supported, Depth and stencil are sampled
+       * separately from images with combined depth+stencil. Add logic here to
+       * handle it using appropriate format from image view.
+       */
+      src_format = src_view->vk.image->format;
+      dst_format = dst_view->vk.image->format;
+      src_view->vk.image->format = src_view->vk.format;
+      dst_view->vk.image->format = dst_view->vk.format;
+
+      result = pvr_copy_or_resolve_color_image_region(
+         cmd_buffer,
+         vk_to_pvr_image(src_view->vk.image),
+         vk_to_pvr_image(dst_view->vk.image),
+         &region);
+
+      src_view->vk.image->format = src_format;
+      dst_view->vk.image->format = dst_format;
+
+      state->current_sub_cmd->transfer.serialize_with_frag = true;
+
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   if (hw_render->stencil_resolve_mode || hw_render->depth_resolve_mode) {
+      const struct pvr_image_view *dst_view =
+         info->attachments[hw_render->ds_attach_resolve_idx];
+      const struct pvr_image_view *src_view =
+         info->attachments[hw_render->ds_attach_idx];
+      const VkClearValue *resolve_clear_values =
+         &state->render_pass_info.clear_values[hw_render->ds_attach_resolve_idx];
+      const bool both_stencil = vk_format_has_stencil(dst_view->vk.format) &&
+                                vk_format_has_stencil(src_view->vk.format);
+      const bool both_depth = vk_format_has_depth(dst_view->vk.format) &&
+                              vk_format_has_depth(src_view->vk.format);
+      struct pvr_render_pass_attachment resolve_attachment;
+      bool clear_depth = false, clear_stencil = false;
+      VkClearDepthStencilValue clear_values;
+      VkImageCopy2 region;
+
+      pvr_resolve_image_copy_region_init(src_view, dst_view, info, &region);
+
+      if (!info->dr_info) {
+         resolve_attachment =
+            info->pass->attachments[hw_render->ds_attach_resolve_idx];
+
+         if (both_depth && !hw_render->depth_resolve_mode &&
+             resolve_attachment.store_op == VK_ATTACHMENT_STORE_OP_STORE &&
+             resolve_attachment.load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+            clear_values.depth = resolve_clear_values->depthStencil.depth;
+            clear_depth = true;
+         }
+
+         if (both_stencil && !hw_render->stencil_resolve_mode &&
+             resolve_attachment.stencil_store_op ==
+                VK_ATTACHMENT_STORE_OP_STORE &&
+             resolve_attachment.stencil_load_op ==
+                VK_ATTACHMENT_LOAD_OP_CLEAR) {
+            clear_values.stencil = resolve_clear_values->depthStencil.stencil;
+            clear_stencil = true;
+         }
+      }
+
+      /* Resolve depth and if it can clear stencil */
+      if (both_depth && hw_render->depth_resolve_mode) {
+         region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+
+         pvr_copy_or_resolve_depth_stencil_region(
+            cmd_buffer,
+            vk_to_pvr_image(src_view->vk.image),
+            vk_to_pvr_image(dst_view->vk.image),
+            pvr_resolve_mode_to_op(hw_render->depth_resolve_mode),
+            clear_stencil,
+            &clear_values,
+            &region);
+
+         state->current_sub_cmd->transfer.serialize_with_frag = true;
+         clear_stencil = false;
+      }
+
+      /* Resolve stencil and if it can clear depth */
+      if (both_stencil && hw_render->stencil_resolve_mode) {
+         region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+
+         pvr_copy_or_resolve_depth_stencil_region(
+            cmd_buffer,
+            vk_to_pvr_image(src_view->vk.image),
+            vk_to_pvr_image(dst_view->vk.image),
+            pvr_resolve_mode_to_op(hw_render->stencil_resolve_mode),
+            clear_depth,
+            &clear_values,
+            &region);
+
+         state->current_sub_cmd->transfer.serialize_with_frag = true;
+         clear_depth = false;
+      }
+
+      /* Clear what it couldn't be cleared yet */
+      if (clear_stencil || clear_depth) {
+         const VkImageAspectFlagBits aspect =
+            (clear_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
+            (clear_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
+         VkImageSubresourceRange range = (VkImageSubresourceRange){
+            .aspectMask = aspect,
+            .baseMipLevel = dst_view->vk.base_mip_level,
+            .levelCount = 1,
+            .baseArrayLayer = dst_view->vk.base_array_layer,
+            .layerCount = dst_view->vk.layer_count,
+         };
+
+         pvr_clear_depth_stencil_image(cmd_buffer,
+                                       vk_to_pvr_image(dst_view->vk.image),
+                                       &clear_values,
+                                       1,
+                                       &range);
+
+         state->current_sub_cmd->transfer.serialize_with_frag = true;
+      }
+   }
+
+   return pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
+}
+
 void pvr_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
                              const VkRenderPassBeginInfo *pRenderPassBeginInfo,
                              const VkSubpassBeginInfo *pSubpassBeginInfo)
 {
    VK_FROM_HANDLE(pvr_framebuffer,
-                   framebuffer,
-                   pRenderPassBeginInfo->framebuffer);
+                  framebuffer,
+                  pRenderPassBeginInfo->framebuffer);
    VK_FROM_HANDLE(pvr_render_pass, pass, pRenderPassBeginInfo->renderPass);
    VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
    const struct pvr_renderpass_hwsetup_subpass *hw_subpass;
@@ -3563,6 +3936,7 @@ void pvr_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
     * look at cmd_buffer_begin_subpass() for example. */
    state->render_pass_info.pass = pass;
    state->render_pass_info.framebuffer = framebuffer;
+   state->render_pass_info.rstate = framebuffer->rstate;
    state->render_pass_info.subpass_idx = 0;
    state->render_pass_info.render_area = pRenderPassBeginInfo->renderArea;
    state->render_pass_info.current_hw_subpass = 0;
@@ -3578,7 +3952,8 @@ void pvr_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
    if (result != VK_SUCCESS)
       return;
 
-   result = pvr_render_targets_init(cmd_buffer->device, pass, framebuffer);
+   result =
+      pvr_render_targets_init_for_render(cmd_buffer->device, pass, framebuffer);
    if (result != VK_SUCCESS) {
       pvr_cmd_buffer_set_error_unwarned(cmd_buffer, result);
       return;
@@ -3608,9 +3983,1126 @@ void pvr_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
          return;
    }
 
-   pvr_perform_start_of_render_clears(cmd_buffer);
+   pvr_perform_start_of_render_clears(cmd_buffer, false);
    pvr_stash_depth_format(&cmd_buffer->state,
                           &cmd_buffer->state.current_sub_cmd->gfx);
+}
+
+static inline uint32_t
+pvr_get_ds_component_bits(const VkFormat vk_format,
+                          const VkImageAspectFlags ds_aspect)
+{
+   uint32_t component;
+
+   if (ds_aspect == VK_IMAGE_ASPECT_STENCIL_BIT) {
+      assert(vk_format_has_stencil(vk_format));
+      component = 0;
+   } else {
+      assert(ds_aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
+      assert(vk_format_has_depth(vk_format));
+      component = 1;
+   }
+
+   return vk_format_get_component_bits(vk_format,
+                                       UTIL_FORMAT_COLORSPACE_ZS,
+                                       component);
+}
+
+static inline bool
+pvr_can_pbe_resolve_ds_attachment(const struct pvr_device_info *dev_info,
+                                  VkFormat vk_format,
+                                  uint32_t sample_count,
+                                  VkResolveModeFlagBits resolve_mode)
+{
+   if (!PVR_HAS_FEATURE(dev_info, gs_rta_support))
+      return false;
+
+   if (resolve_mode != VK_RESOLVE_MODE_AVERAGE_BIT)
+      return false;
+
+   if (pvr_get_ds_component_bits(vk_format, VK_IMAGE_ASPECT_STENCIL_BIT))
+      return false;
+
+   return pvr_format_is_pbe_downscalable(dev_info, vk_format);
+}
+
+static inline VkResult
+pvr_mrt_setup_partial_init(struct pvr_device *const device,
+                           struct usc_mrt_setup *mrt_setup,
+                           uint32_t num_renger_targets,
+                           uint32_t num_output_regs,
+                           uint32_t num_tile_buffers)
+{
+   struct usc_mrt_resource *mrt_resources = NULL;
+
+   if (num_renger_targets) {
+      const uint32_t size =
+         num_renger_targets * sizeof(*mrt_setup->mrt_resources);
+
+      mrt_resources = vk_zalloc(&device->vk.alloc,
+                                size,
+                                8,
+                                VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!mrt_resources)
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   *mrt_setup = (struct usc_mrt_setup){
+      .num_render_targets = num_renger_targets,
+      .num_output_regs = num_output_regs,
+      .num_tile_buffers = num_tile_buffers,
+      .mrt_resources = mrt_resources,
+   };
+
+   return VK_SUCCESS;
+}
+
+static void pvr_dynamic_rendering_output_attachments_cleanup(
+   const struct pvr_device *device,
+   const VkAllocationCallbacks *const allocator,
+   struct pvr_dynamic_render_info *dr_info)
+{
+   if (!dr_info)
+      return;
+
+   pvr_mrt_load_op_state_cleanup(device,
+                                 allocator,
+                                 dr_info->hw_render.load_op_state);
+
+   pvr_destroy_mrt_setup(device, &dr_info->hw_render.eot_setup);
+   pvr_destroy_mrt_setup(device, &dr_info->hw_render.init_setup);
+   pvr_destroy_mrt_setup(device, dr_info->mrt_setup);
+
+   vk_free2(&device->vk.alloc, allocator, dr_info->hw_render.eot_surfaces);
+   vk_free2(&device->vk.alloc, allocator, dr_info->hw_render.color_init);
+   vk_free2(&device->vk.alloc, allocator, dr_info->color_attachments);
+}
+
+static VkResult pvr_dynamic_rendering_output_attachments_setup(
+   struct pvr_cmd_buffer *cmd_buffer,
+   const VkRenderingInfo *pRenderingInfo,
+   struct pvr_dynamic_render_info *dr_info,
+   uint32_t *attach_idx)
+{
+   VkFormat attachment_formats[pRenderingInfo->colorAttachmentCount];
+   uint32_t mrt_attachment_map[pRenderingInfo->colorAttachmentCount];
+   uint32_t mrt_count = 0, eot_mrt_count = 0, eot_mrt_idx = 0,
+            eot_surface_idx = 0, color_idx = 0, pbe_emits = 0,
+            init_setup_idx = 0;
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_device *device = cmd_buffer->device;
+   struct usc_mrt_setup mrt_setup;
+   VkResult result;
+
+   dr_info->color_attachment_count = pRenderingInfo->colorAttachmentCount;
+
+   if (dr_info->color_attachment_count) {
+      const uint32_t size =
+         sizeof(*dr_info->color_attachments) * dr_info->color_attachment_count;
+
+      dr_info->color_attachments = vk_zalloc(&device->vk.alloc,
+                                             size,
+                                             8,
+                                             VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!dr_info->color_attachments) {
+         return vk_command_buffer_set_error(&cmd_buffer->vk,
+                                            VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
+   }
+
+   for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+      uint32_t cur_attach_idx = *attach_idx;
+      struct pvr_render_pass_attachment *attachment =
+         &dr_info->attachments[cur_attach_idx];
+      const VkRenderingAttachmentInfo *attachment_info =
+         &pRenderingInfo->pColorAttachments[i];
+      const struct pvr_image *image;
+      struct pvr_image_view *iview;
+
+      /* Start off clean */
+      dr_info->color_attachments[i].index_color = VK_ATTACHMENT_UNUSED;
+      dr_info->color_attachments[i].index_resolve = VK_ATTACHMENT_UNUSED;
+      attachment_formats[mrt_count] = VK_FORMAT_UNDEFINED;
+      mrt_attachment_map[i] = VK_ATTACHMENT_UNUSED;
+
+      if (attachment_info->imageView)
+         iview = pvr_image_view_from_handle(attachment_info->imageView);
+      else if (attachment_info->resolveImageView)
+         iview = pvr_image_view_from_handle(attachment_info->resolveImageView);
+      else
+         continue;
+
+      /* We have an output color attachment */
+      image = pvr_image_view_get_image(iview);
+
+      state->render_pass_info.attachments[cur_attach_idx] = iview;
+      state->render_pass_info.rstate->height =
+         MIN2(state->render_pass_info.rstate->height, image->vk.extent.height);
+      state->render_pass_info.rstate->width =
+         MIN2(state->render_pass_info.rstate->width, image->vk.extent.width);
+
+      mrt_attachment_map[i] = mrt_count;
+      attachment_formats[mrt_count++] = iview->vk.view_format;
+
+      attachment->index = cur_attach_idx;
+      attachment->vk_format = iview->vk.view_format;
+      attachment->sample_count = image->vk.samples;
+      attachment->resolve_target = VK_ATTACHMENT_UNUSED;
+      attachment->load_op = attachment_info->loadOp;
+      attachment->store_op = attachment_info->storeOp;
+      attachment->resolve_mode = attachment_info->resolveMode;
+      attachment->stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      attachment->stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      attachment->stencil_resolve_mode = VK_RESOLVE_MODE_NONE;
+      attachment->need_eot = true;
+      /* TODO: verify logic for is_pbe_downscalable */
+      attachment->is_pbe_downscalable = pvr_can_pbe_resolve_ds_attachment(
+         &cmd_buffer->device->pdevice->dev_info,
+         iview->vk.view_format,
+         image->vk.samples,
+         attachment_info->resolveMode);
+
+      dr_info->color_attachments[i].index_color = cur_attach_idx;
+      dr_info->hw_render.sample_count =
+         MAX2(dr_info->hw_render.sample_count, attachment->sample_count);
+
+      *attach_idx += 1;
+
+      if (attachment->resolve_mode &&
+          cur_attach_idx < dr_info->attachment_count) {
+         const uint32_t resolve_attach_idx = *attach_idx;
+         struct pvr_render_pass_attachment *resolve_attach =
+            &dr_info->attachments[resolve_attach_idx];
+         struct pvr_image_view *resolve_iview =
+            pvr_image_view_from_handle(attachment_info->resolveImageView);
+
+         assert(resolve_iview &&
+                resolve_attach_idx <= dr_info->attachment_count);
+
+         state->render_pass_info.attachments[resolve_attach_idx] =
+            resolve_iview;
+
+         attachment->resolve_target = resolve_attach_idx;
+
+         dr_info->color_attachments[i].index_resolve = resolve_attach_idx;
+         dr_info->hw_render.has_side_effects = true;
+         dr_info->hw_render.requires_frag_pr = true;
+         dr_info->hw_render.eot_surface_count++;
+
+         resolve_attach->sample_count = image->vk.samples;
+         resolve_attach->index = resolve_attach_idx;
+         resolve_attach->vk_format = resolve_iview->vk.view_format;
+         resolve_attach->load_op = resolve_attach->stencil_load_op =
+            VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+         resolve_attach->store_op = resolve_attach->stencil_store_op =
+            VK_ATTACHMENT_STORE_OP_DONT_CARE;
+         resolve_attach->resolve_mode = resolve_attach->stencil_resolve_mode =
+            VK_RESOLVE_MODE_NONE;
+         resolve_attach->resolve_target = VK_ATTACHMENT_UNUSED;
+
+         /* If resolving with a tranfer, then always store the source */
+         if (!attachment->is_pbe_downscalable)
+            attachment->store_op = VK_ATTACHMENT_STORE_OP_STORE;
+
+         *attach_idx += 1;
+      }
+
+      if (attachment->load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         VkClearColorValue *clear_value =
+            &state->render_pass_info.clear_values[cur_attach_idx].color;
+
+         *clear_value = attachment_info->clearValue.color;
+
+         if (attachment->store_op == VK_ATTACHMENT_STORE_OP_STORE)
+            dr_info->hw_render.has_side_effects = true;
+      }
+
+      if (attachment->load_op == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+          attachment->load_op == VK_ATTACHMENT_LOAD_OP_LOAD) {
+         dr_info->hw_render.color_init_count++;
+      }
+
+      if (attachment->store_op == VK_ATTACHMENT_STORE_OP_STORE)
+         dr_info->hw_render.eot_surface_count++;
+      else
+         dr_info->hw_render.requires_frag_pr = true;
+
+      if (attachment->store_op == VK_ATTACHMENT_STORE_OP_STORE ||
+          attachment->resolve_mode) {
+         eot_mrt_count++;
+      }
+   }
+
+   if (dr_info->hw_render.color_init_count) {
+      const uint32_t size = dr_info->hw_render.color_init_count *
+                            sizeof(*dr_info->hw_render.color_init);
+
+      dr_info->hw_render.color_init =
+         vk_zalloc(&device->vk.alloc,
+                   size,
+                   8,
+                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!dr_info->hw_render.color_init) {
+         result = vk_command_buffer_set_error(&cmd_buffer->vk,
+                                              VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto err_free_color_attachments;
+      }
+   }
+
+   if (dr_info->hw_render.eot_surface_count) {
+      const uint32_t size = dr_info->hw_render.eot_surface_count *
+                            sizeof(*dr_info->hw_render.eot_surfaces);
+
+      dr_info->hw_render.eot_surfaces =
+         vk_zalloc(&device->vk.alloc,
+                   size,
+                   8,
+                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!dr_info->hw_render.eot_surfaces) {
+         result = vk_command_buffer_set_error(&cmd_buffer->vk,
+                                              VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto err_free_hw_render_color_init;
+      }
+   }
+
+   result =
+      pvr_init_usc_mrt_setup(device, mrt_count, attachment_formats, &mrt_setup);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_free_hw_render_eot_surface;
+   }
+
+   dr_info->hw_render.tile_buffers_count = mrt_setup.num_tile_buffers;
+   dr_info->hw_render.output_regs_count = mrt_setup.num_output_regs;
+
+   result = pvr_mrt_setup_partial_init(cmd_buffer->device,
+                                       dr_info->mrt_setup,
+                                       pRenderingInfo->colorAttachmentCount,
+                                       dr_info->hw_render.output_regs_count,
+                                       dr_info->hw_render.tile_buffers_count);
+   if (result != VK_SUCCESS) {
+      pvr_destroy_mrt_setup(device, &mrt_setup);
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_free_hw_render_eot_surface;
+   }
+
+   /* We fully initialised only a mrt_count number of render targets,
+    * now scatter gather them over the whole number of attachments.
+    * This is necessary because render targets are attachment-indexed
+    * throughout the driver.
+    */
+   for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+      if (mrt_attachment_map[i] != VK_ATTACHMENT_UNUSED) {
+         memcpy(&dr_info->mrt_setup->mrt_resources[i],
+                &mrt_setup.mrt_resources[mrt_attachment_map[i]],
+                sizeof(mrt_setup.mrt_resources[0]));
+      }
+   }
+
+   result = pvr_mrt_setup_partial_init(cmd_buffer->device,
+                                       &dr_info->hw_render.init_setup,
+                                       dr_info->hw_render.color_init_count,
+                                       dr_info->hw_render.output_regs_count,
+                                       dr_info->hw_render.tile_buffers_count);
+   if (result != VK_SUCCESS) {
+      pvr_destroy_mrt_setup(device, &mrt_setup);
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_finish_mrt_setup;
+   }
+
+   result = pvr_mrt_setup_partial_init(cmd_buffer->device,
+                                       &dr_info->hw_render.eot_setup,
+                                       eot_mrt_count,
+                                       dr_info->hw_render.output_regs_count,
+                                       dr_info->hw_render.tile_buffers_count);
+   if (result != VK_SUCCESS) {
+      pvr_destroy_mrt_setup(device, &mrt_setup);
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_finish_mrt_init_setup;
+   }
+
+   for (uint32_t i = 0; i < dr_info->attachment_count; i++) {
+      struct pvr_render_pass_attachment *attachment = &dr_info->attachments[i];
+      bool need_eot_setup = false;
+
+      if (!attachment->need_eot)
+         continue;
+
+      if (attachment->load_op == VK_ATTACHMENT_LOAD_OP_CLEAR ||
+          attachment->load_op == VK_ATTACHMENT_LOAD_OP_LOAD) {
+         dr_info->hw_render.color_init[init_setup_idx].index = i;
+         dr_info->hw_render.color_init[init_setup_idx].op = attachment->load_op;
+         dr_info->hw_render.init_setup.mrt_resources[init_setup_idx] =
+            mrt_setup.mrt_resources[color_idx];
+         init_setup_idx++;
+      }
+
+      if (attachment->store_op == VK_ATTACHMENT_STORE_OP_STORE ||
+          (attachment->resolve_mode && !attachment->is_pbe_downscalable)) {
+         struct pvr_renderpass_hwsetup_eot_surface *surface =
+            &dr_info->hw_render.eot_surfaces[eot_surface_idx];
+
+         surface->src_attachment_idx = VK_ATTACHMENT_UNUSED;
+         surface->resolve_type = PVR_RESOLVE_TYPE_INVALID;
+         surface->mrt_idx = eot_mrt_idx;
+         surface->attachment_idx = i;
+
+         need_eot_setup = true;
+         eot_surface_idx++;
+         pbe_emits++;
+      }
+
+      if (attachment->resolve_mode) {
+         struct pvr_renderpass_hwsetup_eot_surface *surface =
+            &dr_info->hw_render.eot_surfaces[eot_surface_idx]; /* next surface
+                                                                */
+
+         surface->src_attachment_idx = i;
+         surface->mrt_idx = eot_mrt_idx;
+         surface->need_resolve = true;
+         surface->attachment_idx = attachment->resolve_target;
+
+         if (attachment->store_op == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+             attachment->is_pbe_downscalable) {
+            surface->resolve_type = PVR_RESOLVE_TYPE_PBE;
+            pbe_emits++;
+         } else if (!attachment->is_pbe_downscalable) {
+            surface->resolve_type = PVR_RESOLVE_TYPE_TRANSFER;
+         } else {
+            surface->resolve_type = PVR_RESOLVE_TYPE_INVALID;
+         }
+
+         need_eot_setup = true;
+         eot_surface_idx++;
+      }
+
+      if (need_eot_setup) {
+         dr_info->hw_render.eot_setup.mrt_resources[eot_mrt_idx++] =
+            mrt_setup.mrt_resources[color_idx];
+      }
+
+      color_idx++;
+   }
+
+   assert(dr_info->hw_render.eot_surface_count == eot_surface_idx);
+   assert(pbe_emits <= PVR_MAX_COLOR_ATTACHMENTS);
+
+   for (uint32_t i = 0; i < eot_surface_idx; i++) {
+      struct pvr_renderpass_hwsetup_eot_surface *surface =
+         &dr_info->hw_render.eot_surfaces[i];
+      struct pvr_render_pass_attachment *attachment;
+
+      if (!surface->need_resolve ||
+          surface->resolve_type != PVR_RESOLVE_TYPE_INVALID) {
+         continue;
+      }
+
+      assert(surface->src_attachment_idx != VK_ATTACHMENT_UNUSED);
+
+      attachment = &dr_info->attachments[surface->src_attachment_idx];
+      if (attachment->resolve_mode) {
+         if (pbe_emits < PVR_MAX_COLOR_ATTACHMENTS) {
+            surface->resolve_type = PVR_RESOLVE_TYPE_PBE;
+            pbe_emits++;
+         } else {
+            surface->resolve_type = PVR_RESOLVE_TYPE_TRANSFER;
+         }
+      }
+   }
+
+   dr_info->hw_render.pbe_emits = pbe_emits;
+
+   pvr_destroy_mrt_setup(device, &mrt_setup);
+
+   return VK_SUCCESS;
+
+err_finish_mrt_init_setup:
+   pvr_destroy_mrt_setup(device, &dr_info->hw_render.init_setup);
+
+err_finish_mrt_setup:
+   pvr_destroy_mrt_setup(device, dr_info->mrt_setup);
+
+err_free_hw_render_eot_surface:
+   vk_free(&device->vk.alloc, dr_info->hw_render.eot_surfaces);
+
+err_free_hw_render_color_init:
+   vk_free(&device->vk.alloc, dr_info->hw_render.color_init);
+
+err_free_color_attachments:
+   vk_free(&device->vk.alloc, dr_info->color_attachments);
+
+   return result;
+}
+
+static void
+pvr_dynamic_render_info_destroy(const struct pvr_device *device,
+                                struct pvr_cmd_buffer *cmd_buffer,
+                                struct pvr_dynamic_render_info *dr_info)
+{
+   pvr_dynamic_rendering_output_attachments_cleanup(device,
+                                                    &device->vk.alloc,
+                                                    dr_info);
+
+   pvr_cmd_buffer_clear_values_free(cmd_buffer);
+   pvr_cmd_buffer_attachments_free(cmd_buffer);
+
+   if (dr_info)
+      vk_free(&device->vk.alloc, dr_info->attachments);
+
+   vk_free(&device->vk.alloc, dr_info);
+}
+
+static VkResult
+pvr_dynamic_render_info_create(struct pvr_cmd_buffer *cmd_buffer,
+                               const VkRenderingInfo *pRenderingInfo,
+                               struct pvr_dynamic_render_info **dr_info_out)
+{
+   const bool has_stencil_resolve_iview =
+      pRenderingInfo->pStencilAttachment &&
+      pRenderingInfo->pStencilAttachment->resolveMode &&
+      pRenderingInfo->pStencilAttachment->resolveImageView;
+   const bool has_depth_resolve_iview =
+      pRenderingInfo->pDepthAttachment &&
+      pRenderingInfo->pDepthAttachment->resolveMode &&
+      pRenderingInfo->pDepthAttachment->resolveImageView;
+   const bool has_stencil_iview = pRenderingInfo->pStencilAttachment &&
+                                  pRenderingInfo->pStencilAttachment->imageView;
+   const bool has_depth_iview = pRenderingInfo->pDepthAttachment &&
+                                pRenderingInfo->pDepthAttachment->imageView;
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_device *device = cmd_buffer->device;
+   struct pvr_dynamic_render_info *dr_info;
+   struct pvr_render_state *rstate;
+   struct usc_mrt_setup *mrt_setup;
+   uint32_t attach_idx = 0;
+   VkResult result;
+
+   VK_MULTIALLOC(ma);
+   vk_multialloc_add(&ma, &dr_info, __typeof__(*dr_info), 1);
+   vk_multialloc_add(&ma, &mrt_setup, __typeof__(*mrt_setup), 1);
+   if (!vk_multialloc_zalloc(&ma,
+                             &device->vk.alloc,
+                             VK_SYSTEM_ALLOCATION_SCOPE_OBJECT)) {
+      return vk_command_buffer_set_error(&cmd_buffer->vk,
+                                         VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+      const VkRenderingAttachmentInfo *attachment_info =
+         &pRenderingInfo->pColorAttachments[i];
+
+      if (attachment_info->imageView)
+         dr_info->attachment_count++;
+
+      if (attachment_info->resolveMode && attachment_info->resolveImageView)
+         dr_info->attachment_count++;
+   }
+
+   dr_info->attachment_count += has_depth_iview || has_stencil_iview;
+   dr_info->attachment_count += has_depth_resolve_iview ||
+                                has_stencil_resolve_iview;
+   dr_info->mrt_setup = mrt_setup;
+
+   rstate = vk_zalloc(&device->vk.alloc,
+                      sizeof(*rstate),
+                      8,
+                      VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   if (!rstate) {
+      result = vk_command_buffer_set_error(&cmd_buffer->vk,
+                                           VK_ERROR_OUT_OF_HOST_MEMORY);
+      goto err_free_dr_info;
+   }
+
+   *rstate = (struct pvr_render_state){
+      .width = UINT32_MAX,
+      .height = UINT32_MAX,
+      .width_alignment = 1,
+      .height_alignment = 1,
+   };
+
+   state->render_pass_info.rstate = rstate;
+
+   if (dr_info->attachment_count) {
+      dr_info->attachments =
+         vk_zalloc(&device->vk.alloc,
+                   sizeof(*dr_info->attachments) * dr_info->attachment_count,
+                   8,
+                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!dr_info->attachments) {
+         result = vk_command_buffer_set_error(&cmd_buffer->vk,
+                                              VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto err_free_rstate;
+      }
+
+      result = pvr_cmd_buffer_attachments_alloc(cmd_buffer,
+                                                dr_info->attachment_count);
+      if (result != VK_SUCCESS) {
+         result = vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         goto err_free_dr_info_attachments;
+      }
+
+      result = pvr_cmd_buffer_clear_values_alloc(cmd_buffer,
+                                                 dr_info->attachment_count);
+      if (result != VK_SUCCESS) {
+         result = vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         goto err_free_cmd_buffer_attachments;
+      }
+   } else {
+      pvr_cmd_buffer_clear_values_free(cmd_buffer);
+      pvr_cmd_buffer_attachments_free(cmd_buffer);
+   }
+
+   dr_info->hw_render = (struct pvr_renderpass_hwsetup_render){
+      .ds_attach_resolve_idx = VK_ATTACHMENT_UNUSED,
+      .ds_attach_idx = VK_ATTACHMENT_UNUSED,
+      .depth_init = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .stencil_init = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
+      .multiview_enabled = !!pRenderingInfo->viewMask,
+      .view_mask = MAX2(1, pRenderingInfo->viewMask),
+      .sample_count = 1,
+   };
+
+   if (has_depth_iview || has_stencil_iview) {
+      struct pvr_render_pass_attachment *ds_attach =
+         &dr_info->attachments[attach_idx];
+      VkClearDepthStencilValue *clear_value;
+      const struct pvr_image *image;
+      struct pvr_image_view *iview;
+
+      ds_attach->index = attach_idx;
+
+      ds_attach->load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      ds_attach->store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      if (has_depth_iview) {
+         iview = pvr_image_view_from_handle(
+            pRenderingInfo->pDepthAttachment->imageView);
+         ds_attach->is_depth = true;
+         ds_attach->load_op = pRenderingInfo->pDepthAttachment->loadOp;
+         ds_attach->store_op = pRenderingInfo->pDepthAttachment->storeOp;
+         ds_attach->resolve_mode =
+            pRenderingInfo->pDepthAttachment->resolveMode;
+      }
+
+      ds_attach->stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      ds_attach->stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      if (has_stencil_iview) {
+         iview = pvr_image_view_from_handle(
+            pRenderingInfo->pStencilAttachment->imageView);
+         ds_attach->is_stencil = true;
+         ds_attach->stencil_load_op =
+            pRenderingInfo->pStencilAttachment->loadOp;
+         ds_attach->stencil_store_op =
+            pRenderingInfo->pStencilAttachment->storeOp;
+         ds_attach->stencil_resolve_mode =
+            pRenderingInfo->pStencilAttachment->resolveMode;
+      }
+
+      image = pvr_image_view_get_image(iview);
+
+      ds_attach->vk_format = iview->vk.view_format;
+      ds_attach->sample_count = image->vk.samples;
+      ds_attach->resolve_target = VK_ATTACHMENT_UNUSED;
+
+      state->render_pass_info.attachments[attach_idx] = iview;
+      state->render_pass_info.rstate->height =
+         MIN2(state->render_pass_info.rstate->height, image->vk.extent.height);
+      state->render_pass_info.rstate->width =
+         MIN2(state->render_pass_info.rstate->width, image->vk.extent.width);
+
+      dr_info->hw_render.ds_attach_idx = attach_idx;
+      dr_info->hw_render.depth_init = ds_attach->load_op;
+      dr_info->hw_render.depth_store = ds_attach->store_op ==
+                                       VK_ATTACHMENT_STORE_OP_STORE;
+      dr_info->hw_render.depth_resolve_mode = ds_attach->resolve_mode;
+
+      dr_info->hw_render.stencil_init = ds_attach->stencil_load_op;
+      dr_info->hw_render.stencil_store = ds_attach->stencil_store_op ==
+                                         VK_ATTACHMENT_STORE_OP_STORE;
+      dr_info->hw_render.sample_count =
+         MAX2(dr_info->hw_render.sample_count, ds_attach->sample_count);
+      dr_info->hw_render.stencil_resolve_mode = ds_attach->stencil_resolve_mode;
+
+      clear_value =
+         &state->render_pass_info.clear_values[attach_idx].depthStencil;
+
+      if (ds_attach->load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         clear_value->depth =
+            pRenderingInfo->pDepthAttachment->clearValue.depthStencil.depth;
+         if (ds_attach->store_op == VK_ATTACHMENT_STORE_OP_STORE)
+            dr_info->hw_render.has_side_effects = true;
+      }
+
+      if (ds_attach->stencil_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
+         clear_value->stencil =
+            pRenderingInfo->pStencilAttachment->clearValue.depthStencil.stencil;
+         if (ds_attach->stencil_store_op == VK_ATTACHMENT_STORE_OP_STORE)
+            dr_info->hw_render.has_side_effects = true;
+      }
+
+      attach_idx++;
+
+      if (ds_attach->resolve_mode || ds_attach->stencil_resolve_mode) {
+         struct pvr_render_pass_attachment *resolve_ds_attach =
+            &dr_info->attachments[attach_idx];
+         struct pvr_image_view *resolve_iview;
+
+         ds_attach->resolve_target = attach_idx;
+
+         if (has_depth_resolve_iview) {
+            resolve_iview = pvr_image_view_from_handle(
+               pRenderingInfo->pDepthAttachment->resolveImageView);
+         } else if (has_stencil_resolve_iview) {
+            resolve_iview = pvr_image_view_from_handle(
+               pRenderingInfo->pStencilAttachment->resolveImageView);
+         } else {
+            UNREACHABLE("invalid image view for DS resolve attachment");
+         }
+
+         state->render_pass_info.attachments[attach_idx] = resolve_iview;
+
+         dr_info->hw_render.ds_attach_resolve_idx = attach_idx;
+         dr_info->hw_render.has_side_effects = true;
+
+         assert(iview->vk.view_format == resolve_iview->vk.view_format);
+
+         resolve_ds_attach->vk_format = ds_attach->vk_format;
+         resolve_ds_attach->sample_count = 1;
+         resolve_ds_attach->index = attach_idx;
+         resolve_ds_attach->resolve_target = VK_ATTACHMENT_UNUSED;
+         resolve_ds_attach->is_stencil = ds_attach->is_stencil;
+         resolve_ds_attach->store_op = ds_attach->store_op;
+         resolve_ds_attach->stencil_store_op = ds_attach->stencil_store_op;
+         resolve_ds_attach->load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+         resolve_ds_attach->stencil_load_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+         attach_idx++;
+      }
+   }
+
+   result = pvr_dynamic_rendering_output_attachments_setup(cmd_buffer,
+                                                           pRenderingInfo,
+                                                           dr_info,
+                                                           &attach_idx);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_free_cmd_buffer_clear_values;
+   }
+
+   if (state->render_pass_info.rstate->height == UINT32_MAX) {
+      state->render_pass_info.rstate->height =
+         pRenderingInfo->renderArea.offset.y +
+         pRenderingInfo->renderArea.extent.height;
+   }
+
+   if (state->render_pass_info.rstate->width == UINT32_MAX) {
+      state->render_pass_info.rstate->width =
+         pRenderingInfo->renderArea.offset.x +
+         pRenderingInfo->renderArea.extent.width;
+   }
+
+   *dr_info_out = dr_info;
+
+   /* FIXME: When adding support for caching rt datasets and render states,
+    * remove this and handle it with a proper hash table.
+    */
+   pvr_rstate_entry_add(device, rstate);
+
+   return VK_SUCCESS;
+
+err_free_cmd_buffer_clear_values:
+   pvr_cmd_buffer_clear_values_free(cmd_buffer);
+
+err_free_cmd_buffer_attachments:
+   pvr_cmd_buffer_attachments_free(cmd_buffer);
+
+err_free_dr_info_attachments:
+   vk_free(&device->vk.alloc, dr_info->attachments);
+
+err_free_rstate:
+   vk_free(&device->vk.alloc, rstate);
+
+err_free_dr_info:
+   vk_free(&device->vk.alloc, dr_info);
+
+   return result;
+}
+
+static inline uint64_t pvr_render_pass_info_get_scratch_buffer_size(
+   struct pvr_device *device,
+   const struct pvr_render_pass_info *info)
+{
+   return pvr_spm_scratch_buffer_calc_required_size(
+      &info->dr_info->hw_render,
+      1,
+      info->dr_info->hw_render.sample_count,
+      info->rstate->width,
+      info->rstate->height);
+}
+
+void pvr_CmdBeginRendering(VkCommandBuffer commandBuffer,
+                           const VkRenderingInfo *pRenderingInfo)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   struct pvr_device *const device = cmd_buffer->device;
+   struct pvr_dynamic_render_info *dr_info = NULL;
+   struct pvr_sub_cmd_gfx *sub_cmd;
+   bool resume, suspend;
+   VkResult result;
+
+   /* TODO: Check not in renderpess? */
+
+   suspend = pRenderingInfo->flags & VK_RENDERING_SUSPENDING_BIT_KHR;
+   resume = pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT_KHR;
+
+   if (state->current_sub_cmd && resume) {
+      assert(state->current_sub_cmd->type == PVR_SUB_CMD_TYPE_GRAPHICS);
+      assert(state->current_sub_cmd->is_dynamic_render);
+      assert(state->current_sub_cmd->is_suspend);
+
+      if (!suspend)
+         state->current_sub_cmd->is_suspend = false;
+
+      return;
+   }
+
+   result =
+      pvr_dynamic_render_info_create(cmd_buffer, pRenderingInfo, &dr_info);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      return;
+   }
+
+   state->render_pass_info.dr_info = dr_info;
+   state->render_pass_info.hw_render = &dr_info->hw_render;
+   state->render_pass_info.render_area = (VkRect2D){
+      .extent = pRenderingInfo->renderArea.extent,
+      .offset =
+         (VkOffset2D){
+            .x = MAX2(0, pRenderingInfo->renderArea.offset.x),
+            .y = MAX2(0, pRenderingInfo->renderArea.offset.y),
+         },
+   };
+   state->render_pass_info.pipeline_bind_point =
+      VK_PIPELINE_BIND_POINT_GRAPHICS;
+   state->render_pass_info.dynamic_render = true;
+   state->render_pass_info.suspend = suspend;
+   state->render_pass_info.resume = resume;
+   state->render_pass_info.current_hw_subpass = -1;
+
+   if (dr_info->hw_render.tile_buffers_count) {
+      result = pvr_device_tile_buffer_ensure_cap(
+         device,
+         dr_info->hw_render.tile_buffers_count);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         goto err_destroy_dynamic_render_info;
+      }
+   }
+
+   if (pRenderingInfo->pDepthAttachment &&
+       pRenderingInfo->pDepthAttachment->imageView) {
+      struct pvr_image_view *iview = pvr_image_view_from_handle(
+         pRenderingInfo->pDepthAttachment->imageView);
+      state->depth_format = iview->vk.format;
+   } else if (pRenderingInfo->pStencilAttachment &&
+              pRenderingInfo->pStencilAttachment->imageView) {
+      struct pvr_image_view *iview = pvr_image_view_from_handle(
+         pRenderingInfo->pStencilAttachment->imageView);
+      state->depth_format = iview->vk.format;
+   } else {
+      state->depth_format = VK_FORMAT_UNDEFINED;
+   }
+
+   if (dr_info->color_attachment_count ||
+       dr_info->hw_render.ds_attach_idx != VK_ATTACHMENT_UNUSED) {
+      state->render_pass_info.sample_count = dr_info->hw_render.sample_count;
+   }
+
+   state->render_pass_info.rstate->layers =
+      !pRenderingInfo->viewMask ? pRenderingInfo->layerCount : 1;
+   state->render_pass_info.rstate->scratch_buffer_size =
+      pvr_render_pass_info_get_scratch_buffer_size(device,
+                                                   &state->render_pass_info);
+
+   result = pvr_render_state_setup(device,
+                                   NULL,
+                                   state->render_pass_info.rstate,
+                                   1,
+                                   &dr_info->hw_render);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_cleanup_tile_buffers;
+   }
+
+   result = pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_GRAPHICS);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_cleanup_render_state;
+   }
+
+   sub_cmd = &state->current_sub_cmd->gfx;
+   sub_cmd->rstate = state->render_pass_info.rstate;
+   sub_cmd->dr_info = dr_info;
+   assert(sub_cmd->dr_info);
+
+   result = pvr_mrt_load_ops_setup(cmd_buffer,
+                                   &cmd_buffer->vk.pool->alloc,
+                                   &dr_info->hw_render.load_op_state);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_cleanup_render_state;
+   }
+
+   pvr_perform_start_of_render_clears(cmd_buffer, resume);
+
+   return;
+
+err_cleanup_render_state:
+   pvr_render_state_cleanup(device, state->render_pass_info.rstate);
+
+err_cleanup_tile_buffers:
+   pvr_device_free_tile_buffer_state(device);
+
+err_destroy_dynamic_render_info:
+   pvr_dynamic_render_info_destroy(device, cmd_buffer, dr_info);
+}
+
+static VkResult
+pvr_resolve_unemitted_resolve_attachments(struct pvr_cmd_buffer *cmd_buffer,
+                                          struct pvr_render_pass_info *info);
+
+void pvr_CmdEndRendering(VkCommandBuffer commandBuffer)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+   VkResult result;
+
+   if (state->current_sub_cmd && state->current_sub_cmd->is_suspend) {
+      return;
+   }
+
+   result = pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto exit_teardown_render;
+   }
+
+   result = pvr_resolve_unemitted_resolve_attachments(cmd_buffer,
+                                                      &state->render_pass_info);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto exit_teardown_render;
+   }
+
+exit_teardown_render:
+   state->render_pass_info.dynamic_render = false;
+   pvr_cmd_buffer_clear_values_free(cmd_buffer);
+   pvr_cmd_buffer_attachments_free(cmd_buffer);
+}
+
+static void pvr_cmd_buffer_state_from_dynamic_inheritance(
+   struct pvr_cmd_buffer *cmd_buffer,
+   const VkCommandBufferInheritanceRenderingInfo *inheritance_info)
+{
+   const bool has_stencil = inheritance_info->stencilAttachmentFormat !=
+                            VK_FORMAT_UNDEFINED;
+   const bool has_depth = inheritance_info->depthAttachmentFormat !=
+                          VK_FORMAT_UNDEFINED;
+   VkFormat attachment_formats[inheritance_info->colorAttachmentCount];
+   uint32_t mrt_attachment_map[inheritance_info->colorAttachmentCount];
+   struct pvr_device *const device = cmd_buffer->device;
+   struct pvr_dynamic_render_info *dr_info;
+   uint32_t attach_idx = 0, mrt_count = 0;
+   struct usc_mrt_setup mrt_setup, *setup;
+   VkResult result;
+
+   VK_MULTIALLOC(ma);
+   vk_multialloc_add(&ma, &dr_info, __typeof__(*dr_info), 1);
+   vk_multialloc_add(&ma, &setup, __typeof__(*setup), 1);
+   if (!vk_multialloc_zalloc(&ma,
+                             &device->vk.alloc,
+                             VK_SYSTEM_ALLOCATION_SCOPE_OBJECT)) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   dr_info->hw_render.sample_count = inheritance_info->rasterizationSamples;
+   dr_info->hw_render.multiview_enabled = !!inheritance_info->viewMask;
+   dr_info->hw_render.view_mask = MAX2(1, inheritance_info->viewMask);
+   dr_info->attachment_count = has_depth || has_stencil;
+   dr_info->mrt_setup = setup;
+
+   for (uint32_t i = 0; i < inheritance_info->colorAttachmentCount; i++)
+      if (inheritance_info->pColorAttachmentFormats[i] != VK_FORMAT_UNDEFINED)
+         dr_info->attachment_count++;
+
+   if (dr_info->attachment_count) {
+      dr_info->attachments =
+         vk_zalloc(&cmd_buffer->vk.pool->alloc,
+                   sizeof(*dr_info->attachments) * dr_info->attachment_count,
+                   8,
+                   VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!dr_info->attachments) {
+         vk_command_buffer_set_error(&cmd_buffer->vk,
+                                     VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto err_free_dr_info;
+      }
+   }
+
+   dr_info->color_attachment_count = inheritance_info->colorAttachmentCount;
+   if (dr_info->color_attachment_count) {
+      dr_info->color_attachments = vk_zalloc(
+         &device->vk.alloc,
+         sizeof(*dr_info->color_attachments) * dr_info->color_attachment_count,
+         8,
+         VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+      if (!dr_info->color_attachments) {
+         vk_command_buffer_set_error(&cmd_buffer->vk,
+                                     VK_ERROR_OUT_OF_HOST_MEMORY);
+         goto err_free_attachments;
+      }
+   }
+
+   assert(inheritance_info->stencilAttachmentFormat == VK_FORMAT_UNDEFINED ||
+          inheritance_info->depthAttachmentFormat == VK_FORMAT_UNDEFINED ||
+          inheritance_info->depthAttachmentFormat ==
+             inheritance_info->stencilAttachmentFormat);
+
+   dr_info->hw_render.ds_attach_idx = VK_ATTACHMENT_UNUSED;
+
+   if (has_depth || has_stencil) {
+      struct pvr_render_pass_attachment *ds_attachment =
+         &dr_info->attachments[attach_idx];
+      const VkFormat vk_format = has_depth
+                                    ? inheritance_info->depthAttachmentFormat
+                                    : inheritance_info->stencilAttachmentFormat;
+
+      dr_info->hw_render.ds_attach_idx = attach_idx;
+      dr_info->hw_render.stencil_store = has_stencil;
+      dr_info->hw_render.depth_store = has_depth;
+
+      ds_attachment->index = attach_idx;
+      ds_attachment->vk_format = vk_format;
+      ds_attachment->is_depth = dr_info->hw_render.depth_store;
+      ds_attachment->is_stencil = dr_info->hw_render.stencil_store;
+      ds_attachment->sample_count = inheritance_info->rasterizationSamples;
+      ds_attachment->resolve_target = VK_ATTACHMENT_UNUSED;
+      ds_attachment->load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      ds_attachment->store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      ds_attachment->stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      ds_attachment->stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+
+      attach_idx++;
+   }
+
+   for (uint32_t i = 0; i < inheritance_info->colorAttachmentCount; i++) {
+      struct pvr_render_pass_attachment *attachment;
+
+      dr_info->color_attachments[i].index_color = VK_ATTACHMENT_UNUSED;
+      dr_info->color_attachments[i].index_resolve = VK_ATTACHMENT_UNUSED;
+      attachment_formats[mrt_count] = VK_FORMAT_UNDEFINED;
+      mrt_attachment_map[i] = VK_ATTACHMENT_UNUSED;
+
+      if (inheritance_info->pColorAttachmentFormats[i] == VK_FORMAT_UNDEFINED)
+         continue;
+
+      dr_info->color_attachments[i].index_color = attach_idx;
+      mrt_attachment_map[i] = mrt_count;
+      attachment_formats[mrt_count++] =
+         inheritance_info->pColorAttachmentFormats[i];
+
+      attachment = &dr_info->attachments[attach_idx];
+      attachment->index = attach_idx;
+      attachment->vk_format = inheritance_info->pColorAttachmentFormats[i];
+      attachment->sample_count = inheritance_info->rasterizationSamples;
+      attachment->resolve_target = VK_ATTACHMENT_UNUSED;
+      attachment->load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      attachment->store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      attachment->stencil_load_op = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+      attachment->stencil_store_op = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+      attachment->stencil_resolve_mode = VK_RESOLVE_MODE_NONE;
+      attach_idx++;
+   }
+
+   result =
+      pvr_init_usc_mrt_setup(device, mrt_count, attachment_formats, &mrt_setup);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_free_attachments;
+   }
+
+   result = pvr_mrt_setup_partial_init(cmd_buffer->device,
+                                       dr_info->mrt_setup,
+                                       inheritance_info->colorAttachmentCount,
+                                       mrt_setup.num_output_regs,
+                                       mrt_setup.num_tile_buffers);
+   if (result != VK_SUCCESS) {
+      pvr_destroy_mrt_setup(device, &mrt_setup);
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      goto err_free_attachments;
+   }
+
+   /* We fully initialised only a mrt_count number of render targets,
+    * now scatter gather them over the whole number of attachments.
+    * This is necessary because render targets are attachment-indexed
+    * throughout the driver.
+    */
+   for (uint32_t i = 0; i < inheritance_info->colorAttachmentCount; i++) {
+      if (mrt_attachment_map[i] != VK_ATTACHMENT_UNUSED) {
+         memcpy(&dr_info->mrt_setup->mrt_resources[i],
+                &mrt_setup.mrt_resources[mrt_attachment_map[i]],
+                sizeof(mrt_setup.mrt_resources[0]));
+      }
+   }
+
+   pvr_destroy_mrt_setup(device, &mrt_setup);
+
+   if (dr_info->mrt_setup->num_tile_buffers) {
+      result = pvr_device_tile_buffer_ensure_cap(
+         device,
+         dr_info->mrt_setup->num_tile_buffers);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         goto err_destroy_mrt_setup;
+      }
+   }
+
+   cmd_buffer->state.render_pass_info.hw_render = &dr_info->hw_render;
+   cmd_buffer->state.render_pass_info.dr_info = dr_info;
+
+   /* For setting the depth_format, first check stencil and then override */
+   if (has_stencil)
+      cmd_buffer->state.depth_format =
+         inheritance_info->stencilAttachmentFormat;
+
+   if (has_depth)
+      cmd_buffer->state.depth_format = inheritance_info->depthAttachmentFormat;
+
+   return;
+
+err_destroy_mrt_setup:
+   pvr_destroy_mrt_setup(device, dr_info->mrt_setup);
+
+err_free_attachments:
+   vk_free(&device->vk.alloc, dr_info->attachments);
+
+err_free_dr_info:
+   vk_free(&device->vk.alloc, dr_info);
+}
+
+static inline void pvr_cmd_buffer_state_from_render_pass_inheritance(
+   struct pvr_cmd_buffer_state *state,
+   const VkCommandBufferInheritanceInfo *inheritance_info)
+{
+   struct pvr_render_pass *pass =
+      pvr_render_pass_from_handle(inheritance_info->renderPass);
+
+   state->render_pass_info.pass = pass;
+   state->render_pass_info.framebuffer =
+      pvr_framebuffer_from_handle(inheritance_info->framebuffer);
+   state->render_pass_info.subpass_idx = inheritance_info->subpass;
+   state->render_pass_info.isp_userpass =
+      pass->subpasses[inheritance_info->subpass].isp_userpass;
 }
 
 VkResult pvr_BeginCommandBuffer(VkCommandBuffer commandBuffer,
@@ -3642,24 +5134,29 @@ VkResult pvr_BeginCommandBuffer(VkCommandBuffer commandBuffer,
    if (cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY) {
       if (cmd_buffer->usage_flags &
           VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT) {
-         const VkCommandBufferInheritanceInfo *inheritance_info =
-            pBeginInfo->pInheritanceInfo;
-         struct pvr_render_pass *pass;
-
-         pass = pvr_render_pass_from_handle(inheritance_info->renderPass);
-         state->render_pass_info.pass = pass;
-         state->render_pass_info.framebuffer =
-            pvr_framebuffer_from_handle(inheritance_info->framebuffer);
-         state->render_pass_info.subpass_idx = inheritance_info->subpass;
-         state->render_pass_info.isp_userpass =
-            pass->subpasses[inheritance_info->subpass].isp_userpass;
+         const VkCommandBufferInheritanceRenderingInfo *dyn_inheritance_info =
+            vk_find_struct_const(pBeginInfo->pInheritanceInfo->pNext,
+                                 COMMAND_BUFFER_INHERITANCE_RENDERING_INFO);
+         if (!pBeginInfo->pInheritanceInfo->renderPass) {
+            assert(dyn_inheritance_info);
+            pvr_cmd_buffer_state_from_dynamic_inheritance(cmd_buffer,
+                                                          dyn_inheritance_info);
+         } else {
+            pvr_cmd_buffer_state_from_render_pass_inheritance(
+               state,
+               pBeginInfo->pInheritanceInfo);
+         }
 
          result =
             pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_GRAPHICS);
          if (result != VK_SUCCESS)
             return result;
 
-         state->vis_test_enabled = inheritance_info->occlusionQueryEnable;
+         state->vis_test_enabled =
+            pBeginInfo->pInheritanceInfo->occlusionQueryEnable;
+
+         if (!pBeginInfo->pInheritanceInfo->renderPass)
+            state->current_sub_cmd->is_dynamic_render = true;
       }
 
       state->dirty.isp_userpass = true;
@@ -4141,8 +5638,7 @@ static VkResult pvr_setup_descriptor_mappings(
 
             pvr_csb_pack (&point_sampler_words[1],
                           TEXSTATE_SAMPLER_WORD1,
-                          sampler) {
-            }
+                          sampler) {}
 
             struct pvr_suballoc_bo *point_sampler_bo;
             result = pvr_cmd_buffer_upload_general(cmd_buffer,
@@ -4177,8 +5673,7 @@ static VkResult pvr_setup_descriptor_mappings(
 
             pvr_csb_pack (&ia_sampler_words[1],
                           TEXSTATE_SAMPLER_WORD1,
-                          sampler) {
-            }
+                          sampler) {}
 
             struct pvr_suballoc_bo *ia_sampler_bo;
             result = pvr_cmd_buffer_upload_general(cmd_buffer,
@@ -5042,11 +6537,22 @@ pvr_setup_isp_faces_and_control(struct pvr_cmd_buffer *const cmd_buffer,
    const bool rasterizer_discard = dynamic_state->rs.rasterizer_discard_enable;
    const uint32_t subpass_idx = pass_info->subpass_idx;
    const uint32_t depth_stencil_attachment_idx =
-      pass_info->pass->subpasses[subpass_idx].depth_stencil_attachment;
-   const struct pvr_render_pass_attachment *const attachment =
-      depth_stencil_attachment_idx != VK_ATTACHMENT_UNUSED
-         ? &pass_info->pass->attachments[depth_stencil_attachment_idx]
-         : NULL;
+      pass_info->pass
+         ? pass_info->pass->subpasses[subpass_idx].depth_stencil_attachment
+         : pass_info->dr_info->hw_render.ds_attach_idx;
+   struct pvr_render_pass_attachment *attachment;
+
+   if (pass_info->pass) {
+      attachment =
+         depth_stencil_attachment_idx != VK_ATTACHMENT_UNUSED
+            ? &pass_info->pass->attachments[depth_stencil_attachment_idx]
+            : NULL;
+   } else {
+      attachment =
+         depth_stencil_attachment_idx != VK_ATTACHMENT_UNUSED
+            ? &pass_info->dr_info->attachments[depth_stencil_attachment_idx]
+            : NULL;
+   }
 
    const enum ROGUE_TA_OBJTYPE obj_type =
       pvr_ta_objtype(dynamic_state->ia.primitive_topology);
@@ -7230,218 +8736,6 @@ void pvr_CmdDrawIndirect(VkCommandBuffer commandBuffer,
                            stride);
 }
 
-static inline enum pvr_resolve_op
-pvr_resolve_mode_to_op(enum VkResolveModeFlagBits mode)
-{
-   switch (mode) {
-   default:
-      UNREACHABLE("invalid resolve mode");
-      FALLTHROUGH;
-   case VK_RESOLVE_MODE_AVERAGE_BIT:
-      return PVR_RESOLVE_BLEND;
-   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
-      return PVR_RESOLVE_SAMPLE0;
-   case VK_RESOLVE_MODE_MIN_BIT:
-      return PVR_RESOLVE_MIN;
-   case VK_RESOLVE_MODE_MAX_BIT:
-      return PVR_RESOLVE_MAX;
-   }
-}
-
-static inline void
-pvr_resolve_subresource_layer_init(const struct pvr_image_view *const iview,
-                                   VkImageSubresourceLayers *subresource)
-{
-   *subresource = (VkImageSubresourceLayers){
-      .mipLevel = iview->vk.base_mip_level,
-      .baseArrayLayer = iview->vk.base_array_layer,
-      .layerCount = iview->vk.layer_count,
-   };
-}
-
-static inline void
-pvr_resolve_offset_init(const struct pvr_render_pass_info *const info,
-                        VkOffset3D *offset)
-{
-   *offset = (VkOffset3D){
-      .x = info->render_area.offset.x,
-      .y = info->render_area.offset.y,
-   };
-}
-
-/* clang-format off */
-static inline void
-pvr_resolve_image_copy_region_init(const struct pvr_image_view *const src_view,
-                                   const struct pvr_image_view *const dst_view,
-                                   const struct pvr_render_pass_info *const info,
-                                   VkImageCopy2 *region)
-{
-   pvr_resolve_subresource_layer_init(src_view, &region->srcSubresource);
-   pvr_resolve_subresource_layer_init(dst_view, &region->dstSubresource);
-   pvr_resolve_offset_init(info, &region->srcOffset);
-   pvr_resolve_offset_init(info, &region->dstOffset);
-
-   region->extent = (VkExtent3D){
-      .width = info->render_area.extent.width,
-      .height = info->render_area.extent.height,
-      .depth = 1
-   };
-}
-/* clang-format on */
-
-static VkResult
-pvr_resolve_unemitted_resolve_attachments(struct pvr_cmd_buffer *cmd_buffer,
-                                          struct pvr_render_pass_info *info)
-{
-   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
-   const struct pvr_renderpass_hwsetup_render *hw_render =
-      &state->render_pass_info.pass->hw_setup->renders[info->current_hw_subpass];
-
-   for (uint32_t i = 0U; i < hw_render->eot_surface_count; i++) {
-      const struct pvr_renderpass_hwsetup_eot_surface *surface =
-         &hw_render->eot_surfaces[i];
-      const uint32_t color_attach_idx = surface->src_attachment_idx;
-      const uint32_t resolve_attach_idx = surface->attachment_idx;
-      struct pvr_image_view *dst_view;
-      struct pvr_image_view *src_view;
-      VkFormat src_format;
-      VkFormat dst_format;
-      VkImageCopy2 region;
-      VkResult result;
-
-      if (!surface->need_resolve ||
-          surface->resolve_type != PVR_RESOLVE_TYPE_TRANSFER) {
-         continue;
-      }
-
-      dst_view = info->attachments[resolve_attach_idx];
-      src_view = info->attachments[color_attach_idx];
-
-      pvr_resolve_image_copy_region_init(src_view, dst_view, info, &region);
-      region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-      region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-
-      /* TODO: if ERN_46863 is supported, Depth and stencil are sampled
-       * separately from images with combined depth+stencil. Add logic here to
-       * handle it using appropriate format from image view.
-       */
-      src_format = src_view->vk.image->format;
-      dst_format = dst_view->vk.image->format;
-      src_view->vk.image->format = src_view->vk.format;
-      dst_view->vk.image->format = dst_view->vk.format;
-
-      result = pvr_copy_or_resolve_color_image_region(
-         cmd_buffer,
-         vk_to_pvr_image(src_view->vk.image),
-         vk_to_pvr_image(dst_view->vk.image),
-         &region);
-
-      src_view->vk.image->format = src_format;
-      dst_view->vk.image->format = dst_format;
-
-      state->current_sub_cmd->transfer.serialize_with_frag = true;
-
-      if (result != VK_SUCCESS)
-         return result;
-   }
-
-   if (hw_render->stencil_resolve_mode || hw_render->depth_resolve_mode) {
-      const struct pvr_render_pass_attachment resolve_attachment =
-         info->pass->attachments[hw_render->ds_attach_resolve_idx];
-      const struct pvr_image_view *dst_view =
-         info->attachments[hw_render->ds_attach_resolve_idx];
-      const struct pvr_image_view *src_view =
-         info->attachments[hw_render->ds_attach_idx];
-      const VkClearValue *resolve_clear_values =
-         &state->render_pass_info.clear_values[hw_render->ds_attach_resolve_idx];
-      const bool both_stencil = vk_format_has_stencil(dst_view->vk.format) &&
-                                vk_format_has_stencil(src_view->vk.format);
-      const bool both_depth = vk_format_has_depth(dst_view->vk.format) &&
-                              vk_format_has_depth(src_view->vk.format);
-      bool clear_depth = false, clear_stencil = false;
-      VkClearDepthStencilValue clear_values;
-      VkImageCopy2 region;
-
-      pvr_resolve_image_copy_region_init(src_view, dst_view, info, &region);
-
-      if (both_depth &&
-          !hw_render->depth_resolve_mode &&
-          resolve_attachment.store_op == VK_ATTACHMENT_STORE_OP_STORE &&
-          resolve_attachment.load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-         clear_values.depth = resolve_clear_values->depthStencil.depth;
-         clear_depth = true;
-      }
-
-      if (both_stencil &&
-          !hw_render->stencil_resolve_mode &&
-          resolve_attachment.stencil_store_op == VK_ATTACHMENT_STORE_OP_STORE &&
-          resolve_attachment.stencil_load_op == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-         clear_values.stencil = resolve_clear_values->depthStencil.stencil;
-         clear_stencil = true;
-      }
-
-      /* Resolve depth and if it can clear stencil */
-      if (both_depth && hw_render->depth_resolve_mode) {
-         region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-
-         pvr_copy_or_resolve_depth_stencil_region(
-            cmd_buffer,
-            vk_to_pvr_image(src_view->vk.image),
-            vk_to_pvr_image(dst_view->vk.image),
-            pvr_resolve_mode_to_op(hw_render->depth_resolve_mode),
-            clear_stencil,
-            &clear_values,
-            &region);
-
-         state->current_sub_cmd->transfer.serialize_with_frag = true;
-         clear_stencil = false;
-      }
-
-      /* Resolve stencil and if it can clear depth */
-      if (both_stencil && hw_render->stencil_resolve_mode) {
-         region.srcSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
-         region.dstSubresource.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
-
-         pvr_copy_or_resolve_depth_stencil_region(
-            cmd_buffer,
-            vk_to_pvr_image(src_view->vk.image),
-            vk_to_pvr_image(dst_view->vk.image),
-            pvr_resolve_mode_to_op(hw_render->stencil_resolve_mode),
-            clear_depth,
-            &clear_values,
-            &region);
-
-         state->current_sub_cmd->transfer.serialize_with_frag = true;
-         clear_depth = false;
-      }
-
-      /* Clear what it couldn't be cleared yet */
-      if (clear_stencil || clear_depth) {
-         const VkImageAspectFlagBits aspect =
-            (clear_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) |
-            (clear_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
-         VkImageSubresourceRange range = (VkImageSubresourceRange){
-            .aspectMask = aspect,
-            .baseMipLevel = dst_view->vk.base_mip_level,
-            .levelCount = 1,
-            .baseArrayLayer = dst_view->vk.base_array_layer,
-            .layerCount = dst_view->vk.layer_count,
-         };
-
-         pvr_clear_depth_stencil_image(cmd_buffer,
-                                       vk_to_pvr_image(dst_view->vk.image),
-                                       &clear_values,
-                                       1,
-                                       &range);
-
-         state->current_sub_cmd->transfer.serialize_with_frag = true;
-      }
-   }
-
-   return pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
-}
-
 void pvr_CmdEndRenderPass2(VkCommandBuffer commandBuffer,
                            const VkSubpassEndInfo *pSubpassEndInfo)
 {
@@ -7618,7 +8912,7 @@ static VkResult pvr_execute_sub_cmd(struct pvr_cmd_buffer *cmd_buffer,
 
 static VkResult
 pvr_execute_graphics_cmd_buffer(struct pvr_cmd_buffer *cmd_buffer,
-                                const struct pvr_cmd_buffer *sec_cmd_buffer)
+                                struct pvr_cmd_buffer *sec_cmd_buffer)
 {
    const struct pvr_device_info *dev_info =
       &cmd_buffer->device->pdevice->dev_info;
@@ -7761,8 +9055,8 @@ pvr_execute_graphics_cmd_buffer(struct pvr_cmd_buffer *cmd_buffer,
       }
 
       if (!PVR_HAS_FEATURE(dev_info, gs_rta_support)) {
-         util_dynarray_append_dynarray(&cmd_buffer->deferred_clears,
-                                       &sec_cmd_buffer->deferred_clears);
+         list_splicetail(&sec_cmd_buffer->deferred_clears,
+                         &cmd_buffer->deferred_clears);
       }
    }
 
@@ -8054,7 +9348,8 @@ static bool pvr_is_stencil_store_load_needed(
       return false;
 
    hw_render_idx = state->current_sub_cmd->gfx.hw_render_idx;
-   hw_render = &pass->hw_setup->renders[hw_render_idx];
+   hw_render =
+      pvr_pass_info_get_hw_render(&state->render_pass_info, hw_render_idx);
 
    if (hw_render->ds_attach_idx == VK_ATTACHMENT_UNUSED)
       return false;
@@ -8109,6 +9404,7 @@ pvr_cmd_buffer_insert_mid_frag_barrier_event(struct pvr_cmd_buffer *cmd_buffer,
                                              uint32_t src_stage_mask,
                                              uint32_t dst_stage_mask)
 {
+   struct pvr_sub_cmd *prev_sub_cmd = cmd_buffer->state.current_sub_cmd;
    VkResult result;
 
    assert(cmd_buffer->state.current_sub_cmd->type == PVR_SUB_CMD_TYPE_GRAPHICS);
@@ -8130,15 +9426,22 @@ pvr_cmd_buffer_insert_mid_frag_barrier_event(struct pvr_cmd_buffer *cmd_buffer,
          .wait_at_stage_mask = dst_stage_mask,
       },
    };
-
    pvr_cmd_buffer_end_sub_cmd(cmd_buffer);
    pvr_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_GRAPHICS);
+
+   cmd_buffer->state.current_sub_cmd->gfx.dr_info = prev_sub_cmd->gfx.dr_info;
+   prev_sub_cmd->gfx.dr_info = NULL;
+   assert(cmd_buffer->state.current_sub_cmd->gfx.dr_info ==
+          cmd_buffer->state.render_pass_info.dr_info);
 
    /* Use existing render setup, but load color attachments from HW BGOBJ */
    cmd_buffer->state.current_sub_cmd->gfx.barrier_load = true;
    cmd_buffer->state.current_sub_cmd->gfx.barrier_store = false;
-
    cmd_buffer->state.current_sub_cmd->gfx.empty_cmd = false;
+
+   cmd_buffer->state.current_sub_cmd->is_dynamic_render =
+      prev_sub_cmd->is_dynamic_render;
+   cmd_buffer->state.current_sub_cmd->is_suspend = prev_sub_cmd->is_suspend;
 
    return VK_SUCCESS;
 }

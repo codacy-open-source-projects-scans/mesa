@@ -112,7 +112,9 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
                          nir_io_prefer_scalar_fs_inputs |
                          nir_io_mix_convergent_flat_with_interpolated |
                          nir_io_vectorizer_ignores_types |
-                         nir_io_compaction_rotates_color_channels;
+                         nir_io_compaction_rotates_color_channels |
+                         nir_io_assign_color_input_bases_after_all_other_inputs |
+                         nir_io_use_frag_result_dual_src_blend;
    options->lower_layer_fs_input_to_sysval = true;
    options->scalarize_ddx = true;
    options->coarse_ddx = true;
@@ -126,6 +128,7 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
    options->max_workgroup_count[0] = UINT32_MAX;
    options->max_workgroup_count[1] = UINT16_MAX;
    options->max_workgroup_count[2] = UINT16_MAX;
+   options->max_samples = 8;
 }
 
 /* Sleep for the given number of clock cycles. */
@@ -548,8 +551,9 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
 
    /* Align the size to what the hw supports. */
    unsigned unaligned_new_size = num_components * bit_size;
-   unsigned aligned_new_size = align_load_store_size(config->gfx_level, unaligned_new_size,
-                                                     uses_smem, is_shared);
+   unsigned aligned_new_size = nir_round_up_components(num_components) * bit_size;
+   aligned_new_size = align_load_store_size(config->gfx_level, aligned_new_size,
+                                            uses_smem, is_shared);
 
    if (uses_smem) {
       /* Maximize SMEM vectorization except for LLVM, which suffers from SGPR and VGPR spilling.
@@ -578,8 +582,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
                                    low->intrinsic == nir_intrinsic_load_global ? NIR_ALIGN_MUL_MAX : 4;
          uint32_t page_size = 4096;
          uint32_t mul = MIN3(align_mul, page_size, resource_align);
-         unsigned end = (align_offset + unaligned_new_size / 8u) & (mul - 1);
-         if ((aligned_new_size - unaligned_new_size) / 8u > (mul - end))
+         unsigned end = (align_offset + unaligned_new_size / 8u);
+         if ((aligned_new_size - unaligned_new_size) / 8u > (align(end, mul) - end))
             return false;
       }
 
@@ -651,10 +655,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
    return false;
 }
 
-bool ac_nir_scalarize_overfetching_loads_callback(const nir_instr *instr, const void *data)
+bool ac_nir_scalarize_overfetching_loads_callback(const nir_intrinsic_instr *intr, const void *data)
 {
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-
    /* Reject opcodes we don't scalarize. */
    switch (intr->intrinsic) {
    case nir_intrinsic_load_ubo:
@@ -920,4 +922,131 @@ ac_nir_allow_offset_wrap_cb(nir_intrinsic_instr *instr, const void *data)
       return gfx_level >= GFX7;
    default: return false;
    }
+}
+
+/* This only applies to ACO, not LLVM, but it's not part of ACO because it's used by this shared
+ * code that doesn't always link with ACO like tests.
+ */
+bool
+ac_nir_op_supports_packed_math_16bit(const nir_alu_instr* alu)
+{
+   switch (alu->op) {
+   case nir_op_f2f16: {
+      nir_shader* shader = nir_cf_node_get_function(&alu->instr.block->cf_node)->function->shader;
+      unsigned execution_mode = shader->info.float_controls_execution_mode;
+      return (shader->options->force_f2f16_rtz && !nir_is_rounding_mode_rtne(execution_mode, 16)) ||
+             nir_is_rounding_mode_rtz(execution_mode, 16);
+   }
+   case nir_op_fadd:
+   case nir_op_fsub:
+   case nir_op_fmul:
+   case nir_op_ffma:
+   case nir_op_fdiv:
+   case nir_op_flrp:
+   case nir_op_fabs:
+   case nir_op_fneg:
+   case nir_op_fsat:
+   case nir_op_fmin:
+   case nir_op_fmax:
+   case nir_op_f2f16_rtz:
+   case nir_op_iabs:
+   case nir_op_iadd:
+   case nir_op_iadd_sat:
+   case nir_op_uadd_sat:
+   case nir_op_isub:
+   case nir_op_isub_sat:
+   case nir_op_usub_sat:
+   case nir_op_ineg:
+   case nir_op_imul:
+   case nir_op_imin:
+   case nir_op_imax:
+   case nir_op_umin:
+   case nir_op_umax:
+   case nir_op_extract_u8:
+   case nir_op_extract_i8:
+   case nir_op_ishl:
+   case nir_op_ishr:
+   case nir_op_ushr: return true;
+   case nir_op_u2u16:
+   case nir_op_i2i16: return alu->src[0].src.ssa->bit_size == 8;
+   default: return false;
+   }
+}
+
+static uint8_t
+max_alu_src_identity_swizzle(const nir_alu_instr *alu, const nir_alu_src *src)
+{
+   uint8_t max_vector = 32 / alu->def.bit_size;
+   if (nir_src_is_const(src->src))
+      return max_vector;
+
+   /* Return the number of correctly swizzled components. */
+   for (unsigned i = 1; i < alu->def.num_components; i++) {
+      if (src->swizzle[i] != src->swizzle[0] + i)
+         /* Ensure that the result is a power of 2. */
+         return MAX2(i & 0x6, 1);
+   }
+
+   return max_vector;
+}
+
+uint8_t
+ac_nir_opt_vectorize_cb(const nir_instr *instr, const void *data)
+{
+   if (instr->type != nir_instr_type_alu)
+      return 0;
+
+   enum amd_gfx_level gfx_level = *(enum amd_gfx_level*)data;
+   if (gfx_level < GFX9)
+      return 1;
+
+   const nir_alu_instr *alu = nir_instr_as_alu(instr);
+
+   switch (alu->op) {
+   case nir_op_f2e4m3fn:
+   case nir_op_f2e4m3fn_sat:
+   case nir_op_f2e4m3fn_satfn:
+   case nir_op_f2e5m2:
+   case nir_op_f2e5m2_sat:
+   case nir_op_e4m3fn2f:
+   case nir_op_e5m22f:
+      return 2;
+   default:
+      break;
+   }
+
+   const unsigned bit_size = alu->def.bit_size;
+   if (bit_size == 16 && ac_nir_op_supports_packed_math_16bit(alu))
+      return 2;
+
+   if (bit_size != 8 && bit_size != 16)
+      return 1;
+
+   /* Keep some opcodes vectorized if the operation can be performed as
+    * 32-bit instruction with packed sources. The condition is that the
+    * sources must have identity swizzles. */
+   uint8_t target_width = 32 / bit_size;
+   switch (alu->op) {
+   case nir_op_bcsel:
+      /* Must have scalar condition. */
+      for (unsigned i = 1; i < alu->def.num_components; i++) {
+         if (alu->src[0].swizzle[i] != alu->src[0].swizzle[0])
+            return 1;
+      }
+      for (unsigned idx = 1; idx < 3; idx++)
+         target_width = MIN2(target_width, max_alu_src_identity_swizzle(alu, &alu->src[idx]));
+      break;
+   case nir_op_iand:
+   case nir_op_ior:
+   case nir_op_ixor:
+   case nir_op_inot:
+   case nir_op_bitfield_select:
+      for (unsigned idx = 0; idx < nir_op_infos[alu->op].num_inputs; idx++)
+         target_width = MIN2(target_width, max_alu_src_identity_swizzle(alu, &alu->src[idx]));
+      break;
+   default:
+      return 1;
+   }
+
+   return target_width;
 }

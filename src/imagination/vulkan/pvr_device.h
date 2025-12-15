@@ -142,6 +142,9 @@ struct pvr_device {
    struct vk_sync *presignaled_sync;
 
    struct pvr_border_color_table *border_color_table;
+
+   simple_mtx_t rs_mtx;
+   struct list_head render_states;
 };
 
 struct pvr_device_memory {
@@ -161,15 +164,13 @@ static inline struct pvr_device *vk_to_pvr_device(struct vk_device *device)
    return container_of(device, struct pvr_device, vk);
 }
 
-VkResult
-pvr_create_device(struct pvr_physical_device *pdevice,
-                  const VkDeviceCreateInfo *pCreateInfo,
-                  const VkAllocationCallbacks *pAllocator,
-                  VkDevice *pDevice);
+VkResult pvr_create_device(struct pvr_physical_device *pdevice,
+                           const VkDeviceCreateInfo *pCreateInfo,
+                           const VkAllocationCallbacks *pAllocator,
+                           VkDevice *pDevice);
 
-void
-pvr_destroy_device(struct pvr_device *device,
-                   const VkAllocationCallbacks *pAllocator);
+void pvr_destroy_device(struct pvr_device *device,
+                        const VkAllocationCallbacks *pAllocator);
 
 uint32_t pvr_calc_fscommon_size_and_tiles_in_flight(
    const struct pvr_device_info *dev_info,
@@ -178,8 +179,13 @@ uint32_t pvr_calc_fscommon_size_and_tiles_in_flight(
    uint32_t min_tiles_in_flight);
 
 VkResult pvr_device_tile_buffer_ensure_cap(struct pvr_device *device,
-                                           uint32_t capacity,
-                                           uint32_t size_in_bytes);
+                                           uint32_t capacity);
+
+static inline void pvr_device_free_tile_buffer_state(struct pvr_device *device)
+{
+   for (uint32_t i = 0; i < device->tile_buffer_state.buffer_count; i++)
+      pvr_bo_free(device, device->tile_buffer_state.buffers[i]);
+}
 
 VkResult pvr_pds_compute_shader_create_and_upload(
    struct pvr_device *device,
@@ -215,5 +221,11 @@ VkResult pvr_gpu_upload_usc(struct pvr_device *device,
                             size_t code_size,
                             uint64_t code_alignment,
                             struct pvr_suballoc_bo **const pvr_bo_out);
+
+void pvr_rstate_entry_add(struct pvr_device *device,
+                          struct pvr_render_state *rstate);
+
+void pvr_rstate_entry_remove(struct pvr_device *device,
+                             const struct pvr_render_state *rstate);
 
 #endif /* PVR_DEVICE_H */

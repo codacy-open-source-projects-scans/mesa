@@ -12,6 +12,7 @@
 #include "nir_builder.h"
 
 #include "pan_shader.h"
+#include "pan_nir.h"
 
 struct panvk_fb_preload_shader_key {
    enum panvk_meta_object_key_type type;
@@ -71,7 +72,7 @@ static nir_shader *
 get_preload_nir_shader(const struct panvk_fb_preload_shader_key *key)
 {
    nir_builder builder = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, pan_shader_get_compiler_options(PAN_ARCH),
+      MESA_SHADER_FRAGMENT, pan_get_nir_shader_compiler_options(PAN_ARCH),
       "panvk-meta-preload");
    nir_builder *b = &builder;
    nir_def *sample_id =
@@ -148,15 +149,15 @@ get_preload_shader(struct panvk_device *dev,
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    struct pan_compile_inputs inputs = {
-      .gpu_id = phys_dev->kmod.props.gpu_id,
-      .gpu_variant = phys_dev->kmod.props.gpu_variant,
+      .gpu_id = phys_dev->kmod.dev->props.gpu_id,
+      .gpu_variant = phys_dev->kmod.dev->props.gpu_variant,
       .is_blit = true,
    };
 
-   pan_shader_preprocess(nir, inputs.gpu_id);
-   pan_shader_lower_texture_early(nir, inputs.gpu_id);
-   pan_shader_postprocess(nir, inputs.gpu_id);
-   pan_shader_lower_texture_late(nir, inputs.gpu_id);
+   pan_preprocess_nir(nir, inputs.gpu_id);
+   pan_nir_lower_texture_early(nir, inputs.gpu_id);
+   pan_postprocess_nir(nir, inputs.gpu_id);
+   pan_nir_lower_texture_late(nir, inputs.gpu_id);
 
    VkResult result = panvk_per_arch(create_internal_shader)(
       dev, nir, &inputs, &shader);
@@ -167,13 +168,12 @@ get_preload_shader(struct panvk_device *dev,
 
 #if PAN_ARCH >= 9
    shader->spd = panvk_pool_alloc_desc(&dev->mempools.rw, SHADER_PROGRAM);
-   if (!panvk_priv_mem_host_addr(shader->spd)) {
+   if (!panvk_priv_mem_check_alloc(shader->spd)) {
       vk_shader_destroy(&dev->vk, &shader->vk, NULL);
       return panvk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
    }
 
-   pan_cast_and_pack(panvk_priv_mem_host_addr(shader->spd), SHADER_PROGRAM,
-                     cfg) {
+   panvk_priv_mem_write_desc(shader->spd, 0, SHADER_PROGRAM, cfg) {
       cfg.stage = MALI_SHADER_STAGE_FRAGMENT;
       cfg.fragment_coverage_bitmask_type = MALI_COVERAGE_BITMASK_TYPE_GL;
       cfg.register_allocation = MALI_SHADER_REGISTER_ALLOCATION_32_PER_THREAD;
@@ -511,7 +511,7 @@ cmd_emit_dcd(struct panvk_cmd_buffer *cmdbuf, struct pan_fb_info *fbinfo,
        */
       struct panvk_physical_device *pdev =
          to_panvk_physical_device(dev->vk.physical);
-      unsigned gpu_prod_id = pdev->kmod.props.gpu_id >> 16;
+      unsigned gpu_prod_id = pdev->kmod.dev->props.gpu_id >> 16;
 
       /* the PAN_ARCH check is redundant but allows compiler optimization
          when PAN_ARCH <= 6 */

@@ -520,6 +520,26 @@ update_push_descriptor_flags(struct anv_cmd_pipeline_state *state,
    }
 }
 
+static bool
+maybe_update_dynamic_buffers_indices(struct anv_cmd_pipeline_state *state,
+                                     const uint8_t *offsets)
+{
+   struct anv_push_constants *push = &state->push_constants;
+
+   bool modified = false;
+   for (uint32_t i = 0; i < MAX_SETS; i++) {
+      if ((push->desc_surface_offsets[i] &
+           ANV_DESCRIPTOR_SET_DYNAMIC_INDEX_MASK) !=
+          offsets[i]) {
+         push->desc_surface_offsets[i] &= ~ANV_DESCRIPTOR_SET_DYNAMIC_INDEX_MASK;
+         push->desc_surface_offsets[i] |= offsets[i];
+         modified = true;
+      }
+   }
+
+   return modified;
+}
+
 static struct anv_cmd_pipeline_state *
 anv_cmd_buffer_get_pipeline_layout_state(struct anv_cmd_buffer *cmd_buffer,
                                          VkPipelineBindPoint bind_point,
@@ -1247,7 +1267,8 @@ void anv_CmdPushDescriptorSetWithTemplate2KHR(
 void
 anv_cmd_buffer_set_rt_state(struct vk_command_buffer *vk_cmd_buffer,
                             VkDeviceSize scratch_size,
-                            uint32_t ray_queries)
+                            uint32_t ray_queries,
+                            const uint8_t *dynamic_descriptor_offsets)
 {
    struct anv_cmd_buffer *cmd_buffer =
       container_of(vk_cmd_buffer, struct anv_cmd_buffer, vk);
@@ -1257,6 +1278,12 @@ anv_cmd_buffer_set_rt_state(struct vk_command_buffer *vk_cmd_buffer,
    if (ray_queries > 0) {
       anv_cmd_buffer_set_rt_query_buffer(cmd_buffer, &rt->base, ray_queries,
                                          ANV_RT_STAGE_BITS);
+   }
+
+   if (maybe_update_dynamic_buffers_indices(&rt->base,
+                                            dynamic_descriptor_offsets)) {
+      cmd_buffer->state.push_constants_dirty |= ANV_RT_STAGE_BITS;
+      rt->base.push_constants_data_dirty = true;
    }
 }
 
@@ -1278,7 +1305,7 @@ anv_cmd_buffer_set_stack_size(struct vk_command_buffer *vk_cmd_buffer,
    if (stack_size_log2 < 10)
       stack_size_log2 = 10;
 
-   if (rt->scratch.layout.total_size == 1 << stack_size_log2)
+   if (rt->scratch.layout.sw_stack_size == 1 << stack_size_log2)
       return;
 
    brw_rt_compute_scratch_layout(&rt->scratch.layout, device->info,
@@ -1549,6 +1576,7 @@ bind_graphics_shaders(struct anv_cmd_buffer *cmd_buffer,
 #undef diff_fix_state_stage
 #undef diff_var_state_stage
 
+   uint8_t dynamic_descriptors[MAX_SETS] = {};
    for (uint32_t s = 0; s < ANV_GRAPHICS_SHADER_STAGE_COUNT; s++) {
       struct anv_shader *shader = new_shaders[s];
 
@@ -1558,6 +1586,15 @@ bind_graphics_shaders(struct anv_cmd_buffer *cmd_buffer,
          ray_queries = MAX2(ray_queries, shader->vk.ray_queries);
          if (gfx->shaders[s] != shader)
             set_dirty_for_bind_map(cmd_buffer, s, &shader->bind_map);
+
+         for (uint32_t i = 0; i < MAX_SETS; i++) {
+            if (shader->bind_map.binding_mask & ANV_PIPELINE_BIND_MASK_SET(i)) {
+               assert(dynamic_descriptors[i] == 0 ||
+                      dynamic_descriptors[i] ==
+                      shader->bind_map.dynamic_descriptors[i]);
+               dynamic_descriptors[i] = shader->bind_map.dynamic_descriptors[i];
+            }
+         }
       }
 
       if (gfx->shaders[s] != shader)
@@ -1682,10 +1719,22 @@ bind_graphics_shaders(struct anv_cmd_buffer *cmd_buffer,
                                 cmd_buffer->state.gfx.shaders,
                                 ARRAY_SIZE(cmd_buffer->state.gfx.shaders));
 
+   uint8_t dynamic_descriptor_count = 0;
+   uint8_t dynamic_descriptor_offsets[MAX_SETS] = {};
+   for (uint32_t i = 0; i < MAX_SETS; i++) {
+      dynamic_descriptor_offsets[i] = dynamic_descriptor_count;
+      dynamic_descriptor_count += dynamic_descriptors[i];
+   }
+   if (maybe_update_dynamic_buffers_indices(&gfx->base,
+                                            dynamic_descriptor_offsets)) {
+      cmd_buffer->state.push_constants_dirty |= gfx->active_stages;
+      gfx->base.push_constants_data_dirty = true;
+   }
+
    if (ray_queries > 0) {
       assert(cmd_buffer->device->info->verx10 >= 125);
       anv_cmd_buffer_set_rt_query_buffer(cmd_buffer, &gfx->base, ray_queries,
-                                         cmd_buffer->state.gfx.active_stages);
+                                         gfx->active_stages);
    }
 }
 
@@ -1721,4 +1770,61 @@ anv_cmd_buffer_bind_shaders(struct vk_command_buffer *vk_cmd_buffer,
       bind_compute_shader(cmd_buffer, cs_shader);
    if (memcmp(gfx_shaders, cmd_buffer->state.gfx.shaders, sizeof(gfx_shaders)))
       bind_graphics_shaders(cmd_buffer, gfx_shaders);
+}
+
+struct anv_companion_prev_cmd_buffer_helper
+anv_begin_companion_cmd_buffer_helper(struct anv_cmd_buffer **cmd_buffer,
+                                      bool needs_companion)
+{
+   if (likely(!needs_companion))
+      return (struct anv_companion_prev_cmd_buffer_helper) { 0 };
+
+   struct anv_cmd_buffer* prev_cmd_buffer = *cmd_buffer;
+   const struct intel_device_info *info = prev_cmd_buffer->device->info;
+
+   const VkResult result = anv_cmd_buffer_ensure_rcs_companion(prev_cmd_buffer);
+   if (result != VK_SUCCESS) {
+      anv_batch_set_error(&prev_cmd_buffer->batch, result);
+      return (struct anv_companion_prev_cmd_buffer_helper) { 0 };
+   }
+
+   assert(prev_cmd_buffer->companion_rcs_cmd_buffer != NULL);
+
+   /* Re-emit the aux table register in every command buffer.  This way we're
+    * ensured that we have the table even if this command buffer doesn't
+    * initialize any images.
+    */
+   if (prev_cmd_buffer->device->info->has_aux_map) {
+      anv_add_pending_pipe_bits(prev_cmd_buffer->companion_rcs_cmd_buffer,
+                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                                 ANV_PIPE_AUX_TABLE_INVALIDATE_BIT,
+                                 "new cmd buffer with aux-tt");
+   }
+
+   struct anv_state syncpoint =
+      anv_genX(info, cmd_buffer_begin_companion_rcs_syncpoint)(prev_cmd_buffer);
+
+   *cmd_buffer = prev_cmd_buffer->companion_rcs_cmd_buffer;
+
+   return (struct anv_companion_prev_cmd_buffer_helper) {
+      .prev_cmd_buffer = prev_cmd_buffer,
+      .syncpoint = syncpoint,
+   };
+}
+
+void
+anv_end_companion_cmd_buffer_helper(struct anv_cmd_buffer **cmd_buffer,
+                                    struct anv_companion_prev_cmd_buffer_helper prev_cmd_buffer)
+{
+   if (likely(!prev_cmd_buffer.prev_cmd_buffer))
+      return;
+
+   if (prev_cmd_buffer.syncpoint.alloc_size) {
+      const struct intel_device_info *info = (*cmd_buffer)->device->info;
+      anv_genX(info, cmd_buffer_end_companion_rcs_syncpoint)(prev_cmd_buffer.prev_cmd_buffer,
+                                                             prev_cmd_buffer.syncpoint);
+   }
+
+   *cmd_buffer = prev_cmd_buffer.prev_cmd_buffer;
 }

@@ -51,8 +51,7 @@ append_logical_end(isel_context* ctx, bool append_reload_preserved)
          stack_ptr_op = Operand(ctx->callee_info.stack_ptr.def.getTemp());
       else
          stack_ptr_op = Operand(load_scratch_resource(ctx->program, bld, -1u, false));
-      bld.pseudo(aco_opcode::p_reload_preserved, bld.def(s1), bld.def(bld.lm), bld.def(s1, scc),
-                 stack_ptr_op);
+      bld.pseudo(aco_opcode::p_reload_preserved, bld.def(bld.lm), bld.def(s1, scc), stack_ptr_op);
    }
 
    bld.pseudo(aco_opcode::p_logical_end);
@@ -690,9 +689,6 @@ add_startpgm(struct isel_context* ctx)
          def_count++;
    }
 
-   if (ctx->stage.hw == AC_HW_COMPUTE_SHADER && ctx->program->gfx_level >= GFX12)
-      def_count += 3;
-
    Instruction* startpgm = create_instruction(aco_opcode::p_startpgm, Format::PSEUDO, 0, def_count);
    ctx->block->instructions.emplace_back(startpgm);
    for (unsigned i = 0, arg = 0; i < ctx->args->arg_count; i++) {
@@ -723,35 +719,6 @@ add_startpgm(struct isel_context* ctx)
             ctx->program->args_pending_vmem.push_back(def);
          }
       }
-   }
-
-   if (ctx->program->gfx_level >= GFX12 && ctx->stage.hw == AC_HW_COMPUTE_SHADER) {
-      Temp idx = ctx->program->allocateTmp(s1);
-      Temp idy = ctx->program->allocateTmp(s1);
-      ctx->ttmp8 = ctx->program->allocateTmp(s1);
-      startpgm->definitions[def_count - 3] = Definition(idx);
-      startpgm->definitions[def_count - 3].setPrecolored(PhysReg(108 + 9 /*ttmp9*/));
-      startpgm->definitions[def_count - 2] = Definition(ctx->ttmp8);
-      startpgm->definitions[def_count - 2].setPrecolored(PhysReg(108 + 8 /*ttmp8*/));
-      startpgm->definitions[def_count - 1] = Definition(idy);
-      startpgm->definitions[def_count - 1].setPrecolored(PhysReg(108 + 7 /*ttmp7*/));
-      ctx->workgroup_id[0] = Operand(idx);
-      if (ctx->args->workgroup_ids[2].used) {
-         Builder bld(ctx->program, ctx->block);
-         ctx->workgroup_id[1] =
-            bld.pseudo(aco_opcode::p_extract, bld.def(s1), bld.def(s1, scc), idy, Operand::zero(),
-                       Operand::c32(16u), Operand::zero());
-         ctx->workgroup_id[2] =
-            bld.pseudo(aco_opcode::p_extract, bld.def(s1), bld.def(s1, scc), idy, Operand::c32(1u),
-                       Operand::c32(16u), Operand::zero());
-      } else {
-         ctx->workgroup_id[1] = Operand(idy);
-         ctx->workgroup_id[2] = Operand::zero();
-      }
-   } else if (ctx->stage.hw == AC_HW_COMPUTE_SHADER) {
-      const struct ac_arg* ids = ctx->args->workgroup_ids;
-      for (unsigned i = 0; i < 3; i++)
-         ctx->workgroup_id[i] = ids[i].used ? Operand(get_arg(ctx, ids[i])) : Operand::zero();
    }
 
    /* epilog has no scratch */

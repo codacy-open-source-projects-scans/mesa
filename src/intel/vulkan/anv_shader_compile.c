@@ -43,6 +43,51 @@ wa_forbidden_west(nir_shader *nir)
    NIR_PASS(_, nir, brw_nir_apply_sqrt_workarounds);
 }
 
+/* Try to detect shaders relying on 32-wide subgroups. Usually they have a
+ * pattern like this:
+ *
+ * div 32    %1096 = @load_subgroup_invocation
+ * div 32    %1245 = iand %1096, %1228 (0x1f)
+ * div 32    %1246 = ixor %1245, %13 (0x1)
+ * div 32    %1247 = @shuffle (%1244, %1246)
+ */
+static bool is_alu1_iand_0x1f(nir_alu_instr *alu)
+{
+   if (!alu || alu->op != nir_op_iand)
+      return false;
+
+   for (uint32_t i = 0; i < 2; i++) {
+       if (nir_src_is_const(alu->src[i].src) &&
+           nir_alu_src_as_uint(alu->src[i]) == 0x1f)
+          return true;
+   }
+
+   return false;
+}
+
+static bool
+detect_simd32_shuffle(nir_builder *b,
+                      nir_intrinsic_instr *intrin,
+                      void *data)
+{
+   if (intrin->intrinsic != nir_intrinsic_shuffle)
+      return false;
+
+   nir_alu_instr *alu1 = nir_src_as_alu(intrin->src[1]);
+   if (alu1 == NULL)
+      return false;
+
+   if (is_alu1_iand_0x1f(alu1))
+      return true;
+
+   for (uint32_t i = 0; i < nir_op_infos[alu1->op].num_inputs; i++) {
+      if (is_alu1_iand_0x1f(nir_src_as_alu(alu1->src[i].src)))
+         return true;
+   }
+
+   return false;
+}
+
 /* List of game-specific workarounds identified by BLAKE3 hash of the shader.
  * Add new workarounds here as needed.
  */
@@ -521,8 +566,7 @@ populate_wm_prog_key(struct brw_wm_prog_key *key,
 static void
 populate_cs_prog_key(struct brw_cs_prog_key *key,
                      const struct vk_physical_device *device,
-                     const struct vk_pipeline_robustness_state *rs,
-                     bool lower_unaligned_dispatch)
+                     const struct vk_pipeline_robustness_state *rs)
 {
    const struct anv_physical_device *pdevice =
       container_of(device, const struct anv_physical_device, vk);
@@ -530,7 +574,6 @@ populate_cs_prog_key(struct brw_cs_prog_key *key,
    populate_base_prog_key(&key->base, device, rs);
 
    key->base.uses_inline_push_addr = pdevice->info.verx10 >= 125;
-   key->lower_unaligned_dispatch = lower_unaligned_dispatch;
 }
 
 static void
@@ -599,7 +642,7 @@ anv_shader_hash_state(struct vk_physical_device *device,
          _mesa_blake3_update(&blake3_ctx, &key.wm, sizeof(key.wm));
          break;
       case VK_SHADER_STAGE_COMPUTE_BIT:
-         populate_cs_prog_key(&key.cs, device, NULL, false);
+         populate_cs_prog_key(&key.cs, device, NULL);
          _mesa_blake3_update(&blake3_ctx, &key.cs, sizeof(key.cs));
          break;
       default:
@@ -709,8 +752,9 @@ lookup_ycbcr_conversion(const void *_stage, uint32_t set,
 }
 
 static void
-anv_fixup_subgroup_size(struct anv_device *device, struct shader_info *info)
+anv_fixup_subgroup_size(struct anv_device *device, nir_shader *shader)
 {
+   struct shader_info *info = &shader->info;
    const struct anv_instance *instance = device->physical->instance;
 
    if (!mesa_shader_stage_uses_workgroup(info->stage))
@@ -764,6 +808,18 @@ anv_fixup_subgroup_size(struct anv_device *device, struct shader_info *info)
        info->max_subgroup_size > info->min_subgroup_size) {
       info->api_subgroup_size = info->max_subgroup_size;
       info->min_subgroup_size = info->max_subgroup_size;
+   }
+
+   /* Only promote to SIMD32 if the max allows it. */
+   if (info->max_subgroup_size >= BRW_SUBGROUP_SIZE &&
+       info->min_subgroup_size != info->max_subgroup_size &&
+       info->uses_wide_subgroup_intrinsics &&
+       nir_shader_intrinsics_pass(shader,
+                                  detect_simd32_shuffle,
+                                  nir_metadata_all,
+                                  NULL)) {
+      info->max_subgroup_size = BRW_SUBGROUP_SIZE;
+      info->min_subgroup_size = BRW_SUBGROUP_SIZE;
    }
 }
 
@@ -1300,14 +1356,11 @@ anv_shader_lower_nir(struct anv_device *device,
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_wpos_center);
       NIR_PASS(_, nir, nir_lower_input_attachments,
-               &(nir_input_attachment_options) {
-                  .use_fragcoord_sysval = true,
-                  .use_layer_id_sysval = true,
-               });
+               &(nir_input_attachment_options) { });
    }
 
    if (nir->info.stage == MESA_SHADER_COMPUTE &&
-       shader_data->key.cs.lower_unaligned_dispatch) {
+       (shader_data->info->flags & VK_SHADER_CREATE_UNALIGNED_DISPATCH_BIT_MESA)) {
       NIR_PASS(_, nir, anv_nir_lower_unaligned_dispatch);
       /* anv_nir_lower_unaligned_dispatch pass uses nir_jump_return that we
        * need to lower it.
@@ -1340,7 +1393,7 @@ anv_shader_lower_nir(struct anv_device *device,
 
    if (nir->info.stage == MESA_SHADER_COMPUTE &&
        nir->info.cs.has_cooperative_matrix) {
-      anv_fixup_subgroup_size(device, &nir->info);
+      anv_fixup_subgroup_size(device, nir);
       NIR_PASS(_, nir, brw_nir_lower_cmat, nir->info.api_subgroup_size);
       NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
                nir_var_function_temp, 16);
@@ -1397,10 +1450,27 @@ anv_shader_lower_nir(struct anv_device *device,
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
       anv_shader_compute_fragment_rts(compiler, state, shader_data);
 
+
+   uint32_t dynamic_descriptors_offset = 0;
+   uint32_t dynamic_descriptors_offsets[MAX_SETS] = {};
+   for (uint32_t i = 0; i < set_layout_count; i++) {
+      dynamic_descriptors_offsets[i] = dynamic_descriptors_offset;
+      if (set_layouts[i] != NULL) {
+         shader_data->bind_map.binding_mask |= ANV_PIPELINE_BIND_MASK_SET(i);
+         const uint32_t dyn_desc_count =
+            set_layouts[i]->vk.dynamic_descriptor_count;
+         shader_data->bind_map.dynamic_descriptors[i] = dyn_desc_count;
+         dynamic_descriptors_offset += dyn_desc_count;
+      }
+   }
+
    /* Apply the actual pipeline layout to UBOs, SSBOs, and textures */
    NIR_PASS(_, nir, anv_nir_apply_pipeline_layout,
                pdevice, shader_data->key.base.robust_flags,
-               set_layouts, set_layout_count, NULL, /* TODO? */
+               set_layouts, set_layout_count,
+               (shader_data->info->flags &
+                VK_SHADER_CREATE_INDEPENDENT_SETS_BIT_MESA) ? NULL:
+               dynamic_descriptors_offsets,
                &shader_data->bind_map, &shader_data->push_map, mem_ctx);
 
    NIR_PASS(_, nir, anv_nir_lower_driver_values, pdevice);
@@ -1845,6 +1915,12 @@ anv_shader_compile(struct vk_device *vk_device,
 
       shader_data->source_hash = ((uint32_t*)info->nir->info.source_blake3)[0];
 
+      for (uint32_t i = 0; i < info->set_layout_count; i++) {
+         shader_data->dynamic_descriptors[i] =
+            info->set_layouts[i] != NULL ?
+            info->set_layouts[i]->dynamic_descriptor_count : 0;
+      }
+
       shader_data->bind_map.layout_type =
          set_layouts_get_layout_type((struct anv_descriptor_set_layout * const *)info->set_layouts,
                                      info->set_layout_count);
@@ -1891,8 +1967,7 @@ anv_shader_compile(struct vk_device *vk_device,
          break;
       case MESA_SHADER_COMPUTE:
          populate_cs_prog_key(&shader_data->key.cs, vk_device->physical,
-                              info->robustness,
-                              info->flags & VK_SHADER_CREATE_UNALIGNED_DISPATCH_BIT_MESA);
+                              info->robustness);
          break;
       case MESA_SHADER_RAYGEN:
       case MESA_SHADER_ANY_HIT:
@@ -1933,8 +2008,7 @@ anv_shader_compile(struct vk_device *vk_device,
 
       anv_shader_lower_nir(device, mem_ctx, state, shader_data);
 
-      anv_fixup_subgroup_size(device,
-                              &shader_data->info->nir->info);
+      anv_fixup_subgroup_size(device, shader_data->info->nir);
 
       anv_nir_apply_shader_workarounds(shader_data->info->nir);
    }

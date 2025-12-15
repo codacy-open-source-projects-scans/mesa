@@ -433,7 +433,7 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
                               nir_intrinsic_instr *low, nir_intrinsic_instr *high, void *data);
 
 bool
-ac_nir_scalarize_overfetching_loads_callback(const nir_instr *instr, const void *data);
+ac_nir_scalarize_overfetching_loads_callback(const nir_intrinsic_instr *intr, const void *data);
 
 bool
 ac_nir_store_may_be_subdword(const nir_intrinsic_instr *instr);
@@ -443,6 +443,12 @@ ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_);
 
 bool
 ac_nir_allow_offset_wrap_cb(nir_intrinsic_instr *instr, const void *data);
+
+bool
+ac_nir_op_supports_packed_math_16bit(const nir_alu_instr* alu);
+
+uint8_t
+ac_nir_opt_vectorize_cb(const nir_instr *instr, const void *data);
 
 #ifdef __cplusplus
 }

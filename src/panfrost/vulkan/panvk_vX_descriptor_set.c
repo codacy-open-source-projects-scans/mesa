@@ -34,7 +34,7 @@
 #include "panvk_priv_bo.h"
 #include "panvk_sampler.h"
 
-static void *
+static const void *
 get_desc_slot_ptr(struct panvk_descriptor_set *set, uint32_t binding,
                   uint32_t elem, struct panvk_subdesc_info subdesc)
 {
@@ -48,12 +48,34 @@ get_desc_slot_ptr(struct panvk_descriptor_set *set, uint32_t binding,
    return (char *)set->descs.host + offset * PANVK_DESCRIPTOR_SIZE;
 }
 
+static void
+write_desc_data(struct panvk_descriptor_set *set, uint32_t binding,
+                uint32_t elem, struct panvk_subdesc_info subdesc,
+                uint32_t desc_offset, const void *desc_data, size_t desc_size)
+{
+   const struct panvk_descriptor_set_binding_layout *binding_layout =
+      &set->layout->bindings[binding];
+
+   uint32_t index = panvk_get_desc_index(binding_layout, elem, subdesc);
+
+   assert(index < set->layout->desc_count);
+   assert(index + DIV_ROUND_UP(desc_size, PANVK_DESCRIPTOR_SIZE) <=
+          set->layout->desc_count);
+
+   uint32_t offset_B = desc_offset + index * PANVK_DESCRIPTOR_SIZE;
+
+   memcpy((char *)set->descs.host + offset_B, desc_data, desc_size);
+
+   set->descs.dirty_min = MIN2(set->descs.dirty_min, offset_B);
+   set->descs.dirty_max = MAX2(set->descs.dirty_max, offset_B + desc_size);
+}
+
 #define write_desc(set, binding, elem, desc, subdesc)                          \
    do {                                                                        \
       static_assert(sizeof(*(desc)) == PANVK_DESCRIPTOR_SIZE,                  \
                     "wrong descriptor size");                                  \
-      void *__dst = get_desc_slot_ptr(set, binding, elem, subdesc);            \
-      memcpy(__dst, (desc), PANVK_DESCRIPTOR_SIZE);                            \
+      write_desc_data(set, binding, elem, subdesc, 0,                          \
+                      (desc), PANVK_DESCRIPTOR_SIZE);                          \
    } while (0)
 
 #if PAN_ARCH >= 9
@@ -243,16 +265,8 @@ static void
 write_iub(struct panvk_descriptor_set *set, uint32_t binding,
           uint32_t dst_offset, uint32_t count, const void *data)
 {
-   const struct panvk_descriptor_set_binding_layout *binding_layout =
-      &set->layout->bindings[binding];
-
    /* First slot is the actual buffer descriptor. */
-   uint32_t iub_data_offset =
-      panvk_get_desc_index(binding_layout, 1, NO_SUBDESC) *
-      PANVK_DESCRIPTOR_SIZE;
-
-   void *iub_data_host = set->descs.host + iub_data_offset;
-   memcpy(iub_data_host + dst_offset, data, count);
+   write_desc_data(set, binding, 1, NO_SUBDESC, dst_offset, data, count);
 }
 
 static void
@@ -308,7 +322,9 @@ panvk_init_pool_memory(struct panvk_device *device,
                        const VkAllocationCallbacks *pAllocator)
 {
    if (!(pCreateInfo->flags & VK_DESCRIPTOR_POOL_CREATE_HOST_ONLY_BIT_EXT)) {
-      VkResult result = panvk_priv_bo_create(device, pool_size, 0,
+      uint32_t bo_flags =
+         panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP);
+      VkResult result = panvk_priv_bo_create(device, pool_size, bo_flags,
                                              VK_SYSTEM_ALLOCATION_SCOPE_OBJECT,
                                              &pool->desc_bo);
       if (result != VK_SUCCESS)
@@ -527,6 +543,7 @@ panvk_desc_pool_allocate_set(struct panvk_descriptor_pool *pool,
    vk_object_base_init(pool->base.device, &set->base,
                        VK_OBJECT_TYPE_DESCRIPTOR_SET);
    vk_descriptor_set_layout_ref(&layout->vk);
+   set->pool = pool;
    set->layout = layout;
    set->desc_count = num_descs;
    if (pool->desc_bo) {
@@ -538,6 +555,8 @@ panvk_desc_pool_allocate_set(struct panvk_descriptor_pool *pool,
        * pointer in case of a host only pool. */
       set->descs.host = (void *)(uintptr_t)descs_dev_addr;
    }
+   set->descs.dirty_min = SIZE_MAX;
+   set->descs.dirty_max = 0;
    desc_set_write_immutable_samplers(set, variable_count);
    BITSET_CLEAR(pool->free_sets, first_free_set - 1);
 
@@ -729,16 +748,13 @@ panvk_descriptor_set_copy(const VkCopyDescriptorSet *copy)
    case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
    case VK_DESCRIPTOR_TYPE_MUTABLE_EXT:
       for (uint32_t i = 0; i < copy->descriptorCount; i++) {
-         void *dst = get_desc_slot_ptr(dst_set, copy->dstBinding,
-                                       copy->dstArrayElement + i,
-                                       NO_SUBDESC);
          const void *src = get_desc_slot_ptr(src_set, copy->srcBinding,
                                              copy->srcArrayElement + i,
                                              NO_SUBDESC);
-
-         memcpy(dst, src,
-                PANVK_DESCRIPTOR_SIZE *
-                   panvk_get_desc_stride(src_binding_layout));
+         const size_t copy_size =
+            PANVK_DESCRIPTOR_SIZE * panvk_get_desc_stride(src_binding_layout);
+         write_desc_data(dst_set, copy->dstBinding, copy->dstArrayElement + i,
+                         NO_SUBDESC, 0, src, copy_size);
       }
       break;
 
@@ -786,6 +802,21 @@ panvk_per_arch(UpdateDescriptorSets)(
 
    for (uint32_t i = 0; i < descriptorCopyCount; i++)
       panvk_descriptor_set_copy(&pDescriptorCopies[i]);
+
+   /* Flush at the end so we call into the kernel as few times as possible.
+    * Note that redundant flushes do nothing.
+    */
+   for (uint32_t i = 0; i < descriptorWriteCount; i++) {
+      VK_FROM_HANDLE(panvk_descriptor_set, set, pDescriptorWrites[i].dstSet);
+
+      panvk_per_arch(descriptor_set_flush)(set);
+   }
+
+   for (uint32_t i = 0; i < descriptorCopyCount; i++) {
+      VK_FROM_HANDLE(panvk_descriptor_set, set, pDescriptorCopies[i].dstSet);
+
+      panvk_per_arch(descriptor_set_flush)(set);
+   }
 }
 
 void
@@ -887,4 +918,29 @@ panvk_per_arch(UpdateDescriptorSetWithTemplate)(
                   descriptorUpdateTemplate);
 
    panvk_per_arch(descriptor_set_write_template)(set, template, pData, false);
+   panvk_per_arch(descriptor_set_flush)(set);
+}
+
+void panvk_per_arch(descriptor_set_flush)(struct panvk_descriptor_set *set)
+{
+   if (set->descs.dirty_max <= set->descs.dirty_min) {
+      assert(set->descs.dirty_max == 0);
+      assert(set->descs.dirty_min == SIZE_MAX);
+      return;
+   }
+
+   if (set->pool->desc_bo) {
+      assert(set->descs.dev >= set->pool->desc_bo->addr.dev);
+      uint64_t set_offset = set->descs.dev - set->pool->desc_bo->addr.dev;
+      assert(set_offset < set->pool->desc_bo->bo->size);
+
+      assert(set_offset + set->descs.dirty_max <= set->pool->desc_bo->bo->size);
+      size_t offset = set_offset + set->descs.dirty_min;
+      size_t range = set->descs.dirty_max - set->descs.dirty_min;
+
+      panvk_priv_bo_flush(set->pool->desc_bo, offset, range);
+   }
+
+   set->descs.dirty_min = SIZE_MAX;
+   set->descs.dirty_max = 0;
 }

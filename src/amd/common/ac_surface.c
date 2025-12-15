@@ -1207,7 +1207,8 @@ static bool use_tile_swizzle(const struct ac_surf_config *config, const struct r
                              bool fmask)
 {
    if (fmask) {
-      return !(surf->flags & RADEON_SURF_SHAREABLE);
+      return !(surf->flags & (RADEON_SURF_SHAREABLE | RADEON_SURF_ALIASED |
+                              RADEON_SURF_REPLAYABLE));
    } else {
       return surf->modifier == DRM_FORMAT_MOD_INVALID &&
              !(surf->flags & (RADEON_SURF_Z_OR_SBUFFER | RADEON_SURF_SHAREABLE |
@@ -3796,7 +3797,7 @@ int ac_compute_surface(struct ac_addrlib *addrlib, const struct radeon_info *inf
    /* 0 offsets mean disabled. */
    surf->meta_offset = surf->fmask_offset = surf->cmask_offset = surf->display_dcc_offset = 0;
 
-   if (info->family_id >= FAMILY_GFX12) {
+   if (info->family_id >= FAMILY_NV4) {
       if (!gfx12_compute_surface(addrlib, info, config, mode, surf))
          return ADDR_ERROR;
 

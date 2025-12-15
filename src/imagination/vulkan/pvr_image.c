@@ -64,9 +64,8 @@ static void pvr_image_init_memlayout(struct pvr_image *image)
    }
 }
 
-static void
-pvr_image_init_physical_extent(struct pvr_image *image,
-                               unsigned pbe_stride_align)
+static void pvr_image_init_physical_extent(struct pvr_image *image,
+                                           unsigned pbe_stride_align)
 {
    assert(image->memlayout != PVR_MEMLAYOUT_UNDEFINED);
 
@@ -153,8 +152,7 @@ static void pvr_image_setup_mip_levels(struct pvr_image *image)
    image->size = image->layer_size * image->vk.array_layers;
 }
 
-static unsigned
-get_pbe_stride_align(const struct pvr_device_info *dev_info);
+static unsigned get_pbe_stride_align(const struct pvr_device_info *dev_info);
 
 VkResult pvr_CreateImage(VkDevice _device,
                          const VkImageCreateInfo *pCreateInfo,
@@ -164,16 +162,11 @@ VkResult pvr_CreateImage(VkDevice _device,
    VK_FROM_HANDLE(pvr_device, device, _device);
    struct pvr_image *image;
 
-#if defined(PVR_USE_WSI_PLATFORM)
-   const VkImageSwapchainCreateInfoKHR *swapchain_info =
-      vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
+   if (wsi_common_is_swapchain_image(pCreateInfo)) {
       return wsi_common_create_swapchain_image(&device->pdevice->wsi_device,
                                                pCreateInfo,
-                                               swapchain_info->swapchain,
                                                pImage);
    }
-#endif
 
    image =
       vk_image_create(&device->vk, pCreateInfo, pAllocator, sizeof(*image));
@@ -185,8 +178,7 @@ VkResult pvr_CreateImage(VkDevice _device,
     */
    image->alignment = 4096U;
 
-   unsigned pbe_stride_align =
-      get_pbe_stride_align(&device->pdevice->dev_info);
+   unsigned pbe_stride_align = get_pbe_stride_align(&device->pdevice->dev_info);
 
    /* Initialize the image using the saved information from pCreateInfo */
    pvr_image_init_memlayout(image);
@@ -586,9 +578,9 @@ void pvr_DestroyBufferView(VkDevice _device,
 /* Leave this at the very end, to avoid leakage of HW-defs here */
 #include "pvr_csb.h"
 
-static unsigned
-get_pbe_stride_align(const struct pvr_device_info *dev_info)
+static unsigned get_pbe_stride_align(const struct pvr_device_info *dev_info)
 {
-   return PVR_HAS_FEATURE(dev_info, pbe_stride_align_1pixel) ?
-      1 : ROGUE_PBESTATE_REG_WORD0_LINESTRIDE_UNIT_SIZE;
+   return PVR_HAS_FEATURE(dev_info, pbe_stride_align_1pixel)
+             ? 1
+             : ROGUE_PBESTATE_REG_WORD0_LINESTRIDE_UNIT_SIZE;
 }

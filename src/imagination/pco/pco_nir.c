@@ -74,6 +74,7 @@ static const nir_shader_compiler_options nir_options = {
    .lower_helper_invocation = true,
 
    .max_unroll_iterations = 16,
+   .max_samples = 4,
 
    .io_options = nir_io_vectorizer_ignores_types,
 };
@@ -144,12 +145,10 @@ static uint8_t vectorize_filter(const nir_instr *instr, UNUSED const void *data)
  * \param[in] data User data.
  * \return True if the instruction was found.
  */
-static bool frag_in_scalar_filter(const nir_instr *instr, const void *data)
+static bool frag_in_scalar_filter(const nir_intrinsic_instr *intr, const void *data)
 {
-   assert(instr->type == nir_instr_type_intrinsic);
    nir_shader *nir = (nir_shader *)data;
 
-   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
    if (intr->intrinsic != nir_intrinsic_load_input &&
        intr->intrinsic != nir_intrinsic_load_interpolated_input) {
       return false;
@@ -633,10 +632,10 @@ void pco_preprocess_nir(pco_ctx *ctx, nir_shader *nir)
             nir_var_function_temp | nir_var_shader_temp,
             NULL);
 
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_,
             nir,
-            nir_io_add_const_offset_to_base,
-            nir_var_shader_in | nir_var_shader_out);
+            nir_opt_constant_folding);
 
    NIR_PASS(_,
             nir,
@@ -888,10 +887,6 @@ void pco_lower_nir(pco_ctx *ctx, nir_shader *nir, pco_data *data)
 
    NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_opt_constant_folding);
-   NIR_PASS(_,
-            nir,
-            nir_io_add_const_offset_to_base,
-            nir_var_shader_in | nir_var_shader_out);
 
    /* Internal shaders will be using invalid32 types at this stage. */
    if (!nir->info.internal)

@@ -3678,14 +3678,18 @@ emit_sampleid_setup(nir_to_brw_state &ntb)
 static brw_reg
 emit_samplemaskin_setup(nir_to_brw_state &ntb)
 {
+   const intel_device_info *devinfo = ntb.devinfo;
    const brw_builder &bld = ntb.bld;
    brw_shader &s = ntb.s;
 
    assert(s.stage == MESA_SHADER_FRAGMENT);
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(s.prog_data);
 
-   /* The HW doesn't provide us with expected values. */
-   assert(wm_prog_data->coarse_pixel_dispatch != INTEL_ALWAYS);
+   /* DG2 should support this, but Wa_22012766191 says there are issues
+    * with CPS 1x1 + MSAA + FS writing to oMask.
+    */
+   assert(devinfo->verx10 >= 200 ||
+          wm_prog_data->coarse_pixel_dispatch != INTEL_ALWAYS);
 
    brw_reg coverage_mask =
       brw_fetch_payload_reg(bld, s.fs_payload().sample_mask_in_reg, BRW_TYPE_UD);
@@ -3931,7 +3935,8 @@ brw_from_nir_emit_fs_intrinsic(nir_to_brw_state &ntb,
       const unsigned target = l - FRAG_RESULT_DATA0 + load_offset;
       const brw_reg tmp = bld.vgrf(dest.type, 4);
 
-      assert(reinterpret_cast<const brw_wm_prog_key *>(s.key)->coherent_fb_fetch);
+      /* Not functional after Gfx20 */
+      assert(brw_can_coherent_fb_fetch(devinfo));
       emit_coherent_fb_read(bld, tmp, target);
 
       brw_combine_with_vec(bld, dest,
@@ -4406,29 +4411,6 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
       dest.type = val.type;
       for (unsigned i = 0; i < 3; i++)
          ubld.MOV(offset(dest, ubld, i), offset(val, ubld, i));
-      break;
-   }
-
-   case nir_intrinsic_load_num_workgroups: {
-      assert(instr->def.bit_size == 32);
-
-      cs_prog_data->uses_num_work_groups = true;
-
-      brw_reg srcs[MEMORY_LOGICAL_NUM_SRCS];
-      srcs[MEMORY_LOGICAL_BINDING] = brw_imm_ud(0);
-      srcs[MEMORY_LOGICAL_ADDRESS] = brw_imm_ud(0);
-
-      brw_mem_inst *mem =
-         bld.emit(SHADER_OPCODE_MEMORY_LOAD_LOGICAL,
-                  dest, srcs, MEMORY_LOGICAL_NUM_SRCS)->as_mem();
-      mem->size_written = 3 * s.dispatch_width * 4;
-      mem->lsc_op = LSC_OP_LOAD;
-      mem->mode = MEMORY_MODE_UNTYPED;
-      mem->binding_type = LSC_ADDR_SURFTYPE_BTI;
-      mem->data_size = LSC_DATA_SIZE_D32;
-      mem->coord_components = 1;
-      mem->components = 3;
-      mem->alignment = 4;
       break;
    }
 

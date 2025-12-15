@@ -64,11 +64,11 @@ emit_tls(struct panvk_cmd_buffer *cmdbuf)
    struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(dev->vk.physical);
    unsigned core_id_range;
-   pan_query_core_count(&phys_dev->kmod.props, &core_id_range);
+   pan_query_core_count(&phys_dev->kmod.dev->props, &core_id_range);
 
    if (cmdbuf->state.tls.info.tls.size) {
       unsigned thread_tls_alloc =
-         pan_query_thread_tls_alloc(&phys_dev->kmod.props);
+         pan_query_thread_tls_alloc(&phys_dev->kmod.dev->props);
       unsigned size = pan_get_total_stack_size(cmdbuf->state.tls.info.tls.size,
                                                thread_tls_alloc, core_id_range);
 
@@ -266,6 +266,9 @@ panvk_per_arch(EndCommandBuffer)(VkCommandBuffer commandBuffer)
          finish_cs(cmdbuf, i);
       }
    }
+
+   panvk_pool_flush_maps(&cmdbuf->cs_pool);
+   panvk_pool_flush_maps(&cmdbuf->desc_pool);
 
    return vk_command_buffer_end(&cmdbuf->vk);
 }
@@ -768,57 +771,6 @@ panvk_per_arch(CmdPipelineBarrier2)(VkCommandBuffer commandBuffer,
    }
 }
 
-#if PAN_ARCH >= 11
-void
-panvk_per_arch(cs_next_iter_sb)(struct panvk_cmd_buffer *cmdbuf,
-                                enum panvk_subqueue_id subqueue,
-                                struct cs_index scratch_regs)
-{
-   struct cs_builder *b = panvk_get_cs_builder(cmdbuf, subqueue);
-   struct cs_index iter_sb = cs_extract32(b, scratch_regs, 0);
-   struct cs_index sb_wait_mask = cs_extract32(b, scratch_regs, 1);
-
-   /* Wait for scoreboard to be available and select the next scoreboard entry */
-   cs_next_sb_entry(b, iter_sb, MALI_CS_SCOREBOARD_TYPE_ENDPOINT,
-                    MALI_CS_NEXT_SB_ENTRY_FORMAT_INDEX);
-
-   /* Setup indirect scoreboard wait mask now for indirect defer */
-   cs_move32_to(b, sb_wait_mask, 0);
-   cs_bit_set32(b, sb_wait_mask, sb_wait_mask, iter_sb);
-   cs_set_state(b, MALI_CS_SET_STATE_TYPE_SB_MASK_WAIT, sb_wait_mask);
-}
-#else
-void
-panvk_per_arch(cs_next_iter_sb)(struct panvk_cmd_buffer *cmdbuf,
-                                enum panvk_subqueue_id subqueue,
-                                struct cs_index scratch_regs)
-{
-   struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
-   struct cs_builder *b = panvk_get_cs_builder(cmdbuf, subqueue);
-   struct cs_index iter_sb = cs_extract32(b, scratch_regs, 0);
-   struct cs_index cmp_scratch = cs_extract32(b, scratch_regs, 1);
-
-   cs_load32_to(b, iter_sb, cs_subqueue_ctx_reg(b),
-                offsetof(struct panvk_cs_subqueue_context, iter_sb));
-
-   /* Select next scoreboard entry and wrap around if we get past the limit */
-   cs_add32(b, iter_sb, iter_sb, 1);
-   cs_add32(b, cmp_scratch, iter_sb, -SB_ITER(dev->csf.sb.iter_count));
-   cs_if(b, MALI_CS_CONDITION_GEQUAL, cmp_scratch) {
-      cs_move32_to(b, iter_sb, SB_ITER(0));
-   }
-
-   cs_match_iter_sb(b, x, iter_sb, cmp_scratch) {
-      cs_wait_slot(b, SB_ITER(x));
-      cs_select_sb_entries_for_async_ops(b, SB_ITER(x));
-   }
-
-   cs_store32(b, iter_sb, cs_subqueue_ctx_reg(b),
-              offsetof(struct panvk_cs_subqueue_context, iter_sb));
-   cs_flush_stores(b);
-}
-#endif
-
 static struct cs_buffer
 alloc_cs_buffer(void *cookie)
 {
@@ -853,6 +805,8 @@ cs_reg_perm(struct cs_builder *b, unsigned reg)
 static void
 init_cs_builders(struct panvk_cmd_buffer *cmdbuf)
 {
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(cmdbuf->vk.base.device->physical);
    struct panvk_device *dev = to_panvk_device(cmdbuf->vk.base.device);
    const reg_perm_cb_t base_reg_perms[PANVK_SUBQUEUE_COUNT] = {
       [PANVK_SUBQUEUE_VERTEX_TILER] = panvk_cs_vt_reg_perm,
@@ -871,6 +825,8 @@ init_cs_builders(struct panvk_cmd_buffer *cmdbuf)
       struct cs_builder_conf conf = {
          .nr_registers = csif_info->cs_reg_count,
          .nr_kernel_registers = MAX2(csif_info->unpreserved_cs_reg_count, 4),
+         .compute_ep_limit =
+            PAN_ARCH >= 12 ? phys_dev->kmod.dev->props.max_tasks_per_core : 0,
          .alloc_buffer = alloc_cs_buffer,
          .cookie = cmdbuf,
          .ls_sb_slot = SB_ID(LS),
@@ -971,7 +927,8 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
       &cmdbuf->state.gfx.dynamic.sl;
 
    struct panvk_pool_properties cs_pool_props = {
-      .create_flags = 0,
+      .create_flags =
+         panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP),
       .slab_size = 64 * 1024,
       .label = "Command buffer CS pool",
       .prealloc = false,
@@ -981,7 +938,8 @@ panvk_create_cmdbuf(struct vk_command_pool *vk_pool, VkCommandBufferLevel level,
    panvk_pool_init(&cmdbuf->cs_pool, device, &pool->cs_bo_pool, NULL, &cs_pool_props);
 
    struct panvk_pool_properties desc_pool_props = {
-      .create_flags = 0,
+      .create_flags =
+         panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP),
       .slab_size = 64 * 1024,
       .label = "Command buffer descriptor pool",
       .prealloc = false,

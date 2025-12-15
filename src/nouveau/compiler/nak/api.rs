@@ -191,6 +191,7 @@ fn nir_options(dev: &nv_device_info) -> nir_shader_compiler_options {
     op.discard_is_demote = true;
 
     op.max_unroll_iterations = 32;
+    op.max_samples = 8;
     op.scalarize_ddx = true;
 
     op
@@ -252,7 +253,7 @@ impl ShaderBin {
         let c_info = nak_shader_info {
             stage: match info.stage {
                 ShaderStageInfo::Compute(_) => MESA_SHADER_COMPUTE,
-                ShaderStageInfo::Vertex => MESA_SHADER_VERTEX,
+                ShaderStageInfo::Vertex(_) => MESA_SHADER_VERTEX,
                 ShaderStageInfo::Fragment(_) => MESA_SHADER_FRAGMENT,
                 ShaderStageInfo::Geometry(_) => MESA_SHADER_GEOMETRY,
                 ShaderStageInfo::TessellationInit(_) => MESA_SHADER_TESS_CTRL,
@@ -461,6 +462,7 @@ fn nak_compile_shader_internal(
     pass!(s, opt_dce);
     pass!(s, opt_out);
     pass!(s, legalize);
+    pass!(s, opt_dce);
     pass!(s, assign_regs);
     pass!(s, lower_par_copies);
     pass!(s, lower_copy_swap);

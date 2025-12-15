@@ -478,7 +478,8 @@ VkResult pvr_device_init_graphics_static_clear_state(struct pvr_device *device)
 
    struct pvr_device_static_clear_state *state = device->static_clear_state =
       vk_zalloc(&device->vk.alloc,
-                sizeof(struct pvr_device_static_clear_state), 8,
+                sizeof(struct pvr_device_static_clear_state),
+                8,
                 VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (!state)
       return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
@@ -499,7 +500,7 @@ VkResult pvr_device_init_graphics_static_clear_state(struct pvr_device *device)
                                   cache_line_size,
                                   &state->usc_multi_layer_vertex_shader_bo);
       if (result != VK_SUCCESS)
-         return result;
+         goto err_free_static_clear_state;
    } else {
       state->usc_multi_layer_vertex_shader_bo = NULL;
    }
@@ -597,6 +598,9 @@ err_free_usc_shader:
 
 err_free_usc_multi_layer_shader:
    pvr_bo_suballoc_free(state->usc_multi_layer_vertex_shader_bo);
+
+err_free_static_clear_state:
+   vk_free(&device->vk.alloc, state);
 
    return result;
 }
@@ -871,7 +875,9 @@ void pvr_pack_clear_vdm_state(const struct pvr_device_info *const dev_info,
       assert(layer_count);
    } else {
       needs_instance_count = false;
-      assert(layer_count == 1);
+      /* FIXME: CTS dynamic rendering tests need RTA emulation for multi-layered
+       * clears.
+       */
    }
 
    pvr_calculate_vertex_cam_size(dev_info,

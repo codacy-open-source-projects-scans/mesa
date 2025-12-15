@@ -38,9 +38,7 @@
 #include "util/u_process.h"
 #include "decode.h"
 
-#include "compiler/bifrost/disassemble.h"
-#include "compiler/valhall/disassemble.h"
-#include "midgard/disassemble.h"
+#include "compiler/pan_compiler.h"
 
 /* Used to distiguish dumped files, otherwise we would have to print the ctx
  * pointer, which is annoying for the user since it changes with every run */
@@ -251,8 +249,8 @@ pandecode_dump_file_open(struct pandecode_context *ctx)
 {
    simple_mtx_assert_locked(&ctx->lock);
 
-   /* This does a getenv every frame, so it is possible to use
-    * setenv to change the base at runtime.
+   /* This does a os_get_option every frame, so it is possible to use
+    * os_set_option to change the base at runtime.
     */
    const char *dump_file_base =
       debug_get_option("PANDECODE_DUMP_FILE", "pandecode.dump");
@@ -513,12 +511,8 @@ pandecode_shader_disassemble(struct pandecode_context *ctx, uint64_t shader_ptr,
    pandecode_log_cont(ctx, "\nShader %p (GPU VA %" PRIx64 ") sz %" PRId64 "\n",
                       code, shader_ptr, sz);
 
-   if (pan_arch(gpu_id) >= 9) {
-      disassemble_valhall(ctx->dump_stream, (const uint64_t *)code, sz, true);
-   } else if (pan_arch(gpu_id) >= 6)
-      disassemble_bifrost(ctx->dump_stream, code, sz, false);
-   else
-      disassemble_midgard(ctx->dump_stream, code, sz, gpu_id, true);
+   bool verbose = pan_arch(gpu_id) >= 6 && pan_arch(gpu_id) < 9;
+   pan_disassemble(ctx->dump_stream, code, sz, gpu_id, verbose);
 
    pandecode_log_cont(ctx, "\n\n");
 }

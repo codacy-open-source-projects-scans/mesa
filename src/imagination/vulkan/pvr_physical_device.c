@@ -30,24 +30,21 @@
 #include "pvr_device.h"
 #include "pvr_dump_info.h"
 #include "pvr_entrypoints.h"
+#include "pvr_instance.h"
 #include "pvr_winsys.h"
 #include "pvr_wsi.h"
 
 #define VK_VENDOR_ID_IMAGINATION 0x1010
 
-void
-pvr_physical_device_dump_info(const struct pvr_physical_device *pdevice,
-                              char *const *comp_display,
-                              char *const *comp_render)
+void pvr_physical_device_dump_info(const struct pvr_physical_device *pdevice,
+                                   char *const *comp_display,
+                                   char *const *comp_render)
 {
    drmVersionPtr version_display = NULL, version_render;
    struct pvr_device_dump_info info = { 0 };
 
    if (pdevice->ws->display_fd >= 0)
       version_display = drmGetVersion(pdevice->ws->display_fd);
-
-   if (!version_display)
-      return;
 
    version_render = drmGetVersion(pdevice->ws->render_fd);
    if (!version_render) {
@@ -78,8 +75,7 @@ pvr_physical_device_dump_info(const struct pvr_physical_device *pdevice,
    drmFreeVersion(version_render);
 }
 
-void
-pvr_physical_device_destroy(struct vk_physical_device *vk_pdevice)
+void pvr_physical_device_destroy(struct vk_physical_device *vk_pdevice)
 {
    struct pvr_physical_device *pdevice =
       container_of(vk_pdevice, struct pvr_physical_device, vk);
@@ -107,8 +103,8 @@ pvr_physical_device_destroy(struct vk_physical_device *vk_pdevice)
    vk_free(&pdevice->vk.instance->alloc, pdevice);
 }
 
-void
-pvr_physical_device_free_pipeline_cache(struct pvr_physical_device *const pdevice)
+void pvr_physical_device_free_pipeline_cache(
+   struct pvr_physical_device *const pdevice)
 {
 #ifdef ENABLE_SHADER_CACHE
    if (!pdevice->vk.disk_cache)
@@ -134,6 +130,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_descriptor_update_template = true,
       .KHR_device_group = true,
       .KHR_driver_properties = true,
+      .KHR_dynamic_rendering = true,
       .KHR_external_fence = true,
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
@@ -464,6 +461,9 @@ static void pvr_physical_device_get_supported_features(
 
       /* VK_EXT_zero_initialize_device_memory */
       .zeroInitializeDeviceMemory = true,
+
+      /* Vulkan 1.2 / VK_KHR_dynamic_rendering */
+      .dynamicRendering = true,
    };
 }
 
@@ -658,6 +658,7 @@ static bool pvr_physical_device_get_properties(
       .maxFramebufferHeight = 4096U,
       .maxFramebufferLayers = 256U,
 
+      /* Note: update nir_shader_compiler_options.max_samples when changing this. */
       .framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
       .framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
       .framebufferStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,

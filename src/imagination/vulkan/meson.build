@@ -34,6 +34,7 @@ pvr_files = files(
   'pvr_device.c',
   'pvr_dump_bo.c',
   'pvr_dump_csb.c',
+  'pvr_free_list.c',
   'pvr_formats.c',
   'pvr_hw_pass.c',
   'pvr_image.c',
@@ -43,6 +44,7 @@ pvr_files = files(
   'pvr_job_context.c',
   'pvr_job_render.c',
   'pvr_job_transfer.c',
+  'pvr_mrt.c',
   'pvr_pass.c',
   'pvr_physical_device.c',
   'pvr_pipeline.c',
@@ -175,5 +177,3 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())

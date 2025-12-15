@@ -431,12 +431,11 @@ struct brw_wm_prog_key {
    /* Is provoking vertex last? */
    enum intel_sometimes provoking_vertex_last:2;
 
-   bool coherent_fb_fetch:1;
    bool ignore_sample_mask_out:1;
    bool coarse_pixel:1;
    bool null_push_constant_tbimr_workaround:1;
    bool api_sample_shading:1;
-   unsigned pad:2;
+   unsigned pad:3;
 };
 
 static inline bool
@@ -453,14 +452,6 @@ brw_wm_prog_key_is_dynamic(const struct brw_wm_prog_key *key)
 
 struct brw_cs_prog_key {
    struct brw_base_prog_key base;
-
-   /**
-    * Lowers unaligned dispatches into aligned one by dispatching one more
-    * extra workgroup and masking off excessive invocations in the shader.
-    */
-   bool lower_unaligned_dispatch:1;
-
-   uint32_t padding:31;
 };
 
 struct brw_bs_prog_key {
@@ -989,7 +980,6 @@ struct brw_cs_prog_data {
    unsigned prog_spilled;
 
    bool uses_barrier;
-   bool uses_num_work_groups;
    bool uses_inline_data;
    /** Whether inline push data is used to provide a 64bit pointer to push
     * constants

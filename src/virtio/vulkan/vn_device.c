@@ -268,6 +268,8 @@ vn_device_fix_create_info(const struct vn_device *dev,
          block_exts[block_count++] = VK_KHR_PRESENT_WAIT_2_EXTENSION_NAME;
          block_exts[block_count++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
          block_exts[block_count++] =
+            VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
+         block_exts[block_count++] =
             VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME;
          block_exts[block_count++] =
             VK_KHR_INCREMENTAL_PRESENT_EXTENSION_NAME;
@@ -326,6 +328,11 @@ vn_device_fix_create_info(const struct vn_device *dev,
    if (app_exts->KHR_map_memory2) {
       /* see vn_physical_device_get_native_extensions */
       block_exts[block_count++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
+   }
+
+   if (app_exts->EXT_map_memory_placed) {
+      /* see vn_physical_device_get_native_extensions */
+      block_exts[block_count++] = VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME;
    }
 
    if (app_exts->EXT_device_memory_report) {
@@ -535,7 +542,7 @@ out_destroy_device:
    return result;
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_CreateDevice(VkPhysicalDevice physicalDevice,
                 const VkDeviceCreateInfo *pCreateInfo,
                 const VkAllocationCallbacks *pAllocator,
@@ -586,7 +593,7 @@ vn_CreateDevice(VkPhysicalDevice physicalDevice,
    return VK_SUCCESS;
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_DestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
 {
    VN_TRACE_FUNC();
@@ -626,14 +633,14 @@ vn_DestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
    vk_free(alloc, dev);
 }
 
-PFN_vkVoidFunction
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vn_GetDeviceProcAddr(VkDevice device, const char *pName)
 {
    struct vn_device *dev = vn_device_from_handle(device);
    return vk_device_get_proc_addr(&dev->base.vk, pName);
 }
 
-void
+VKAPI_ATTR void VKAPI_CALL
 vn_GetDeviceGroupPeerMemoryFeatures(
    VkDevice device,
    uint32_t heapIndex,
@@ -649,7 +656,7 @@ vn_GetDeviceGroupPeerMemoryFeatures(
       remoteDeviceIndex, pPeerMemoryFeatures);
 }
 
-VkResult
+VKAPI_ATTR VkResult VKAPI_CALL
 vn_GetCalibratedTimestampsKHR(
    VkDevice device,
    uint32_t timestampCount,

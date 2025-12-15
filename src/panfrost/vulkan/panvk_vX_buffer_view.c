@@ -63,16 +63,21 @@ panvk_per_arch(CreateBufferView)(VkDevice _device,
       };
 
 #if PAN_ARCH >= 9
-      view->mem = panvk_pool_alloc_desc(&device->mempools.rw, BUFFER);
       GENX(pan_buffer_texture_emit)(&bview, &view->descs.buf);
 #else
       view->mem =
          panvk_pool_alloc_desc(&device->mempools.rw, SURFACE_WITH_STRIDE);
-      struct pan_ptr ptr = {
-         .gpu = panvk_priv_mem_dev_addr(view->mem),
-         .cpu = panvk_priv_mem_host_addr(view->mem),
-      };
-      GENX(pan_buffer_texture_emit)(&bview, &view->descs.tex, &ptr);
+      if (!panvk_priv_mem_check_alloc(view->mem))
+         return panvk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+      panvk_priv_mem_write(view->mem, 0, struct mali_surface_with_stride_packed, sd) {
+         struct pan_ptr ptr = {
+            .gpu = panvk_priv_mem_dev_addr(view->mem),
+            .cpu = sd,
+         };
+
+         GENX(pan_buffer_texture_emit)(&bview, &view->descs.tex, &ptr);
+      }
 #endif
    }
 
@@ -122,6 +127,9 @@ panvk_per_arch(DestroyBufferView)(VkDevice _device, VkBufferView bufferView,
    if (!view)
       return;
 
+#if PAN_ARCH < 9
    panvk_pool_free_mem(&view->mem);
+#endif
+
    vk_buffer_view_destroy(&device->vk, pAllocator, &view->vk);
 }

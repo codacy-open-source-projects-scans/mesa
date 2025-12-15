@@ -9,7 +9,8 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "pan_shader.h"
-#include "panfrost/util/pan_lower_framebuffer.h"
+#include "panfrost/compiler/pan_compiler.h"
+#include "panfrost/compiler/pan_nir.h"
 #include "pan_context.h"
 
 #ifndef PAN_ARCH
@@ -112,13 +113,13 @@ GENX(pan_blend_get_shader_locked)(struct pan_blend_shader_cache *cache,
 #endif
 
    struct pan_shader_info info;
-   pan_shader_preprocess(nir, inputs.gpu_id);
-   pan_shader_postprocess(nir, inputs.gpu_id);
+   pan_preprocess_nir(nir, inputs.gpu_id);
+   pan_postprocess_nir(nir, inputs.gpu_id);
 
 #if PAN_ARCH >= 6
    NIR_PASS(_, nir, GENX(pan_inline_rt_conversion), rt_formats);
 #else
-   NIR_PASS(_, nir, pan_lower_framebuffer, rt_formats,
+   NIR_PASS(_, nir, pan_nir_lower_framebuffer, rt_formats,
             pan_raw_format_mask_midgard(rt_formats), MAX2(key.nr_samples, 1),
             (cache->gpu_id >> 16) < 0x700);
 #endif

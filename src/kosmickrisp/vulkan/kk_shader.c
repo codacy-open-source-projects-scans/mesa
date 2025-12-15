@@ -66,6 +66,7 @@ kk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
       .lower_doubles_options = (nir_lower_doubles_options)(~0),
       .lower_int64_options =
          nir_lower_ufind_msb64 | nir_lower_subgroup_shuffle64,
+      .io_options = nir_io_mediump_is_32bit,
    };
    return &options;
 }
@@ -77,9 +78,9 @@ kk_get_spirv_options(struct vk_physical_device *vk_pdev,
 {
    return (struct spirv_to_nir_options){
       .environment = NIR_SPIRV_VULKAN,
-      .ssbo_addr_format = nir_address_format_64bit_bounded_global,
+      .ssbo_addr_format = kk_buffer_addr_format(rs->storage_buffers),
       .phys_ssbo_addr_format = nir_address_format_64bit_global,
-      .ubo_addr_format = nir_address_format_64bit_bounded_global,
+      .ubo_addr_format = kk_buffer_addr_format(rs->uniform_buffers),
       .shared_addr_format = nir_address_format_32bit_offset,
       .min_ssbo_alignment = KK_MIN_SSBO_ALIGNMENT,
       .min_ubo_alignment = KK_MIN_UBO_ALIGNMENT,
@@ -252,21 +253,21 @@ kk_nir_swizzle_fragment_output(nir_builder *b, nir_intrinsic_instr *intrin,
 
    /* Check if we have to apply any swizzle */
    if (!supported_format->is_native) {
-      unsigned channel_swizzle[] = {
-         supported_format->swizzle.red, supported_format->swizzle.green,
-         supported_format->swizzle.blue, supported_format->swizzle.alpha};
+      unsigned channel_unswizzle[] = {
+         supported_format->unswizzle.red, supported_format->unswizzle.green,
+         supported_format->unswizzle.blue, supported_format->unswizzle.alpha};
 
       if (intrin->intrinsic == nir_intrinsic_store_output) {
+         unsigned channel_swizzle[4] = {0u};
+         for (uint32_t i = 0u; i < 4; ++i)
+            channel_swizzle[channel_unswizzle[i]] = i;
+
          b->cursor = nir_before_instr(&intrin->instr);
          nir_def *to_replace = intrin->src[0].ssa;
          nir_def *swizzled = nir_swizzle(b, to_replace, channel_swizzle,
                                          to_replace->num_components);
          nir_src_rewrite(&intrin->src[0], swizzled);
       } else {
-         unsigned channel_unswizzle[4] = {0u};
-         for (uint32_t i = 0u; i < 4; ++i)
-            channel_unswizzle[channel_swizzle[i]] = i;
-
          b->cursor = nir_after_instr(&intrin->instr);
          nir_def *to_replace = &intrin->def;
          nir_def *swizzled = nir_swizzle(b, to_replace, channel_unswizzle,
@@ -286,8 +287,8 @@ kk_lower_vs_vbo(nir_shader *nir, const struct vk_graphics_pipeline_state *state)
           "Fixed-function attributes not used in Vulkan");
    NIR_PASS(_, nir, nir_recompute_io_bases, nir_var_shader_in);
    /* the shader_out portion of this is load-bearing even for tess eval */
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base,
-            nir_var_shader_in | nir_var_shader_out);
+   /* Fold constant offset srcs for IO. */
+   NIR_PASS(_, nir, nir_opt_constant_folding);
 
    struct kk_attribute attributes[KK_MAX_ATTRIBS] = {};
    uint64_t attribs_read = nir->info.inputs_read >> VERT_ATTRIB_GENERIC0;
@@ -368,7 +369,8 @@ kk_lower_fs_blend(nir_shader *nir,
          };
       }
    }
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_out);
+   /* Fold constant offset srcs for IO. */
+   NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_lower_blend, &opts);
 }
 
@@ -386,7 +388,8 @@ lower_subpass_dim(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
 }
 
 static void
-kk_lower_fs(nir_shader *nir, const struct vk_graphics_pipeline_state *state)
+kk_lower_fs(struct kk_device *dev, nir_shader *nir,
+            const struct vk_graphics_pipeline_state *state)
 {
    if (state->cb)
       kk_lower_fs_blend(nir, state);
@@ -414,6 +417,15 @@ kk_lower_fs(nir_shader *nir, const struct vk_graphics_pipeline_state *state)
    else if (nir->info.fs.needs_full_quad_helper_invocations ||
             nir->info.fs.needs_coarse_quad_helper_invocations)
       NIR_PASS(_, nir, msl_lower_static_sample_mask, 0xFFFFFFFF);
+
+   /* KK_WORKAROUND_5 */
+   if (!(dev->disabled_workarounds & BITFIELD64_BIT(5)))
+      NIR_PASS(_, nir, msl_nir_fake_guard_for_discards);
+   /* KK_WORKAROUND_4 */
+   if (!(dev->disabled_workarounds & BITFIELD64_BIT(4))) {
+      NIR_PASS(_, nir, nir_lower_helper_writes, true);
+      NIR_PASS(_, nir, nir_lower_is_helper_invocation);
+   }
 }
 
 static void
@@ -471,9 +483,9 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_global,
             nir_address_format_64bit_global);
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ssbo,
-            nir_address_format_64bit_bounded_global);
+            kk_buffer_addr_format(rs->storage_buffers));
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_ubo,
-            nir_address_format_64bit_bounded_global);
+            kk_buffer_addr_format(rs->uniform_buffers));
 
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             type_size_vec4,
@@ -516,7 +528,7 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir,
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       kk_lower_vs(nir, state);
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      kk_lower_fs(nir, state);
+      kk_lower_fs(dev, nir, state);
    }
 
    /* Descriptor lowering needs to happen after lowering blend since we will
@@ -647,6 +659,7 @@ kk_compile_shader(struct kk_device *dev, struct vk_shader_compile_info *info,
    if (info->stage == MESA_SHADER_VERTEX) {
       kk_lower_vs_vbo(nir, state);
    }
+   msl_lower_nir_late(nir);
    msl_optimize_nir(nir);
    modify_nir_info(nir);
    shader->msl_code = nir_to_msl(nir, NULL, dev->disabled_workarounds);
@@ -730,8 +743,6 @@ nir_opts(nir_shader *nir)
       NIR_PASS(progress, nir, nir_opt_phi_precision);
       NIR_PASS(progress, nir, nir_opt_algebraic);
       NIR_PASS(progress, nir, nir_opt_constant_folding);
-      NIR_PASS(progress, nir, nir_io_add_const_offset_to_base,
-               nir_var_shader_in | nir_var_shader_out);
 
       NIR_PASS(progress, nir, nir_opt_undef);
       NIR_PASS(progress, nir, nir_opt_loop_unroll);

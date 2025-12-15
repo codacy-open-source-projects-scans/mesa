@@ -39,6 +39,7 @@
 #include "vk_sync_dummy.h"
 #include "vk_util.h"
 
+#include <assert.h>
 #include <time.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -1104,7 +1105,6 @@ wsi_CreateSwapchainKHR(VkDevice _device,
                                          sizeof (*swapchain->blit.semaphores),
                                          VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
       if (!swapchain->blit.semaphores) {
-         wsi_device->DestroySemaphore(_device, swapchain->present_id_timeline, alloc);
          swapchain->destroy(swapchain, alloc);
          return VK_ERROR_OUT_OF_HOST_MEMORY;
       }
@@ -1137,8 +1137,8 @@ wsi_DestroySwapchainKHR(VkDevice _device,
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
-wsi_ReleaseSwapchainImagesEXT(VkDevice _device,
-                              const VkReleaseSwapchainImagesInfoEXT *pReleaseInfo)
+wsi_ReleaseSwapchainImagesKHR(VkDevice _device,
+                              const VkReleaseSwapchainImagesInfoKHR *pReleaseInfo)
 {
    VK_FROM_HANDLE(wsi_swapchain, swapchain, pReleaseInfo->swapchain);
 
@@ -1519,8 +1519,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       vk_find_struct_const(pPresentInfo->pNext, PRESENT_ID_KHR);
    const VkPresentId2KHR *present_ids2 =
       vk_find_struct_const(pPresentInfo->pNext, PRESENT_ID_2_KHR);
-   const VkSwapchainPresentFenceInfoEXT *present_fence_info =
-      vk_find_struct_const(pPresentInfo->pNext, SWAPCHAIN_PRESENT_FENCE_INFO_EXT);
+   const VkSwapchainPresentFenceInfoKHR *present_fence_info =
+      vk_find_struct_const(pPresentInfo->pNext, SWAPCHAIN_PRESENT_FENCE_INFO_KHR);
 
    /* Gather up all the semaphores and fences we need to signal per-image */
    STACK_ARRAY(struct wsi_image_signal_info, image_signal_infos,
@@ -1726,8 +1726,8 @@ wsi_common_queue_present(const struct wsi_device *wsi,
    /* Finally, we can present */
    const VkPresentRegionsKHR *regions =
       vk_find_struct_const(pPresentInfo->pNext, PRESENT_REGIONS_KHR);
-   const VkSwapchainPresentModeInfoEXT *present_mode_info =
-      vk_find_struct_const(pPresentInfo->pNext, SWAPCHAIN_PRESENT_MODE_INFO_EXT);
+   const VkSwapchainPresentModeInfoKHR *present_mode_info =
+      vk_find_struct_const(pPresentInfo->pNext, SWAPCHAIN_PRESENT_MODE_INFO_KHR);
 
    for (uint32_t i = 0; i < pPresentInfo->swapchainCount; i++) {
       VK_FROM_HANDLE(wsi_swapchain, swapchain, pPresentInfo->pSwapchains[i]);
@@ -1839,10 +1839,13 @@ wsi_GetDeviceGroupSurfacePresentModesKHR(VkDevice device,
 VkResult
 wsi_common_create_swapchain_image(const struct wsi_device *wsi,
                                   const VkImageCreateInfo *pCreateInfo,
-                                  VkSwapchainKHR _swapchain,
                                   VkImage *pImage)
 {
-   VK_FROM_HANDLE(wsi_swapchain, chain, _swapchain);
+   const VkImageSwapchainCreateInfoKHR *swapchain_info =
+      vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
+   assert(swapchain_info);
+
+   VK_FROM_HANDLE(wsi_swapchain, chain, swapchain_info->swapchain);
 
 #ifndef NDEBUG
    const VkImageCreateInfo *swcInfo = &chain->image_info.create;

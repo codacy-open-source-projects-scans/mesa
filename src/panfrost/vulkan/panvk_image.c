@@ -36,6 +36,7 @@
 #include "panvk_image.h"
 #include "panvk_instance.h"
 #include "panvk_physical_device.h"
+#include "panvk_sparse.h"
 
 #include "drm-uapi/drm_fourcc.h"
 #include "util/u_atomic.h"
@@ -53,7 +54,7 @@ panvk_image_can_use_afbc(
    VkImageUsageFlags usage, VkImageType type, VkImageTiling tiling,
    VkImageCreateFlags flags)
 {
-   unsigned arch = pan_arch(phys_dev->kmod.props.gpu_id);
+   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
    enum pipe_format pfmt = vk_format_to_pipe_format(fmt);
 
    /* Disallow AFBC if either of these is true
@@ -78,7 +79,7 @@ panvk_image_can_use_afbc(
    return !PANVK_DEBUG(NO_AFBC) &&
           !(usage &
             (VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_HOST_TRANSFER_BIT)) &&
-          pan_query_afbc(&phys_dev->kmod.props) &&
+          pan_query_afbc(&phys_dev->kmod.dev->props) &&
           pan_afbc_supports_format(arch, pfmt) &&
           tiling != VK_IMAGE_TILING_LINEAR && type != VK_IMAGE_TYPE_1D &&
           (type != VK_IMAGE_TYPE_3D || arch >= 7) &&
@@ -142,7 +143,7 @@ get_plane_count(struct panvk_image *image)
 
    struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(image->vk.base.device->physical);
-   unsigned arch = pan_arch(phys_dev->kmod.props.gpu_id);
+   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
 
    /* Z32_S8X24 is not supported on v9+, and we don't want to use it
     * on v7- anyway, because it's less efficient than the multiplanar
@@ -207,7 +208,7 @@ panvk_image_can_use_mod(struct panvk_image *image,
 {
    struct panvk_physical_device *phys_dev =
       to_panvk_physical_device(image->vk.base.device->physical);
-   unsigned arch = pan_arch(phys_dev->kmod.props.gpu_id);
+   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
    const bool forced_linear = PANVK_DEBUG(LINEAR) ||
                               image->vk.tiling == VK_IMAGE_TILING_LINEAR ||
                               image->vk.image_type == VK_IMAGE_TYPE_1D;
@@ -297,7 +298,7 @@ panvk_image_can_use_mod(struct panvk_image *image,
       };
 
       enum pan_mod_support supported =
-         pan_image_test_props(&phys_dev->kmod.props, &iprops, iusage);
+         pan_image_test_props(&phys_dev->kmod.dev->props, &iprops, iusage);
       if (supported == PAN_MOD_NOT_SUPPORTED ||
           (supported == PAN_MOD_NOT_OPTIMAL && optimal_only))
          return false;
@@ -409,9 +410,10 @@ static VkResult
 panvk_image_init_layouts(struct panvk_image *image,
                          const VkImageCreateInfo *pCreateInfo)
 {
+   struct panvk_device *dev = to_panvk_device(image->vk.base.device);
    struct panvk_physical_device *phys_dev =
-      to_panvk_physical_device(image->vk.base.device->physical);
-   unsigned arch = pan_arch(phys_dev->kmod.props.gpu_id);
+      to_panvk_physical_device(dev->vk.physical);
+   unsigned arch = pan_arch(phys_dev->kmod.dev->props.gpu_id);
    const VkImageDrmFormatModifierExplicitCreateInfoEXT *explicit_info =
       vk_find_struct_const(
          pCreateInfo->pNext,
@@ -422,6 +424,10 @@ panvk_image_init_layouts(struct panvk_image *image,
    struct pan_image_layout_constraints plane_layout = {
       .offset_B = 0,
    };
+   if (pCreateInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) {
+      plane_layout.array_align_B = panvk_get_sparse_block_desc(pCreateInfo->imageType, pCreateInfo->format).size_B;
+      plane_layout.u_tiled.row_align_B = panvk_get_gpu_page_size(dev);
+   }
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       enum pipe_format pfmt =
          select_plane_pfmt(image, image->vk.drm_format_mod, plane);
@@ -612,12 +618,9 @@ panvk_CreateImage(VkDevice device, const VkImageCreateInfo *pCreateInfo,
                                                 pImage);
    }
 
-   const VkImageSwapchainCreateInfoKHR *swapchain_info =
-      vk_find_struct_const(pCreateInfo->pNext, IMAGE_SWAPCHAIN_CREATE_INFO_KHR);
-   if (swapchain_info && swapchain_info->swapchain != VK_NULL_HANDLE) {
+   if (wsi_common_is_swapchain_image(pCreateInfo)) {
       return wsi_common_create_swapchain_image(&phys_dev->wsi_device,
                                                pCreateInfo,
-                                               swapchain_info->swapchain,
                                                pImage);
    }
 
@@ -795,13 +798,27 @@ panvk_GetDeviceImageSubresourceLayoutKHR(
    vk_image_finish(&image.vk);
 }
 
+static uint64_t
+panvk_image_get_sparse_binding_granularity(struct panvk_image *image)
+{
+   struct panvk_device *dev = to_panvk_device(image->vk.base.device);
+
+   assert(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT);
+
+   if (image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT)
+      return panvk_get_sparse_block_desc(image->vk.image_type, image->vk.format).size_B;
+
+   return panvk_get_gpu_page_size(dev);
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_GetImageMemoryRequirements2(VkDevice device,
                                   const VkImageMemoryRequirementsInfo2 *pInfo,
                                   VkMemoryRequirements2 *pMemoryRequirements)
 {
-   VK_FROM_HANDLE(panvk_device, dev, device);
    VK_FROM_HANDLE(panvk_image, image, pInfo->image);
+   struct panvk_physical_device *phys_dev =
+      to_panvk_physical_device(image->vk.base.device->physical);
 
    /* For sparse resources alignment specifies binding granularity, rather than
     * the alignment requirement. It's up to us to satisfy the alignment
@@ -809,7 +826,7 @@ panvk_GetImageMemoryRequirements2(VkDevice device,
     */
    const uint64_t alignment =
       image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT
-         ? panvk_get_gpu_page_size(dev)
+         ? panvk_image_get_sparse_binding_granularity(image)
          : 4096;
    const VkImagePlaneMemoryRequirementsInfo *plane_info =
       vk_find_struct_const(pInfo->pNext, IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO);
@@ -822,10 +839,11 @@ panvk_GetImageMemoryRequirements2(VkDevice device,
       panvk_image_get_total_size(image);
    const uint64_t size =
       image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_BINDING_BIT
-         ? align64(size_non_sparse, panvk_get_gpu_page_size(dev))
+         ? align64(size_non_sparse, alignment)
          : size_non_sparse;
 
-   pMemoryRequirements->memoryRequirements.memoryTypeBits = 1;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits =
+      BITFIELD_MASK(phys_dev->memory.type_count);
    pMemoryRequirements->memoryRequirements.alignment = alignment;
    pMemoryRequirements->memoryRequirements.size = size;
 
@@ -864,14 +882,117 @@ panvk_GetDeviceImageMemoryRequirements(VkDevice device,
    vk_image_finish(&image.vk);
 }
 
+/* See Vulkan spec, 35.4.3. Standard Sparse Image Block Shapes for details */
+enum {
+   STANDARD_SPARSE_BLOCK_SIZE_B = 65536,
+};
+
+/* Sparse block extents, in texel blocks, single sample.
+ * Indexed by log2(texel block size in bytes).
+ * See Vulkan spec, 35.4.3. Standard Sparse Image Block Shapes for details. */
+static struct VkExtent3D standard_sparse_2d_blocks[] = {
+   /*  1 */ {256, 256, 1},
+   /*  2 */ {256, 128, 1},
+   /*  4 */ {128, 128, 1},
+   /*  8 */ {128, 64, 1},
+   /* 16 */ {64, 64, 1},
+};
+
+struct panvk_sparse_block_desc
+panvk_get_sparse_block_desc(VkImageType type, VkFormat format)
+{
+   const struct util_format_description *fmt_desc = vk_format_description(format);
+
+   uint32_t texel_block_size_B = fmt_desc->block.bits / 8;
+
+   switch (type) {
+   case VK_IMAGE_TYPE_2D: {
+      if (!util_is_power_of_two_nonzero(texel_block_size_B))
+         break;
+
+      uint32_t texel_block_size_B_log2 = util_logbase2(texel_block_size_B);
+      if (texel_block_size_B_log2 >= ARRAY_SIZE(standard_sparse_2d_blocks))
+         break;
+      struct VkExtent3D extent = standard_sparse_2d_blocks[texel_block_size_B_log2];
+
+      assert(extent.width * extent.height * extent.depth * texel_block_size_B == STANDARD_SPARSE_BLOCK_SIZE_B);
+
+      extent.width *= fmt_desc->block.width;
+      extent.height *= fmt_desc->block.height;
+      extent.depth *= fmt_desc->block.depth;
+
+      return (struct panvk_sparse_block_desc){
+         .extent = extent,
+         .size_B = STANDARD_SPARSE_BLOCK_SIZE_B,
+         .standard = true,
+      };
+   }
+
+   default:
+      break;
+   }
+
+   return (struct panvk_sparse_block_desc){};
+}
+
+VkSparseImageFormatProperties
+panvk_get_sparse_image_fmt_props(VkImageType type, VkFormat format)
+{
+   struct panvk_sparse_block_desc sblock_desc = panvk_get_sparse_block_desc(type, format);
+   if (!panvk_sparse_block_is_valid(sblock_desc))
+      return (VkSparseImageFormatProperties){};
+
+   VkSparseImageFormatProperties fmt_props = {};
+   fmt_props.aspectMask = vk_format_aspects(format);
+   fmt_props.imageGranularity = sblock_desc.extent;
+   if (!sblock_desc.standard)
+      fmt_props.flags |= VK_SPARSE_IMAGE_FORMAT_NONSTANDARD_BLOCK_SIZE_BIT;
+   return fmt_props;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 panvk_GetImageSparseMemoryRequirements2(
    VkDevice device, const VkImageSparseMemoryRequirementsInfo2 *pInfo,
    uint32_t *pSparseMemoryRequirementCount,
    VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
-   /* Sparse images are not yet supported. */
-   *pSparseMemoryRequirementCount = 0;
+   VK_FROM_HANDLE(panvk_image, image, pInfo->image);
+   VK_OUTARRAY_MAKE_TYPED(VkSparseImageMemoryRequirements2, out, pSparseMemoryRequirements,
+                          pSparseMemoryRequirementCount);
+
+   if (!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+      return;
+
+   /* We only support single-plane images right now. See
+    * https://gitlab.freedesktop.org/panfrost/mesa/-/issues/243 details. */
+   unsigned plane_idx = 0;
+
+   struct panvk_sparse_block_desc sblock = panvk_get_sparse_block_desc(image->vk.image_type, image->vk.format);
+   assert(panvk_sparse_block_is_valid(sblock));
+
+   struct panvk_image_plane *plane = &image->planes[plane_idx];
+
+   unsigned mip_tail_first_lod = 0;
+   uint64_t mip_tail_begin = 0;
+   for (unsigned level = 0; level < plane->image.props.nr_slices; level++) {
+      uint64_t offset = plane->plane.layout.slices[level].offset_B;
+      if (!util_is_aligned(offset, sblock.size_B))
+         break;
+      mip_tail_first_lod = level;
+      mip_tail_begin = offset;
+   }
+
+   uint64_t mip_tail_end = plane->plane.layout.array_stride_B;
+
+   vk_outarray_append_typed(VkSparseImageMemoryRequirements2, &out, p) {
+      p->memoryRequirements = (VkSparseImageMemoryRequirements){
+         .formatProperties = panvk_get_sparse_image_fmt_props(image->vk.image_type, image->vk.format),
+         .imageMipTailFirstLod = mip_tail_first_lod,
+         .imageMipTailSize = mip_tail_end - mip_tail_begin,
+         .imageMipTailOffset = mip_tail_begin,
+         .imageMipTailStride = plane->plane.layout.array_stride_B,
+      };
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -880,8 +1001,19 @@ panvk_GetDeviceImageSparseMemoryRequirements(VkDevice device,
                                              uint32_t *pSparseMemoryRequirementCount,
                                              VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
 {
-   /* Sparse images are not yet supported. */
-   *pSparseMemoryRequirementCount = 0;
+   VK_FROM_HANDLE(panvk_device, dev, device);
+
+   struct panvk_image image;
+   vk_image_init(&dev->vk, &image.vk, pInfo->pCreateInfo);
+   panvk_image_init(&image, pInfo->pCreateInfo);
+
+   VkImageSparseMemoryRequirementsInfo2 info2 = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_SPARSE_MEMORY_REQUIREMENTS_INFO_2,
+      .image = panvk_image_to_handle(&image),
+   };
+   panvk_GetImageSparseMemoryRequirements2(device, &info2,
+      pSparseMemoryRequirementCount, pSparseMemoryRequirements);
+   vk_image_finish(&image.vk);
 }
 
 static VkResult

@@ -116,6 +116,9 @@ struct cs_builder_conf {
    /* Number of 32-bit registers used by the kernel at submission time */
    uint8_t nr_kernel_registers;
 
+   /* RUN_COMPUTE.ep_limit. Must be 0 before v12. */
+   uint8_t compute_ep_limit;
+
    /* CS buffer allocator */
    struct cs_buffer (*alloc_buffer)(void *cookie);
 
@@ -489,31 +492,26 @@ cs_overflow_length_reg(struct cs_builder *b)
 }
 
 static inline struct cs_index
-cs_extract32(struct cs_builder *b, struct cs_index idx, unsigned word)
+cs_extract_tuple(struct cs_builder *b, struct cs_index idx, unsigned word,
+                 unsigned size)
 {
    assert(idx.type == CS_INDEX_REGISTER && "unsupported");
-   assert(word < idx.size && "overrun");
+   assert(word + size <= idx.size && "overrun");
 
-   return cs_reg32(b, idx.reg + word);
+   return cs_reg_tuple(b, idx.reg + word, size);
+}
+
+static inline struct cs_index
+cs_extract32(struct cs_builder *b, struct cs_index idx, unsigned word)
+{
+   return cs_extract_tuple(b, idx, word, 1);
 }
 
 static inline struct cs_index
 cs_extract64(struct cs_builder *b, struct cs_index idx, unsigned word)
 {
-   assert(idx.type == CS_INDEX_REGISTER && "unsupported");
-   assert(word + 1 < idx.size && "overrun");
-
-   return cs_reg64(b, idx.reg + word);
-}
-
-static inline struct cs_index
-cs_extract_tuple(struct cs_builder *b, struct cs_index idx, unsigned word,
-                 unsigned size)
-{
-   assert(idx.type == CS_INDEX_REGISTER && "unsupported");
-   assert(word + size < idx.size && "overrun");
-
-   return cs_reg_tuple(b, idx.reg + word, size);
+   assert(!(word & 1) && "not properly aligned");
+   return cs_extract_tuple(b, idx, word, 2);
 }
 
 static inline struct cs_block *
@@ -1533,6 +1531,11 @@ cs_run_compute(struct cs_builder *b, unsigned task_increment,
    cs_emit(b, RUN_COMPUTE, I) {
       I.task_increment = task_increment;
       I.task_axis = task_axis;
+#if PAN_ARCH >= 12
+      I.ep_limit = b->conf.compute_ep_limit;
+#else
+      assert(b->conf.compute_ep_limit == 0);
+#endif
       I.srt_select = res_sel.srt;
       I.spd_select = res_sel.spd;
       I.tsd_select = res_sel.tsd;
@@ -1700,13 +1703,13 @@ cs_add64(struct cs_builder *b, struct cs_index dest, struct cs_index src,
 }
 
 static inline void
-cs_umin32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
-          struct cs_index src2)
+cs_umin32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+          struct cs_index src1)
 {
    cs_emit(b, UMIN32, I) {
       I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
       I.source_1 = cs_src32(b, src1);
-      I.source_0 = cs_src32(b, src2);
    }
 }
 
@@ -1725,35 +1728,35 @@ cs_move_reg32(struct cs_builder *b, struct cs_index dest, struct cs_index src)
 
 #if PAN_ARCH >= 11
 static inline void
-cs_and32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
-         struct cs_index src2)
+cs_and32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+         struct cs_index src1)
 {
    cs_emit(b, AND32, I) {
       I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
       I.source_1 = cs_src32(b, src1);
-      I.source_0 = cs_src32(b, src2);
    }
 }
 
 static inline void
-cs_or32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
-        struct cs_index src2)
+cs_or32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+        struct cs_index src1)
 {
    cs_emit(b, OR32, I) {
       I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
       I.source_1 = cs_src32(b, src1);
-      I.source_0 = cs_src32(b, src2);
    }
 }
 
 static inline void
-cs_xor32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
-         struct cs_index src2)
+cs_xor32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+         struct cs_index src1)
 {
    cs_emit(b, XOR32, I) {
       I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
       I.source_1 = cs_src32(b, src1);
-      I.source_0 = cs_src32(b, src2);
    }
 }
 
@@ -1767,24 +1770,24 @@ cs_not32(struct cs_builder *b, struct cs_index dest, struct cs_index src)
 }
 
 static inline void
-cs_bit_set32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
-             struct cs_index src2)
+cs_bit_set32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+             struct cs_index src1)
 {
    cs_emit(b, BIT_SET32, I) {
       I.destination = cs_dst32(b, dest);
-      I.source_0 = cs_src32(b, src1);
-      I.source_1 = cs_src32(b, src2);
+      I.source_0 = cs_src32(b, src0);
+      I.source_1 = cs_src32(b, src1);
    }
 }
 
 static inline void
-cs_bit_clear32(struct cs_builder *b, struct cs_index dest, struct cs_index src1,
-               struct cs_index src2)
+cs_bit_clear32(struct cs_builder *b, struct cs_index dest, struct cs_index src0,
+               struct cs_index src1)
 {
    cs_emit(b, BIT_CLEAR32, I) {
       I.destination = cs_dst32(b, dest);
+      I.source_0 = cs_src32(b, src0);
       I.source_1 = cs_src32(b, src1);
-      I.source_0 = cs_src32(b, src2);
    }
 }
 
@@ -1928,14 +1931,15 @@ cs_set_state_imm32(struct cs_builder *b, enum mali_cs_set_state_type state,
 
 /*
  * Select which scoreboard entry will track endpoint tasks.
- * On v10, this also set other endpoint to SB0.
+ * On v10, this also set the "other" SB to the ls_sb_slot passed at config
+ * time, because there's no way to set those things independently.
  * Pass to cs_wait to wait later.
  */
 static inline void
-cs_select_sb_entries_for_async_ops(struct cs_builder *b, unsigned ep)
+cs_select_endpoint_sb(struct cs_builder *b, unsigned ep)
 {
 #if PAN_ARCH == 10
-   cs_set_scoreboard_entry(b, ep, 0);
+   cs_set_scoreboard_entry(b, ep, b->conf.ls_sb_slot);
 #else
    cs_set_state_imm32(b, MALI_CS_SET_STATE_TYPE_SB_SEL_ENDPOINT, ep);
 #endif
@@ -2074,6 +2078,11 @@ cs_run_compute_indirect(struct cs_builder *b, unsigned wg_per_task,
 
    cs_emit(b, RUN_COMPUTE_INDIRECT, I) {
       I.workgroups_per_task = wg_per_task;
+#if PAN_ARCH >= 12
+      I.ep_limit = b->conf.compute_ep_limit;
+#else
+      assert(b->conf.compute_ep_limit == 0);
+#endif
       I.srt_select = res_sel.srt;
       I.spd_select = res_sel.spd;
       I.tsd_select = res_sel.tsd;

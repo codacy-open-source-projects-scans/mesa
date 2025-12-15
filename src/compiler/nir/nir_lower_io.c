@@ -475,10 +475,9 @@ lower_load(nir_intrinsic_instr *intrin, struct lower_io_state *state,
            nir_def *array_index, nir_variable *var, nir_def *offset,
            unsigned component, const struct glsl_type *type)
 {
-   const bool lower_double = !glsl_type_is_integer(type) && state->options & nir_lower_io_lower_64bit_float_to_32;
    if (intrin->def.bit_size == 64 &&
-       (lower_double || (state->options & (nir_lower_io_lower_64bit_to_32_new |
-                                           nir_lower_io_lower_64bit_to_32)))) {
+       state->options & (nir_lower_io_lower_64bit_to_32_new |
+                         nir_lower_io_lower_64bit_to_32)) {
       nir_builder *b = &state->builder;
       bool use_high_dvec2_semantic = uses_high_dvec2_semantic(state, var);
 
@@ -600,6 +599,17 @@ emit_store(struct lower_io_state *state, nir_def *data,
    }
 
    int location = var->data.location;
+   bool dual_src_blend = var->data.index > 0;
+
+   /* Set FRAG_RESULT_DUAL_SRC_BLEND if the driver prefers that. */
+   if (dual_src_blend &&
+       b->shader->options->io_options & nir_io_use_frag_result_dual_src_blend) {
+      assert(b->shader->info.stage == MESA_SHADER_FRAGMENT);
+      assert(location == FRAG_RESULT_COLOR || location == FRAG_RESULT_DATA0);
+
+      location = FRAG_RESULT_DUAL_SRC_BLEND;
+      dual_src_blend = false;
+   }
 
    /* Maximum values in nir_io_semantics. */
    assert(num_slots <= 63);
@@ -608,7 +618,7 @@ emit_store(struct lower_io_state *state, nir_def *data,
    nir_io_semantics semantics = { 0 };
    semantics.location = location;
    semantics.num_slots = num_slots;
-   semantics.dual_source_blend_index = var->data.index;
+   semantics.dual_source_blend_index = dual_src_blend;
    semantics.gs_streams = gs_streams;
    semantics.medium_precision = is_medium_precision(b->shader, var);
    semantics.per_view = var->data.per_view;
@@ -627,10 +637,9 @@ lower_store(nir_intrinsic_instr *intrin, struct lower_io_state *state,
             nir_def *array_index, nir_variable *var, nir_def *offset,
             unsigned component, const struct glsl_type *type)
 {
-   const bool lower_double = !glsl_type_is_integer(type) && state->options & nir_lower_io_lower_64bit_float_to_32;
    if (intrin->src[1].ssa->bit_size == 64 &&
-       (lower_double || (state->options & (nir_lower_io_lower_64bit_to_32 |
-                                           nir_lower_io_lower_64bit_to_32_new)))) {
+       state->options & (nir_lower_io_lower_64bit_to_32 |
+                         nir_lower_io_lower_64bit_to_32_new)) {
       nir_builder *b = &state->builder;
 
       const unsigned slot_size = state->type_size(glsl_dvec_type(2), false);
@@ -1174,7 +1183,8 @@ nir_is_input_load(nir_intrinsic_instr *intr)
           intr->intrinsic == nir_intrinsic_load_per_vertex_input ||
           intr->intrinsic == nir_intrinsic_load_per_primitive_input ||
           intr->intrinsic == nir_intrinsic_load_interpolated_input ||
-          intr->intrinsic == nir_intrinsic_load_input_vertex;
+          intr->intrinsic == nir_intrinsic_load_input_vertex ||
+          intr->intrinsic == nir_intrinsic_load_fs_input_interp_deltas;
 }
 
 /**
@@ -1260,11 +1270,10 @@ nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs)
             (renumber_vs_inputs ? nir_lower_io_lower_64bit_to_32_new : nir_lower_io_lower_64bit_to_32) |
                nir_lower_io_use_interpolated_input_intrinsics);
 
-   /* nir_io_add_const_offset_to_base needs actual constants. */
+   /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
-   NIR_PASS(_, nir, nir_io_add_const_offset_to_base, nir_var_shader_in | nir_var_shader_out);
 
-   /* This must be called after nir_io_add_const_offset_to_base. */
+   /* This must be called after folding constant offset srcs. */
    if (nir->info.stage != MESA_SHADER_MESH &&
        !(nir->options->support_indirect_inputs & BITFIELD_BIT(nir->info.stage)))
       NIR_PASS(_, nir, nir_lower_io_indirect_loads, nir_var_shader_in);

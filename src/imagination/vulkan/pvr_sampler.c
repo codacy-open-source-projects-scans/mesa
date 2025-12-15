@@ -16,6 +16,7 @@
 #include "vk_log.h"
 
 #include "pvr_border.h"
+#include "pvr_csb.h"
 #include "pvr_device.h"
 #include "pvr_entrypoints.h"
 #include "pvr_physical_device.h"
@@ -233,4 +234,3 @@ void pvr_DestroySampler(VkDevice _device,
 
    vk_sampler_destroy(&device->vk, pAllocator, &sampler->vk);
 }
-

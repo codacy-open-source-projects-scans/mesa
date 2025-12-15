@@ -10,7 +10,7 @@
 #error "PAN_ARCH must be defined"
 #endif
 
-#include "util/pan_ir.h"
+#include "compiler/pan_compiler.h"
 
 #include "pan_desc.h"
 #include "pan_earlyzs.h"
@@ -351,6 +351,31 @@ struct panvk_shader_fau_info {
    uint32_t total_count;
 };
 
+struct panvk_shader_desc_info {
+   uint32_t used_set_mask;
+
+#if PAN_ARCH < 9
+   struct {
+      uint32_t map[MAX_DYNAMIC_UNIFORM_BUFFERS];
+      uint32_t count;
+   } dyn_ubos;
+   struct {
+      uint32_t map[MAX_DYNAMIC_STORAGE_BUFFERS];
+      uint32_t count;
+   } dyn_ssbos;
+   struct {
+      struct panvk_priv_mem map;
+      uint32_t count[PANVK_BIFROST_DESC_TABLE_COUNT];
+   } others;
+#else
+   struct {
+      uint32_t map[MAX_DYNAMIC_BUFFERS];
+      uint32_t count;
+   } dyn_bufs;
+   uint32_t fs_varying_attr_desc_count;
+#endif
+};
+
 struct panvk_shader_variant {
    struct pan_shader_info info;
 
@@ -365,30 +390,7 @@ struct panvk_shader_variant {
       } fs;
    };
 
-   struct {
-      uint32_t used_set_mask;
-
-#if PAN_ARCH < 9
-      struct {
-         uint32_t map[MAX_DYNAMIC_UNIFORM_BUFFERS];
-         uint32_t count;
-      } dyn_ubos;
-      struct {
-         uint32_t map[MAX_DYNAMIC_STORAGE_BUFFERS];
-         uint32_t count;
-      } dyn_ssbos;
-      struct {
-         struct panvk_priv_mem map;
-         uint32_t count[PANVK_BIFROST_DESC_TABLE_COUNT];
-      } others;
-#else
-      struct {
-         uint32_t map[MAX_DYNAMIC_BUFFERS];
-         uint32_t count;
-      } dyn_bufs;
-      uint32_t max_varying_loads;
-#endif
-   } desc_info;
+   struct panvk_shader_desc_info desc_info;
 
    struct panvk_shader_fau_info fau;
 
@@ -515,12 +517,17 @@ panvk_shader_link_cleanup(struct panvk_shader_link *link)
 }
 #endif
 
+bool panvk_per_arch(nir_lower_input_attachment_loads)(
+   nir_shader *nir,
+   const struct vk_graphics_pipeline_state *state,
+   uint32_t *input_attachment_read_out);
+
 void panvk_per_arch(nir_lower_descriptors)(
    nir_shader *nir, struct panvk_device *dev,
    const struct vk_pipeline_robustness_state *rs, uint32_t set_layout_count,
    struct vk_descriptor_set_layout *const *set_layouts,
    const struct vk_graphics_pipeline_state *state,
-   struct panvk_shader_variant *shader);
+   struct panvk_shader_desc_info *desc_info);
 
 /* This a stripped-down version of panvk_shader for internal shaders that
  * are managed by vk_meta (blend and preload shaders). Those don't need the
@@ -536,18 +543,6 @@ struct panvk_internal_shader {
    struct panvk_priv_mem spd;
 #endif
 };
-
-#if PAN_ARCH >= 9
-static inline bool
-panvk_use_ld_var_buf(const struct panvk_shader_variant *shader)
-{
-   /* LD_VAR_BUF[_IMM] takes an 8-bit offset, limiting its use to 16 or less
-    * varyings, assuming highp vec4. */
-   if (shader->desc_info.max_varying_loads <= 16)
-      return true;
-   return false;
-}
-#endif
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_internal_shader, vk.base, VkShaderEXT,
                                VK_OBJECT_TYPE_SHADER_EXT)

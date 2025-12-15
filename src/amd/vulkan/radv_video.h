@@ -35,6 +35,8 @@ struct radv_cmd_stream;
 
 #define RADV_ENC_FEEDBACK_STATUS_IDX 10
 
+#define RADV_VIDEO_H264_MAX_DPB_SLOTS 17
+
 struct radv_vid_mem {
    struct radv_device_memory *mem;
    VkDeviceSize offset;
@@ -56,20 +58,9 @@ struct radv_video_session {
    struct radv_image *intra_only_dpb;
 
    unsigned dbg_frame_cnt;
-   rvcn_enc_session_init_t enc_session;
-   rvcn_enc_layer_control_t rc_layer_control;
-   rvcn_enc_rate_ctl_layer_init_t rc_layer_init[RADV_ENC_MAX_RATE_LAYER];
-   rvcn_enc_rate_ctl_per_picture_t rc_per_pic[RADV_ENC_MAX_RATE_LAYER];
-   rvcn_enc_av1_tile_config_t tile_config;
+   uint32_t enc_standard;
+   uint32_t enc_wa_flags;
    uint32_t enc_preset_mode;
-   uint32_t enc_rate_control_method;
-   uint32_t enc_vbv_buffer_level;
-   bool enc_rate_control_default;
-   bool enc_need_begin;
-   bool enc_need_rate_control;
-   bool skip_mode_allowed;
-   bool disallow_skip_mode;
-   bool session_initialized;
 };
 
 /**
@@ -101,6 +92,7 @@ void radv_probe_video_decode(struct radv_physical_device *pdev);
 void radv_probe_video_encode(struct radv_physical_device *pdev);
 void radv_video_enc_control_video_coding(struct radv_cmd_buffer *cmd_buffer,
                                          const VkVideoCodingControlInfoKHR *pCodingControlInfo);
+void radv_video_enc_begin_video_coding(struct radv_cmd_buffer *cmd_buffer, const VkVideoBeginCodingInfoKHR *pBeginInfo);
 VkResult radv_video_get_encode_session_memory_requirements(struct radv_device *device, struct radv_video_session *vid,
                                                            uint32_t *pMemoryRequirementsCount,
                                                            VkVideoSessionMemoryRequirementsKHR *pMemoryRequirements);

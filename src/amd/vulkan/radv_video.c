@@ -24,7 +24,6 @@
 #include "radv_image_view.h"
 #include "radv_video.h"
 
-#define RADV_VIDEO_H264_MAX_DPB_SLOTS     17
 #define RADV_VIDEO_H264_MAX_NUM_REF_FRAME 16
 #define RADV_VIDEO_H265_MAX_DPB_SLOTS     17
 #define RADV_VIDEO_H265_MAX_NUM_REF_FRAME 15
@@ -534,14 +533,7 @@ radv_CreateVideoSessionKHR(VkDevice _device, const VkVideoSessionCreateInfoKHR *
       break;
    case VK_VIDEO_CODEC_OPERATION_ENCODE_H264_BIT_KHR:
       vid->encode = true;
-      vid->enc_session.encode_standard = RENCODE_ENCODE_STANDARD_H264;
-      vid->enc_session.aligned_picture_width = align(vid->vk.max_coded.width, 16);
-      vid->enc_session.aligned_picture_height = align(vid->vk.max_coded.height, 16);
-      vid->enc_session.padding_width = vid->enc_session.aligned_picture_width - vid->vk.max_coded.width;
-      vid->enc_session.padding_height = vid->enc_session.aligned_picture_height - vid->vk.max_coded.height;
-      vid->enc_session.display_remote = 0;
-      vid->enc_session.pre_encode_mode = 0;
-      vid->enc_session.pre_encode_chroma_enabled = 0;
+      vid->enc_standard = RENCODE_ENCODE_STANDARD_H264;
       switch (vid->vk.enc_usage.tuning_mode) {
       case VK_VIDEO_ENCODE_TUNING_MODE_DEFAULT_KHR:
       default:
@@ -559,14 +551,7 @@ radv_CreateVideoSessionKHR(VkDevice _device, const VkVideoSessionCreateInfoKHR *
       break;
    case VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR:
       vid->encode = true;
-      vid->enc_session.encode_standard = RENCODE_ENCODE_STANDARD_HEVC;
-      vid->enc_session.aligned_picture_width = align(vid->vk.max_coded.width, 64);
-      vid->enc_session.aligned_picture_height = align(vid->vk.max_coded.height, 64);
-      vid->enc_session.padding_width = vid->enc_session.aligned_picture_width - vid->vk.max_coded.width;
-      vid->enc_session.padding_height = vid->enc_session.aligned_picture_height - vid->vk.max_coded.height;
-      vid->enc_session.display_remote = 0;
-      vid->enc_session.pre_encode_mode = 0;
-      vid->enc_session.pre_encode_chroma_enabled = 0;
+      vid->enc_standard = RENCODE_ENCODE_STANDARD_HEVC;
       switch (vid->vk.enc_usage.tuning_mode) {
       case VK_VIDEO_ENCODE_TUNING_MODE_DEFAULT_KHR:
       default:
@@ -584,14 +569,11 @@ radv_CreateVideoSessionKHR(VkDevice _device, const VkVideoSessionCreateInfoKHR *
       break;
    case VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR:
       vid->encode = true;
-      vid->enc_session.encode_standard = RENCODE_ENCODE_STANDARD_AV1;
-      vid->enc_session.aligned_picture_width = align(vid->vk.max_coded.width, 64);
-      vid->enc_session.aligned_picture_height = align(vid->vk.max_coded.height, 64);
-      vid->enc_session.padding_width = vid->enc_session.aligned_picture_width - vid->vk.max_coded.width;
-      vid->enc_session.padding_height = vid->enc_session.aligned_picture_height - vid->vk.max_coded.height;
-      vid->enc_session.display_remote = 0;
-      vid->enc_session.pre_encode_mode = 0;
-      vid->enc_session.pre_encode_chroma_enabled = 0;
+      vid->enc_standard = RENCODE_ENCODE_STANDARD_AV1;
+      if (pdev->info.vcn_ip_version == VCN_4_0_2 || pdev->info.vcn_ip_version == VCN_4_0_5 ||
+          pdev->info.vcn_ip_version == VCN_4_0_6) {
+         vid->enc_wa_flags = 1;
+      }
       switch (vid->vk.enc_usage.tuning_mode) {
       case VK_VIDEO_ENCODE_TUNING_MODE_DEFAULT_KHR:
       default:
@@ -894,8 +876,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       pCapabilities->minBitstreamBufferOffsetAlignment = 128;
       pCapabilities->minBitstreamBufferSizeAlignment = 128;
    } else {
-      enc_caps =
-         (struct VkVideoEncodeCapabilitiesKHR *)vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_CAPABILITIES_KHR);
+      enc_caps = vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_CAPABILITIES_KHR);
       struct VkVideoEncodeIntraRefreshCapabilitiesKHR *intra_refresh_caps =
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_INTRA_REFRESH_CAPABILITIES_KHR);
       struct VkVideoEncodeQuantizationMapCapabilitiesKHR *qp_map_caps =
@@ -1029,7 +1010,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
 
       ext->maxLevelIdc = cap ? cap->max_level : 0;
       ext->maxSliceCount = 128;
-      ext->maxPPictureL0ReferenceCount = 1;
+      ext->maxPPictureL0ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 2 : 1;
       ext->maxBPictureL0ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 1 : 0;
       ext->maxL1ReferenceCount = pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_3 ? 1 : 0;
       ext->maxTemporalLayerCount = 4;
@@ -1061,8 +1042,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       break;
    }
    case VK_VIDEO_CODEC_OPERATION_ENCODE_H265_BIT_KHR: {
-      struct VkVideoEncodeH265CapabilitiesKHR *ext = (struct VkVideoEncodeH265CapabilitiesKHR *)vk_find_struct(
-         pCapabilities->pNext, VIDEO_ENCODE_H265_CAPABILITIES_KHR);
+      struct VkVideoEncodeH265CapabilitiesKHR *ext =
+         vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_H265_CAPABILITIES_KHR);
       struct VkVideoEncodeH265QuantizationMapCapabilitiesKHR *qp_map_caps =
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_H265_QUANTIZATION_MAP_CAPABILITIES_KHR);
 
@@ -1120,8 +1101,8 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       break;
    }
    case VK_VIDEO_CODEC_OPERATION_ENCODE_AV1_BIT_KHR: {
-      struct VkVideoEncodeAV1CapabilitiesKHR *ext = (struct VkVideoEncodeAV1CapabilitiesKHR *)vk_find_struct(
-         pCapabilities->pNext, VIDEO_ENCODE_AV1_CAPABILITIES_KHR);
+      struct VkVideoEncodeAV1CapabilitiesKHR *ext =
+         vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_AV1_CAPABILITIES_KHR);
       struct VkVideoEncodeAV1QuantizationMapCapabilitiesKHR *qp_map_caps =
          vk_find_struct(pCapabilities->pNext, VIDEO_ENCODE_AV1_QUANTIZATION_MAP_CAPABILITIES_KHR);
 
@@ -1185,7 +1166,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
 
       if (qp_map_caps) {
          qp_map_caps->minQIndexDelta = -255;
-         qp_map_caps->minQIndexDelta = 255;
+         qp_map_caps->maxQIndexDelta = 255;
       }
       break;
    }
@@ -1227,7 +1208,7 @@ radv_GetPhysicalDeviceVideoFormatPropertiesKHR(VkPhysicalDevice physicalDevice,
    VkFormat formats[2] = {VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED};
    uint32_t qp_map_texel_size = 0;
    const struct VkVideoProfileListInfoKHR *prof_list =
-      (struct VkVideoProfileListInfoKHR *)vk_find_struct_const(pVideoFormatInfo->pNext, VIDEO_PROFILE_LIST_INFO_KHR);
+      vk_find_struct_const(pVideoFormatInfo->pNext, VIDEO_PROFILE_LIST_INFO_KHR);
    if (prof_list) {
       for (unsigned i = 0; i < prof_list->profileCount; i++) {
          const VkVideoProfileInfoKHR *profile = &prof_list->pProfiles[i];
@@ -3255,6 +3236,9 @@ radv_CmdBeginVideoCodingKHR(VkCommandBuffer commandBuffer, const VkVideoBeginCod
 
    cmd_buffer->video.vid = vid;
    cmd_buffer->video.params = params;
+
+   if (cmd_buffer->video.vid->encode)
+      radv_video_enc_begin_video_coding(cmd_buffer, pBeginInfo);
 }
 
 static void

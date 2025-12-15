@@ -28,6 +28,7 @@
 #include "mfbufferhelp.h"
 #include "mfpipeinterop.h"
 #include "wpptrace.h"
+#include "gallium/drivers/d3d12/d3d12_interop_public.h"
 
 #include "mftransform.tmh"
 
@@ -1332,6 +1333,78 @@ CDX12EncHMFT::FinalizeAndEmitOutputSample( LPDX12EncodeContext pDX12EncodeContex
                                            BOOL bIsLastSlice,
                                            uint64_t ResolveStatsCompletionFenceValue )
 {
+   // Check if codec units are non-contiguous in memory
+   // If they are not contiguous, we need to copy them to a contiguous buffer
+   // to match the reported nalu length information
+   assert (CodecUnitMetadataCount > 0);
+   bool bNonContiguousNALs = false;
+   for( unsigned i = 0; i < CodecUnitMetadataCount - 1; i++ )
+   {
+      if( pCodecUnitMetadata[i].offset + pCodecUnitMetadata[i].size != pCodecUnitMetadata[i + 1].offset )
+      {
+         bNonContiguousNALs = true;
+         debug_printf( "[dx12 hmft 0x%p] FinalizeAndEmitOutputSample - Non-contiguous codec unit %i detected, "
+                        "performing copy into a contiguous buffer for MFT output\n",
+                        this,
+                        i );
+      }
+   }
+
+   if( bNonContiguousNALs )
+   {
+      HMFT_ETW_EVENT_START( "FinalizeAndEmitOutputSampleNonContiguousCopy", this );
+      ComPtr<IMFMediaBuffer> spMemoryBuffer;
+      LPBYTE lpSourceBuffer = nullptr;
+      LPBYTE lpDestBuffer = nullptr;
+      DWORD dwSourceMaxLen = 0, dwSourceCurLen = 0;
+
+      if( SUCCEEDED( MFCreateMemoryBuffer( m_uiMaxOutputBitstreamSize, &spMemoryBuffer ) ) )
+      {
+         if( SUCCEEDED( spMemoryBuffer->Lock( &lpDestBuffer, NULL, NULL ) ) )
+         {
+            if( SUCCEEDED( spMediaBuffer->Lock( &lpSourceBuffer, &dwSourceMaxLen, &dwSourceCurLen ) ) )
+            {
+               size_t copied_bytes = 0;
+               for( unsigned i = 0; i < CodecUnitMetadataCount; i++ )
+               {
+                  memcpy( lpDestBuffer + copied_bytes,
+                          lpSourceBuffer + pCodecUnitMetadata[i].offset,
+                          static_cast<size_t>( pCodecUnitMetadata[i].size ) );
+                  copied_bytes += static_cast<size_t>( pCodecUnitMetadata[i].size );
+               }
+
+               spMediaBuffer->Unlock();
+               spMemoryBuffer->Unlock();
+               spMemoryBuffer->SetCurrentLength( static_cast<DWORD>( copied_bytes ) );
+
+               // Replace the original buffer with the memory buffer
+               spMediaBuffer = spMemoryBuffer;
+            }
+            else
+            {
+               spMemoryBuffer->Unlock();
+               MFE_ERROR( "[dx12 hmft 0x%p] FinalizeAndEmitOutputSample - spMediaBuffer->Lock failed", this );
+               assert( false );
+            }
+         }
+         else
+         {
+            MFE_ERROR( "[dx12 hmft 0x%p] FinalizeAndEmitOutputSample - spMemoryBuffer->Lock failed", this );
+            assert( false );
+         }
+      }
+      else
+      {
+         MFE_ERROR( "[dx12 hmft 0x%p] FinalizeAndEmitOutputSample - MFCreateMemoryBuffer failed", this );
+         assert( false );
+      }
+      HMFT_ETW_EVENT_STOP( "FinalizeAndEmitOutputSampleNonContiguousCopy", this );
+   }
+   else
+   {
+      debug_printf( "[dx12 hmft 0x%p] FinalizeAndEmitOutputSample - Contiguous codec units, no copy needed\n", this );
+   }
+
    // Add buffer to the sample
    spOutputSample->AddBuffer( spMediaBuffer.Get() );
 
@@ -1433,8 +1506,19 @@ CDX12EncHMFT::xThreadProc( void *pCtx )
          HANDLE fence_handle = (HANDLE) pThis->m_pPipeContext->screen->fence_get_win32_handle( pThis->m_pPipeContext->screen,
                                                                                                pDX12EncodeContext->pAsyncFence,
                                                                                                &ResolveStatsCompletionFenceValue );
-         if( fence_handle )
-            CloseHandle( fence_handle );
+         if (!fence_handle ||
+            FAILED(pThis->m_spDevice->OpenSharedHandle(fence_handle, IID_PPV_ARGS(pDX12EncodeContext->spAsyncFence.ReleaseAndGetAddressOf()))))
+         {
+            debug_printf( "[dx12 hmft 0x%p] Failed to open frame pAsyncFence\n", pThis );
+            MFE_ERROR( "[dx12 hmft 0x%p] Failed to open frame pAsyncFence", pThis );
+            assert( false );
+            pThis->QueueEvent( MEError, GUID_NULL, E_FAIL, nullptr );
+            bHasEncodingError = TRUE;
+            delete pDX12EncodeContext;
+            break;
+         }
+
+         CloseHandle( fence_handle );
 
          {
             std::lock_guard<std::mutex> lock( pThis->m_encoderLock );
@@ -2416,7 +2500,6 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
 {
    HMFT_ETW_EVENT_START( "ProcessInput", this );
    HRESULT hr = S_OK;
-   UINT32 unChromaOnly = 0;
    LPDX12EncodeContext pDX12EncodeContext = nullptr;
    BYTE *qpData = nullptr;
    DWORD qpSize = 0;
@@ -2451,10 +2534,8 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
    //
    m_bEncodingStarted = TRUE;
 
-   (void) pSample->GetUINT32( MFSampleExtension_ChromaOnly, &unChromaOnly );
-
    // setup the source buffer
-   CHECKHR_HRGOTO( PrepareForEncode( pSample, &pDX12EncodeContext ), MF_E_INVALIDMEDIATYPE, done );
+   CHECKHR_GOTO( PrepareForEncode( pSample, &pDX12EncodeContext ), done );
    if( SUCCEEDED( GetQPMapBufferFromSampleLockHeld( pSample, &qpData, &qpSize, qpMapBuffer ) ) && qpMapBuffer )
    {
       pDX12EncodeContext->SetPipeQPMapBufferInfo( qpData, qpSize );
@@ -2510,16 +2591,6 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
                                                  &pDX12EncodeContext->encoderPicInfo.base );
       HMFT_ETW_EVENT_STOP( "PipeEndFrame", this );
 
-      uint64_t AsyncFenceValue = 0;
-      HANDLE fence_handle = (HANDLE) m_pPipeContext->screen->fence_get_win32_handle( m_pPipeContext->screen,
-                                                                                     pDX12EncodeContext->pAsyncFence,
-                                                                                     &AsyncFenceValue );
-      CHECKNULL_GOTO( fence_handle, E_FAIL, done );
-      CHECKHR_GOTO(
-         m_spDevice->OpenSharedHandle( fence_handle, IID_PPV_ARGS( pDX12EncodeContext->spAsyncFence.ReleaseAndGetAddressOf() ) ),
-         done );
-      CloseHandle( fence_handle );
-
       CHECKBOOL_GOTO( ( m_spDevice->GetDeviceRemovedReason() == S_OK ), DXGI_ERROR_DEVICE_REMOVED, done );
       // NULL returned fence indicates encode error
       CHECKNULL_GOTO( pDX12EncodeContext->pAsyncFence, MF_E_UNEXPECTED, done );
@@ -2529,12 +2600,47 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
       HMFT_ETW_EVENT_START( "PipeFlush", this );
       m_pPipeVideoCodec->flush( m_pPipeVideoCodec );
       HMFT_ETW_EVENT_STOP( "PipeFlush", this );
+   }
 
-      // Handle reconstructed picture copy if enabled
-      if( m_VideoReconstructedPictureMode != RECON_PIC_OUTPUT_MODE_DISABLED )
+   // Handle reconstructed picture output if enabled
+   if( m_VideoReconstructedPictureMode != RECON_PIC_OUTPUT_MODE_DISABLED )
+   {
+      HMFT_ETW_EVENT_START( "ReconstructedPictureSubmit", this );
+
+      struct pipe_video_buffer *src_buffer = pDX12EncodeContext->get_current_dpb_pic_buffer();
+      assert( src_buffer );
+
+      // We only support zero copy read only reconstructed picture in low latency mode
+      // and guarantee the src_buffer won't be modified until the next ProcessInput.
+      // While technically we could guarantee the recon pic buffer will not be reused/
+      // or rewritten by longer, it gets complicated to track and manage with all possible
+      // LTR/SVC/NumRef combinations, so we limit it to the next ProcessInput in LowLatency mode.
+      if( m_VideoReconstructedPictureMode == RECON_PIC_OUTPUT_MODE_READ_ONLY_SHARED_RESOURCE )
       {
-         HMFT_ETW_EVENT_START( "ReconstructedPictureSubmit", this );
+         // We only support this mode in low latency mode for lifetime management reasons
+         if( !m_bLowLatency )
+         {
+            debug_printf( "[dx12 hmft 0x%p] Zero copy read only reconstructed picture is ONLY supported in low latency mode\n",
+                           this );
+            assert( m_bLowLatency );
+            CHECKHR_GOTO( E_FAIL, done );
+         }
 
+         // Get read-only handle directly from the video buffer
+         struct d3d12_interop_video_buffer_associated_data *associated_data =
+               static_cast<struct d3d12_interop_video_buffer_associated_data *>( src_buffer->associated_data );
+         if(associated_data->get_read_only_resource &&
+            (!associated_data->get_read_only_resource( src_buffer,
+                                                         m_pPipeContext,
+                                                         &pDX12EncodeContext->pPipeResourceReconstructedPicture,
+                                                         &pDX12EncodeContext->PipeResourceReconstructedPictureSubresource ) || !pDX12EncodeContext->pPipeResourceReconstructedPicture) )
+         {
+            debug_printf( "[dx12 hmft 0x%p] Failed to get read-only resource from reference video buffer\n", this );
+         }
+         CHECKNULL_GOTO( pDX12EncodeContext->pPipeResourceReconstructedPicture, E_FAIL, done );
+      }
+      else
+      {
          // Get last slice completion fence
          pipe_fence_handle *fence_to_wait = nullptr;
          uint64_t fence_value = 0;
@@ -2552,108 +2658,50 @@ CDX12EncHMFT::ProcessInput( DWORD dwInputStreamIndex, IMFSample *pSample, DWORD 
                CloseHandle( fence_handle );
          }
 
-         struct pipe_video_buffer *src_buffer = pDX12EncodeContext->get_current_dpb_pic_buffer();
-         assert( src_buffer );
+         assert( m_pPipeVideoBlitter );
 
-         // TODO: Readonly flags for get handle
+         struct winsys_handle whandle = {};
+         whandle.type = WINSYS_HANDLE_TYPE_D3D12_RES;
+         whandle.modifier = 2;   // Expected by video_buffer_from_handle to place a pipe_resource in the pipe_video_buffer
+         whandle.com_obj = (void *) pDX12EncodeContext->pPipeResourceReconstructedPicture;
+         struct pipe_video_buffer *dst_buffer =
+            m_pPipeContext->video_buffer_from_handle( m_pPipeContext, src_buffer, &whandle, 0 );
+         assert( dst_buffer );
+         pDX12EncodeContext->PipeResourceReconstructedPictureSubresource = 0;
 
-         // We only support zero copy read only reconstructed picture in low latency mode
-         // and guarantee the src_buffer won't be modified until the next ProcessInput.
-         // While technically we could guarantee the recon pic buffer will not be reused/
-         // or rewritten by longer, it gets complicated to track and manage with all possible
-         // LTR/SVC/NumRef combinations, so we limit it to the next ProcessInput in LowLatency mode.
-         if( m_VideoReconstructedPictureMode == RECON_PIC_OUTPUT_MODE_READ_ONLY_SHARED_RESOURCE )
+         struct pipe_vpp_desc vpblit_params = {};
+         vpblit_params.base.in_fence = fence_to_wait;
+         vpblit_params.base.in_fence_value = fence_value;
+         vpblit_params.base.out_fence = &pDX12EncodeContext->pPipeFenceReconstructedPictureCompletionFence;
+         vpblit_params.base.input_format = src_buffer->buffer_format;
+         vpblit_params.base.output_format = dst_buffer->buffer_format;
+         vpblit_params.src_region.x1 = src_buffer->width;
+         vpblit_params.src_region.y1 = src_buffer->height;
+         vpblit_params.dst_region.x1 = dst_buffer->width;
+         vpblit_params.dst_region.y1 = dst_buffer->height;
+
+         m_pPipeVideoBlitter->begin_frame( m_pPipeVideoBlitter, dst_buffer, &vpblit_params.base );
+         m_pPipeVideoBlitter->process_frame( m_pPipeVideoBlitter, src_buffer, &vpblit_params );
+         m_pPipeVideoBlitter->end_frame( m_pPipeVideoBlitter, dst_buffer, &vpblit_params.base );
+         m_pPipeVideoBlitter->flush( m_pPipeVideoBlitter );
+
+         // Get D3D12 fence handle for synchronization
+         HANDLE fence_handle = (HANDLE) m_pPipeContext->screen->fence_get_win32_handle(
+            m_pPipeContext->screen,
+            pDX12EncodeContext->pPipeFenceReconstructedPictureCompletionFence,
+            &pDX12EncodeContext->ReconstructedPictureCompletionFenceValue );
+         if( fence_handle )
          {
-            // We only support this mode in low latency mode for lifetime management reasons
-            if( !m_bLowLatency )
-            {
-               debug_printf( "[dx12 hmft 0x%p] Zero copy read only reconstructed picture is ONLY supported in low latency mode\n",
-                             this );
-               assert( m_bLowLatency );
-               CHECKHR_GOTO( E_FAIL, done );
-            }
-
-            // Get read-only handle directly from the video buffer
-            HANDLE readOnlyHandle = nullptr;
-            HRESULT hr =
-               dpb_buffer_manager::get_read_only_handle( src_buffer,
-                                                         m_pPipeContext,
-                                                         m_spDevice,
-                                                         &readOnlyHandle,
-                                                         &pDX12EncodeContext->PipeResourceReconstructedPictureSubresource );
-            CHECKHR_GOTO( hr, done );
-            CHECKNULL_GOTO( readOnlyHandle, E_FAIL, done );
-            if( !readOnlyHandle )
-               debug_printf( "[dx12 hmft 0x%p] Failed to get read-only handle from video buffer\n", this );
-
-            struct winsys_handle src_wshandle = {};
-            src_wshandle.type = WINSYS_HANDLE_TYPE_FD;
-            src_wshandle.handle = readOnlyHandle;
-
-            assert( src_wshandle.handle );
-            if( !src_wshandle.handle )
-            {
-               debug_printf( "[dx12 hmft 0x%p] Invalid handle for reconstructed picture resource\n", this );
-               CHECKHR_GOTO( E_FAIL, done );
-            }
-            // Import the reconstructed picture resource from handle
-            pDX12EncodeContext->pPipeResourceReconstructedPicture =
-               m_pPipeContext->screen->resource_from_handle( m_pPipeContext->screen, NULL, &src_wshandle, 0 /*usage*/ );
-            assert( pDX12EncodeContext->pPipeResourceReconstructedPicture );
-            if( !pDX12EncodeContext->pPipeResourceReconstructedPicture )
-            {
-               debug_printf( "[dx12 hmft 0x%p] Failed to import reconstructed picture resource\n", this );
-               CHECKHR_GOTO( E_FAIL, done );
-            }
-            CloseHandle( readOnlyHandle );
+            CHECKHR_GOTO(
+               m_spDevice->OpenSharedHandle(
+                  fence_handle,
+                  IID_PPV_ARGS( pDX12EncodeContext->spReconstructedPictureCompletionFence.ReleaseAndGetAddressOf() ) ),
+               done );
+            CloseHandle( fence_handle );
          }
-         else
-         {
-            assert( m_pPipeVideoBlitter );
-
-            struct winsys_handle whandle = {};
-            whandle.type = WINSYS_HANDLE_TYPE_D3D12_RES;
-            whandle.modifier = 2;   // Expected by video_buffer_from_handle to place a pipe_resource in the pipe_video_buffer
-            whandle.com_obj = (void *) pDX12EncodeContext->pPipeResourceReconstructedPicture;
-            struct pipe_video_buffer *dst_buffer =
-               m_pPipeContext->video_buffer_from_handle( m_pPipeContext, src_buffer, &whandle, 0 );
-            assert( dst_buffer );
-            pDX12EncodeContext->PipeResourceReconstructedPictureSubresource = 0;
-
-            struct pipe_vpp_desc vpblit_params = {};
-            vpblit_params.base.in_fence = fence_to_wait;
-            vpblit_params.base.in_fence_value = fence_value;
-            vpblit_params.base.out_fence = &pDX12EncodeContext->pPipeFenceReconstructedPictureCompletionFence;
-            vpblit_params.base.input_format = src_buffer->buffer_format;
-            vpblit_params.base.output_format = dst_buffer->buffer_format;
-            vpblit_params.src_region.x1 = src_buffer->width;
-            vpblit_params.src_region.y1 = src_buffer->height;
-            vpblit_params.dst_region.x1 = dst_buffer->width;
-            vpblit_params.dst_region.y1 = dst_buffer->height;
-
-            m_pPipeVideoBlitter->begin_frame( m_pPipeVideoBlitter, dst_buffer, &vpblit_params.base );
-            m_pPipeVideoBlitter->process_frame( m_pPipeVideoBlitter, src_buffer, &vpblit_params );
-            m_pPipeVideoBlitter->end_frame( m_pPipeVideoBlitter, dst_buffer, &vpblit_params.base );
-            m_pPipeVideoBlitter->flush( m_pPipeVideoBlitter );
-
-            // Get D3D12 fence handle for synchronization
-            HANDLE fence_handle = (HANDLE) m_pPipeContext->screen->fence_get_win32_handle(
-               m_pPipeContext->screen,
-               pDX12EncodeContext->pPipeFenceReconstructedPictureCompletionFence,
-               &pDX12EncodeContext->ReconstructedPictureCompletionFenceValue );
-            if( fence_handle )
-            {
-               CHECKHR_GOTO(
-                  m_spDevice->OpenSharedHandle(
-                     fence_handle,
-                     IID_PPV_ARGS( pDX12EncodeContext->spReconstructedPictureCompletionFence.ReleaseAndGetAddressOf() ) ),
-                  done );
-               CloseHandle( fence_handle );
-            }
-         }
-
-         HMFT_ETW_EVENT_STOP( "ReconstructedPictureSubmit", this );
       }
+
+      HMFT_ETW_EVENT_STOP( "ReconstructedPictureSubmit", this );
    }
    // Release the QP map buffer after encode_bitstream call returns.
    if( qpMapBuffer && qpSize != 0 && qpData != nullptr )

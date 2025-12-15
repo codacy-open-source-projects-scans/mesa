@@ -287,8 +287,8 @@ panvk_meta_desc_copy_rsd(struct panvk_device *dev)
 
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE,
-      pan_shader_get_compiler_options(
-         pan_arch(phys_dev->kmod.props.gpu_id)),
+      pan_get_nir_shader_compiler_options(
+         pan_arch(phys_dev->kmod.dev->props.gpu_id)),
       "%s", "desc_copy");
 
    /* We actually customize that at execution time to issue the
@@ -302,12 +302,12 @@ panvk_meta_desc_copy_rsd(struct panvk_device *dev)
    single_desc_copy(&b, desc_copy_id);
 
    struct pan_compile_inputs inputs = {
-      .gpu_id = phys_dev->kmod.props.gpu_id,
-      .gpu_variant = phys_dev->kmod.props.gpu_variant,
+      .gpu_id = phys_dev->kmod.dev->props.gpu_id,
+      .gpu_variant = phys_dev->kmod.dev->props.gpu_variant,
    };
 
-   pan_shader_preprocess(b.shader, inputs.gpu_id);
-   pan_shader_postprocess(b.shader, inputs.gpu_id);
+   pan_preprocess_nir(b.shader, inputs.gpu_id);
+   pan_postprocess_nir(b.shader, inputs.gpu_id);
 
    VkResult result = panvk_per_arch(create_internal_shader)(
       dev, b.shader, &inputs, &shader);
@@ -321,13 +321,12 @@ panvk_meta_desc_copy_rsd(struct panvk_device *dev)
       DIV_ROUND_UP(sizeof(struct pan_nir_desc_copy_info), 4);
 
    shader->rsd = panvk_pool_alloc_desc(&dev->mempools.rw, RENDERER_STATE);
-   if (!panvk_priv_mem_host_addr(shader->rsd)) {
+   if (!panvk_priv_mem_check_alloc(shader->rsd)) {
       vk_shader_destroy(&dev->vk, &shader->vk, NULL);
       return 0;
    }
 
-   pan_cast_and_pack(panvk_priv_mem_host_addr(shader->rsd), RENDERER_STATE,
-                     cfg) {
+   panvk_priv_mem_write_desc(shader->rsd, 0, RENDERER_STATE, cfg) {
       pan_shader_prepare_rsd(&shader->info,
                              panvk_priv_mem_dev_addr(shader->code_mem), &cfg);
    }

@@ -26,7 +26,6 @@
 #include "util/blend.h"
 
 #ifdef PAN_ARCH
-#include "pan_shader.h"
 #include "pan_texture.h"
 #endif
 
@@ -34,6 +33,8 @@
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_conversion_builder.h"
 #include "compiler/nir/nir_lower_blend.h"
+#include "compiler/pan_compiler.h"
+#include "compiler/pan_nir.h"
 #include "util/format/u_format.h"
 
 #ifndef PAN_ARCH
@@ -407,6 +408,12 @@ is_dest_factor(enum pipe_blendfactor factor, bool alpha)
           (factor == PIPE_BLENDFACTOR_SRC_ALPHA_SATURATE && !alpha);
 }
 
+static inline bool
+is_min_max(enum pipe_blend_func func)
+{
+   return func == PIPE_BLEND_MIN || func == PIPE_BLEND_MAX;
+}
+
 /* Determines if a blend equation reads back the destination. This can occur by
  * explicitly referencing the destination in the blend equation, or by using a
  * partial writemask. */
@@ -420,7 +427,8 @@ pan_blend_reads_dest(const struct pan_blend_equation equation)
    if (!equation.blend_enable)
       return false;
 
-   return is_dest_factor(equation.rgb_src_factor, false) ||
+   return is_min_max(equation.rgb_func) || is_min_max(equation.alpha_func) ||
+          is_dest_factor(equation.rgb_src_factor, false) ||
           is_dest_factor(equation.alpha_src_factor, true) ||
           equation.rgb_dst_factor != PIPE_BLENDFACTOR_ZERO ||
           equation.alpha_dst_factor != PIPE_BLENDFACTOR_ZERO;
@@ -610,7 +618,7 @@ GENX(pan_blend_create_shader)(const struct pan_blend_state *state,
    get_equation_str(rt_state, equation_str, sizeof(equation_str));
 
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, pan_shader_get_compiler_options(PAN_ARCH),
+      MESA_SHADER_FRAGMENT, pan_get_nir_shader_compiler_options(PAN_ARCH),
       "pan_blend(rt=%d,fmt=%s,nr_samples=%d,%s=%s)", rt,
       util_format_name(rt_state->format), rt_state->nr_samples,
       state->logicop_enable ? "logicop" : "equation",
@@ -655,7 +663,6 @@ GENX(pan_blend_create_shader)(const struct pan_blend_state *state,
       options.rt[rt].alpha.dst_factor = rt_state->equation.alpha_dst_factor;
    }
 
-   nir_def *pixel = nir_load_barycentric_pixel(&b, 32, .interp_mode = 1);
    nir_def *zero = nir_imm_int(&b, 0);
 
    for (unsigned i = 0; i < 2; ++i) {
@@ -666,8 +673,8 @@ GENX(pan_blend_create_shader)(const struct pan_blend_state *state,
       src_type = nir_alu_type_get_base_type(nir_type) |
                  nir_alu_type_get_type_size(src_type);
 
-      nir_def *src = nir_load_interpolated_input(
-         &b, 4, nir_alu_type_get_type_size(src_type), pixel, zero,
+      nir_def *src = nir_load_input(
+         &b, 4, nir_alu_type_get_type_size(src_type), zero,
          .io_semantics.location = i ? VARYING_SLOT_VAR0 : VARYING_SLOT_COL0,
          .io_semantics.num_slots = 1, .base = i, .dest_type = src_type);
 

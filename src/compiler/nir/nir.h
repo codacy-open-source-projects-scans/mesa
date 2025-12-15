@@ -1789,6 +1789,14 @@ nir_deref_mode_is_in_set(const nir_deref_instr *deref, nir_variable_mode modes)
 
 static inline nir_deref_instr *nir_src_as_deref(nir_src src);
 
+/** Returns true if deref->arr is valid */
+static inline bool
+nir_deref_instr_is_arr(const nir_deref_instr *deref)
+{
+   return deref->deref_type == nir_deref_type_array ||
+          deref->deref_type == nir_deref_type_ptr_as_array;
+}
+
 static inline nir_deref_instr *
 nir_deref_instr_parent(const nir_deref_instr *instr)
 {
@@ -1999,7 +2007,7 @@ typedef enum {
 typedef struct nir_io_semantics {
    unsigned location : 7;  /* gl_vert_attrib, gl_varying_slot, or gl_frag_result */
    unsigned num_slots : 6; /* max 32, may be pessimistic with const indexing */
-   unsigned dual_source_blend_index : 1;
+   unsigned dual_source_blend_index : 1; /* used without nir_io_use_frag_result_dual_src_blend */
    unsigned fb_fetch_output : 1;  /* for GL_KHR_blend_equation_advanced */
    unsigned fb_fetch_output_coherent : 1;
    unsigned gs_streams : 8;       /* xxyyzzww: 2-bit stream index for each component */
@@ -5192,6 +5200,7 @@ bool nir_lower_scratch_to_var(nir_shader *nir);
 bool nir_lower_clip_halfz(nir_shader *shader);
 
 void nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint);
+void nir_gather_clip_cull_distance_sizes_from_vars(nir_shader *nir);
 
 void nir_gather_types(nir_function_impl *impl,
                       BITSET_WORD *float_types,
@@ -5257,49 +5266,80 @@ void nir_assign_io_var_locations(nir_shader *shader, nir_variable_mode mode);
 bool nir_opt_clip_cull_const(nir_shader *shader);
 
 typedef enum {
-   /* If set, this causes all 64-bit IO operations to be lowered on-the-fly
-    * to 32-bit operations.  This is only valid for nir_var_shader_in/out
-    * modes.
+   /* If set, this causes all 64-bit IO loads and stores to be lowered to 32
+    * bits + pack/unpack. This is only valid for nir_var_shader_in/out.
     *
-    * Note that this destroys dual-slot information i.e. whether an input
-    * occupies the low or high half of dvec4. Instead, it adds an offset of 1
-    * to the load (which is ambiguous) and expects driver locations of inputs
-    * to be final, which prevents any further optimizations.
+    * Only VS inputs:
     *
-    * TODO: remove this in favor of nir_lower_io_lower_64bit_to_32_new.
+    * This option should be used when VS input locations (nir_intrinsic_base
+    * values) are final. With this option, dual-slot VS inputs must always
+    * occupy 2 VS input locations. For example, VS inputs only consisting
+    * of dual-slot inputs should have VS input locations set to 0,2,4,6 and
+    * loading .xy from (base) and .zw from (base + 1). nir_lower_io will lower
+    * 64 bits into 32 bits like this:
+    *
+    *   0(previously 0.xy), 1(previously 0.zw), ...
+    *
+    * After that's done, the information about whether load_input loads
+    * the low or high portion of dual-slot inputs is not saved
+    * in the intrinsics. This is why the location must be final or the driver
+    * must keep the original VS input semantics info in a separate structure
+    * since it can't be gathered from NIR anymore.
+    *
+    * TODO: This option should be removed because it offers no benefit over
+    * the next one.
     */
    nir_lower_io_lower_64bit_to_32 = (1 << 0),
 
-   /* If set, this causes the subset of 64-bit IO operations involving floats to be lowered on-the-fly
-    * to 32-bit operations.  This is only valid for nir_var_shader_in/out
-    * modes.
-    */
-   nir_lower_io_lower_64bit_float_to_32 = (1 << 1),
-
-   /* This causes all 64-bit IO operations to be lowered to 32-bit operations.
-    * This is only valid for nir_var_shader_in/out modes.
+   /* If set, this causes all 64-bit IO loads and stores to be lowered to 32
+    * bits + pack/unpack. This is only valid for nir_var_shader_in/out.
     *
-    * Only VS inputs: Dual slot information is preserved as nir_io_semantics::
-    * high_dvec2 and gathered into shader_info::dual_slot_inputs, so that
-    * the shader can be arbitrarily optimized and the low or high half of
-    * dvec4 can be DCE'd independently without affecting the other half.
+    * Only VS inputs:
+    *
+    * This option allows eliminating VS inputs and thus bound vertex buffers
+    * after nir_opt_varyings makes them dead. The information whether
+    * load_input loads from the low or high portion of dual-slot inputs is
+    * saved in nir_io_semantics::high_dvec2. shader_info::dual_slot_inputs is
+    * set by nir_shader_gather_info for all inputs that have high_dvec2 == 1.
+    * Since all information about dual-slot VS inputs is preserved in NIR, it
+    * allows linking optimizations to run after nir_lower_io, eliminate dead VS
+    * outputs, which then eliminates dead VS inputs, and the driver can gather
+    * shader_info and stop binding eliminated vertex buffers. The GLSL linker
+    * and st/mesa use this to reduce the number of bound vertex buffers for
+    * gallium when nir_opt_varyings makes them dead. It also naturally demotes
+    * dual-slot VS inputs to single-slot VS inputs when the high half of
+    * dual-slot VS inputs is DCE'd.
+    *
+    * nir_recompute_io_bases assigns the following VS input locations for dual
+    * slot VS inputs:
+    *   0(low), 0(high_dvec2=1), 1(low), 1(high_dvec2=1)
+    *
+    * Alternatively, a prefix bitmask of shader_info::inputs_read can be used
+    * to get the input locations instead of calling nir_recompute_io_bases.
+    * That numbering is for OpenGL where a dual-slot VS input occupies exactly
+    * 1 input location.
+    *
+    * However, any other numbering is possible. For example, Vulkan drivers may
+    * assign these VS input locations after DCE, which can be done by computing
+    * a prefix bitmask from shader_info::inputs_read + a prefix bitmask of
+    * shader_info::dual_slot_inputs + high_dvec2 (the Intel driver does this),
+    * resulting in:
+    *   0(low), 1(high_dvec2=1), 2(low), 3(high_dvec2=1)
     */
-   nir_lower_io_lower_64bit_to_32_new = (1 << 2),
+   nir_lower_io_lower_64bit_to_32_new = (1 << 1),
 
-   /**
-    * Should nir_lower_io() create load_interpolated_input intrinsics?
+   /* Should nir_lower_io() create load_interpolated_input intrinsics?
     *
     * If not, it generates regular load_input intrinsics and interpolation
     * information must be inferred from the list of input nir_variables.
     */
-   nir_lower_io_use_interpolated_input_intrinsics = (1 << 3),
+   nir_lower_io_use_interpolated_input_intrinsics = (1 << 2),
 } nir_lower_io_options;
 bool nir_lower_io(nir_shader *shader,
                   nir_variable_mode modes,
                   int (*type_size)(const struct glsl_type *, bool),
                   nir_lower_io_options);
 
-bool nir_io_add_const_offset_to_base(nir_shader *nir, nir_variable_mode modes);
 void nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs);
 bool nir_io_add_intrinsic_xfb_info(nir_shader *nir);
 bool nir_lower_io_indirect_loads(nir_shader *nir, nir_variable_mode modes);
@@ -5597,7 +5637,7 @@ bool nir_lower_all_phis_to_scalar(nir_shader *shader);
 void nir_lower_io_array_vars_to_elements(nir_shader *producer, nir_shader *consumer);
 bool nir_lower_io_array_vars_to_elements_no_indirects(nir_shader *shader,
                                                       bool outputs_only);
-bool nir_lower_io_to_scalar(nir_shader *shader, nir_variable_mode mask, nir_instr_filter_cb filter, void *filter_data);
+bool nir_lower_io_to_scalar(nir_shader *shader, nir_variable_mode mask, nir_intrin_filter_cb filter, void *filter_data);
 bool nir_lower_io_vars_to_scalar(nir_shader *shader, nir_variable_mode mask);
 bool nir_opt_vectorize_io_vars(nir_shader *shader, nir_variable_mode mask);
 bool nir_lower_tess_level_array_vars_to_vec(nir_shader *shader);
@@ -5623,7 +5663,12 @@ bool nir_lower_uniforms_to_ubo(nir_shader *shader, bool dword_packed, bool load_
 
 bool nir_lower_is_helper_invocation(nir_shader *shader);
 
-bool nir_lower_single_sampled(nir_shader *shader);
+typedef struct nir_lower_single_sampled_options {
+   bool lower_sample_mask_in;
+} nir_lower_single_sampled_options;
+
+bool nir_lower_single_sampled(nir_shader *shader,
+                              const nir_lower_single_sampled_options *options);
 bool nir_lower_sample_shading(nir_shader *shader);
 
 bool nir_lower_atomics(nir_shader *shader, nir_instr_filter_cb filter);
@@ -5703,6 +5748,8 @@ typedef struct nir_lower_sysvals_to_varyings_options {
    bool frag_coord : 1;
    bool front_face : 1;
    bool point_coord : 1;
+   bool layer_id : 1;
+   bool view_index : 1;
 } nir_lower_sysvals_to_varyings_options;
 
 bool
@@ -6041,11 +6088,9 @@ bool nir_lower_idiv(nir_shader *shader, const nir_lower_idiv_options *options);
 
 typedef struct nir_input_attachment_options {
    bool use_ia_coord_intrin;
-   bool use_fragcoord_sysval;
-   bool use_layer_id_sysval;
    bool use_view_id_for_layer;
-   bool unscaled_depth_stencil_ir3;
-   uint32_t unscaled_input_attachment_ir3;
+   bool gmem_depth_stencil_ir3;
+   uint32_t gmem_input_attachment_ir3;
 } nir_input_attachment_options;
 
 bool nir_lower_input_attachments(nir_shader *shader,
@@ -6062,7 +6107,7 @@ bool nir_lower_clip_fs(nir_shader *shader, unsigned ucp_enables,
                        bool use_clipdist_array, bool use_load_interp);
 
 bool nir_lower_clip_cull_distance_to_vec4s(nir_shader *shader);
-bool nir_lower_clip_cull_distance_array_vars(nir_shader *nir);
+bool nir_merge_clip_cull_distance_vars(nir_shader *nir);
 bool nir_lower_clip_disable(nir_shader *shader, unsigned clip_plane_enable);
 
 bool nir_lower_frexp(nir_shader *nir);

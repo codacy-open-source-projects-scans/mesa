@@ -1042,9 +1042,13 @@ brw_nir_populate_wm_prog_data(nir_shader *shader,
    prog_data->coarse_pixel_dispatch =
       intel_sometimes_invert(prog_data->persample_dispatch);
    if (!key->coarse_pixel ||
-       prog_data->uses_omask ||
+       /* DG2 should support this, but Wa_22012766191 says there are issues
+        * with CPS 1x1 + MSAA + FS writing to oMask.
+        */
+       (devinfo->verx10 < 200 &&
+        (prog_data->uses_omask ||
+         prog_data->uses_sample_mask)) ||
        prog_data->sample_shading ||
-       prog_data->uses_sample_mask ||
        (prog_data->computed_depth_mode != BRW_PSCDEPTH_OFF) ||
        prog_data->computed_stencil ||
        devinfo->ver < 11) {
@@ -1350,7 +1354,6 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
 {
    const struct intel_device_info *devinfo = s.devinfo;
    struct brw_wm_prog_data *wm_prog_data = brw_wm_prog_data(s.prog_data);
-   brw_wm_prog_key *wm_key = (brw_wm_prog_key *) s.key;
    const brw_builder bld = brw_builder(&s);
    const nir_shader *nir = s.nir;
 
@@ -1367,15 +1370,19 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
    } else {
       if (nir->info.inputs_read > 0 ||
           BITSET_TEST(nir->info.system_values_read, SYSTEM_VALUE_FRAG_COORD) ||
-          (nir->info.outputs_read > 0 && !wm_key->coherent_fb_fetch)) {
+          (nir->info.outputs_read > 0 && !brw_can_coherent_fb_fetch(devinfo))) {
          brw_emit_interpolation_setup(s);
       }
 
       /* We handle discards by keeping track of the still-live pixels in f0.1.
-       * On Xe2+, we also predicate stores with this mask. Initialize it with
-       * the dispatched pixels if we use discard or (on Xe2) memory stores.
+       * On Xe2+, we also predicate stores and test helper invocations with
+       * this mask. Initialize it with the dispatched pixels if we use discard
+       * or (on Xe2) memory stores or helper invocation testing.
        */
-      if ((devinfo->ver >= 20 && nir->info.writes_memory) ||
+      if ((devinfo->ver >= 20 &&
+           (BITSET_TEST(nir->info.system_values_read,
+                        SYSTEM_VALUE_HELPER_INVOCATION) ||
+            nir->info.writes_memory)) ||
           wm_prog_data->uses_kill) {
 
          const unsigned lower_width = MIN2(s.dispatch_width, 16);
@@ -1505,7 +1512,7 @@ brw_compile_fs(const struct brw_compiler *compiler,
    brw_nir_lower_fs_inputs(nir, devinfo, key);
    brw_nir_lower_fs_outputs(nir);
 
-   if (!key->coherent_fb_fetch)
+   if (!brw_can_coherent_fb_fetch(devinfo))
       NIR_PASS(_, nir, brw_nir_lower_fs_load_output, key);
 
    NIR_PASS(_, nir, nir_opt_frag_coord_to_pixel_coord);

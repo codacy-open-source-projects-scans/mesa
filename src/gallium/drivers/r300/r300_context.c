@@ -47,6 +47,7 @@ static void r300_release_referenced_objects(struct r300_context *r300)
 
     /* Manually-created vertex buffers. */
     pipe_vertex_buffer_unreference(&r300->dummy_vb);
+    pipe_surface_reference(&r300->locked_zbuffer, NULL);
     radeon_bo_reference(r300->rws, &r300->vbo, NULL);
 
     r300->context.delete_depth_stencil_alpha_state(&r300->context,
@@ -463,7 +464,6 @@ struct pipe_context* r300_create_context(struct pipe_screen* screen,
         vb.depth0 = 1;
 
         r300->dummy_vb.buffer.resource = screen->resource_create(screen, &vb);
-        pipe_reference(NULL, &r300->dummy_vb.buffer.resource->reference);
         r300->context.set_vertex_buffers(&r300->context, 1, &r300->dummy_vb);
     }
 

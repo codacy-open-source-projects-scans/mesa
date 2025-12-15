@@ -267,32 +267,24 @@ emit_setup(struct fd_context *ctx, fd_cs &cs)
                           FD6_FLUSH_CCU_DEPTH |
                           FD6_INVALIDATE_CCU_DEPTH);
 
+   fd6_set_render_mode<CHIP>(cs, {RM6_BLIT2DSCALE});
+
    /* normal BLIT_OP_SCALE operation needs bypass RB_CCU_CNTL */
-   fd6_emit_ccu_cntl<CHIP>(cs, ctx->screen, false);
+   fd6_emit_gmem_cache_cntl<CHIP>(cs, ctx->screen, false);
 }
 
 template <chip CHIP>
 static void
 emit_blit_fini(struct fd_context *ctx, fd_cs &cs)
 {
-   const struct fd_dev_info *info = ctx->screen->info;
-
    fd6_event_write<CHIP>(ctx, cs, FD_LABEL);
 
-   if (info->magic.RB_DBG_ECO_CNTL != info->magic.RB_DBG_ECO_CNTL_blit) {
-      fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
-      fd_pkt4(cs, 1)
-         .add(A6XX_RB_DBG_ECO_CNTL(.dword = info->magic.RB_DBG_ECO_CNTL_blit));
-   }
+   fd6_set_rb_dbg_eco_mode<CHIP>(ctx, cs, true);
 
    fd_pkt7(cs, CP_BLIT, 1)
       .add(CP_BLIT_0(.op = BLIT_OP_SCALE));
 
-   if (info->magic.RB_DBG_ECO_CNTL != info->magic.RB_DBG_ECO_CNTL_blit) {
-      fd_pkt7(cs, CP_WAIT_FOR_IDLE, 0);
-      fd_pkt4(cs, 1)
-         .add(A6XX_RB_DBG_ECO_CNTL(.dword = info->magic.RB_DBG_ECO_CNTL));
-   }
+   fd6_set_rb_dbg_eco_mode<CHIP>(ctx, cs, false);
 }
 
 /* nregs: 5 */
@@ -511,6 +503,8 @@ static void
 fd6_clear_ubwc(struct fd_batch *batch, struct fd_resource *rsc) assert_dt
 {
    fd_cs cs(fd_batch_get_prologue(batch));
+
+   fd6_set_render_mode<CHIP>(cs, {RM6_BLIT2DSCALE});
 
    clear_ubwc_setup<CHIP>(cs);
 
@@ -833,11 +827,9 @@ clear_lrz_setup(fd_cs &cs, struct fd_resource *zsbuf, struct fd_bo *lrz, double 
 
 template <chip CHIP>
 void
-fd6_clear_lrz(struct fd_batch *batch, struct fd_resource *zsbuf,
+fd6_clear_lrz(fd_cs &cs, struct fd_resource *zsbuf,
               struct fd_bo *lrz, double depth)
 {
-   fd_cs cs(fd_batch_get_prologue(batch));
-
    if (DEBUG_BLIT) {
       fprintf(stderr, "lrz clear:\ndst resource: ");
       util_dump_resource(stderr, &zsbuf->b.b);
@@ -1285,7 +1277,7 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
 
    DBG_BLIT(info, batch);
 
-   trace_start_blit(&batch->trace, cs.ring(), info->src.resource->target,
+   trace_start_blit(&batch->trace, cs, info->src.resource->target,
                     info->dst.resource->target);
 
    if ((info->src.resource->target == PIPE_BUFFER) &&
@@ -1300,7 +1292,7 @@ handle_rgba_blit(struct fd_context *ctx, const struct pipe_blit_info *info)
       emit_blit_texture<CHIP>(ctx, cs, info);
    }
 
-   trace_end_blit(&batch->trace, cs.ring());
+   trace_end_blit(&batch->trace, cs);
 
    fd6_emit_flushes<CHIP>(batch->ctx, cs,
                           FD6_FLUSH_CCU_COLOR |

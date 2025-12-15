@@ -25,6 +25,7 @@ anv_entrypoints = custom_target(
     '--device-prefix', 'gfx20',
     '--device-prefix', 'gfx30',
     '--device-prefix', 'anv_doom64',
+    '--device-prefix', 'anv_furmark',
     '--device-prefix', 'anv_hitman3',
     '--device-prefix', 'anv_android',
     '--device-prefix', 'anv_rmv',
@@ -82,8 +83,6 @@ _dev_icd = custom_target(
 )
 
 devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
-# Deprecated: replaced by VK_DRIVER_FILES above
-devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
 
 libanv_per_hw_ver_libs = []
 anv_per_hw_ver_files = files(
@@ -140,6 +139,7 @@ libanv_files = files(
   'i915/anv_queue.h',
   'layers/anv_android_layer.c',
   'layers/anv_doom64.c',
+  'layers/anv_furmark.c',
   'layers/anv_hitman3.c',
   'layers/anv_rmv_layer.c',
   'xe/anv_batch_chain.c',
@@ -192,6 +192,7 @@ libanv_files = files(
   'anv_sampler.c',
   'anv_shader.c',
   'anv_shader_compile.c',
+  'anv_shader_heap.c',
   'anv_slab_bo.c',
   'anv_slab_bo.h',
   'anv_sparse.c',
@@ -328,6 +329,7 @@ if with_tests
     'tests/block_pool_no_free.c',
     'tests/block_pool_grow_first.c',
     'tests/block_pool_max_size.c',
+    'tests/shader_heap_small_allocs.c',
   )
 
   test(

@@ -111,6 +111,7 @@ static const struct vk_instance_extension_table instance_extensions = {
 #ifdef V3DV_USE_WSI_PLATFORM
    .KHR_get_surface_capabilities2       = true,
    .KHR_surface                         = true,
+   .KHR_surface_maintenance1            = true,
    .KHR_surface_protected_capabilities  = true,
    .EXT_surface_maintenance1            = true,
    .EXT_swapchain_colorspace            = true,
@@ -190,6 +191,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_workgroup_memory_explicit_layout = true,
 #ifdef V3DV_USE_WSI_PLATFORM
       .KHR_swapchain                        = true,
+      .KHR_swapchain_maintenance1           = true,
       .KHR_swapchain_mutable_format         = true,
       .KHR_incremental_present              = true,
       .KHR_present_id2                      = true,
@@ -508,7 +510,7 @@ get_features(const struct v3dv_physical_device *physical_device,
       .maintenance5 = true,
 
 #ifdef V3DV_USE_WSI_PLATFORM
-      /* VK_EXT_swapchain_maintenance1 */
+      /* VK_KHR_swapchain_maintenance1 */
       .swapchainMaintenance1 = true,
 
       /* VK_KHR_present_id2 */
@@ -842,6 +844,7 @@ get_device_properties(const struct v3dv_physical_device *device,
    const float v3d_point_line_granularity = 2.0f / (1 << V3D_COORD_SHIFT);
    const uint32_t max_fb_size = V3D_MAX_IMAGE_DIMENSION;
 
+   /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlags supported_sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
 
