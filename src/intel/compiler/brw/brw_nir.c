@@ -66,84 +66,252 @@ is_output(nir_intrinsic_instr *intrin)
           intrin->intrinsic == nir_intrinsic_store_per_view_output;
 }
 
-static unsigned
-io_component(nir_intrinsic_instr *instr)
+static bool
+is_per_primitive(nir_intrinsic_instr *intrin)
 {
-   if (nir_intrinsic_has_component(instr))
-      return nir_intrinsic_component(instr);
-   else
+   return intrin->intrinsic == nir_intrinsic_load_per_primitive_input ||
+          intrin->intrinsic == nir_intrinsic_load_per_primitive_output ||
+          intrin->intrinsic == nir_intrinsic_store_per_primitive_output;
+}
+
+/**
+ * Given an URB offset in 32-bit units, determine whether (offset % 4)
+ * is statically known.  If so, add this to the value of first_component.
+ */
+static bool
+io_vec4_static_mod(nir_def *offset_32b, unsigned *first_component)
+{
+   unsigned mod;
+   const bool mod_known =
+      nir_mod_analysis(nir_get_scalar(offset_32b, 0), nir_type_uint, 4, &mod);
+
+   if (mod_known)
+      *first_component += mod;
+
+   return mod_known;
+}
+
+static unsigned
+io_component(nir_intrinsic_instr *io,
+             const struct brw_lower_urb_cb_data *cb_data)
+{
+   unsigned c = nir_intrinsic_has_component(io) ?
+                nir_intrinsic_component(io) : 0;
+
+   if (is_per_primitive(io)) {
+      /* Extract the 32-bit component index from the byte offset */
+      const nir_io_semantics sem = nir_intrinsic_io_semantics(io);
+      const int offset = cb_data->per_primitive_byte_offsets[sem.location];
+      assert(offset != -1);
+      c += (offset % 16) / 4;
+   } else if (nir_intrinsic_has_io_semantics(io) &&
+              nir_intrinsic_io_semantics(io).location == VARYING_SLOT_PSIZ) {
+      /* Point Size lives in component .w of the VUE header */
+      c += 3;
+   }
+
+   return c;
+}
+
+static unsigned
+io_base_slot(nir_intrinsic_instr *io,
+             const struct brw_lower_urb_cb_data *cb_data)
+{
+   if (io->intrinsic == nir_intrinsic_load_task_payload ||
+       io->intrinsic == nir_intrinsic_store_task_payload)
+      return nir_intrinsic_base(io) / 16; /* bytes to vec4 slots */
+
+   const nir_io_semantics io_sem = nir_intrinsic_io_semantics(io);
+
+   if (is_per_primitive(io)) {
+      if (io_sem.location == VARYING_SLOT_PRIMITIVE_INDICES)
+         return 0;
+
+      const int offset = cb_data->per_primitive_byte_offsets[io_sem.location];
+      assert(offset != -1);
+      return (cb_data->per_primitive_offset + offset) / 16;
+   } else if (cb_data->per_primitive_byte_offsets &&
+              io_sem.location == VARYING_SLOT_PRIMITIVE_COUNT) {
       return 0;
+   } else {
+      const int slot = cb_data->varying_to_slot[io_sem.location];
+      assert(slot != -1);
+      return slot + cb_data->per_vertex_offset / 16;
+   }
+}
+
+static nir_def *
+urb_offset(nir_builder *b,
+           const struct brw_lower_urb_cb_data *cb_data,
+           nir_intrinsic_instr *io)
+{
+   const nir_io_semantics io_sem = nir_intrinsic_io_semantics(io);
+   nir_def *offset = nir_get_io_offset_src(io)->ssa;
+
+   /* Convert vec4 slot offset to 32-bit dwords */
+   if (!cb_data->vec4_access)
+      offset = nir_ishl_imm(b, offset, 2);
+
+   nir_src *index = nir_get_io_arrayed_index_src(io);
+
+   if (is_per_primitive(io)) {
+      const unsigned stride =
+         io_sem.location == VARYING_SLOT_PRIMITIVE_INDICES
+            ? cb_data->per_primitive_indices_stride / 4
+            : cb_data->per_primitive_stride / 4;
+
+      offset = nir_iadd(b, offset, nir_imul_imm(b, index->ssa, stride));
+   } else if (index) {
+      nir_def *stride = cb_data->dynamic_tes
+         ? intel_nir_tess_field(b, PER_VERTEX_SLOTS)
+         : nir_imm_int(b, cb_data->per_vertex_stride /
+                          (cb_data->vec4_access ? 16 : 4));
+
+      offset = nir_iadd(b, offset, nir_imul(b, index->ssa, stride));
+
+      /* In the Tessellation evaluation shader, reposition the offset of
+       * builtins when using separate layout.
+       */
+      if (cb_data->dynamic_tes) {
+         assert(b->shader->info.stage == MESA_SHADER_TESS_EVAL);
+         const nir_io_semantics io_sem = nir_intrinsic_io_semantics(io);
+         const bool builtin = io_sem.location < VARYING_SLOT_VAR0;
+         const int old_base = builtin ? cb_data->tes_builtins_slot_offset
+                                      : cb_data->tes_per_patch_slots;
+         nir_def *new_base =
+            builtin ? intel_nir_tess_field(b, BUILTINS)
+                    : intel_nir_tess_field(b, PER_PATCH_SLOTS);
+
+         offset = nir_iadd(b, offset, nir_iadd_imm(b, new_base, -old_base));
+      }
+   }
+
+   return offset;
 }
 
 static nir_def *
 load_urb(nir_builder *b,
-         const struct intel_device_info *devinfo,
+         const struct brw_lower_urb_cb_data *cb_data,
          nir_intrinsic_instr *intrin,
          nir_def *handle,
+         nir_def *offset,
          enum gl_access_qualifier access)
 {
-   nir_def *offset = nir_get_io_offset_src(intrin)->ssa;
-
-   const unsigned base = nir_intrinsic_base(intrin);
+   const struct intel_device_info *devinfo = cb_data->devinfo;
    const unsigned bits = intrin->def.bit_size;
+   const unsigned base = io_base_slot(intrin, cb_data);
+   unsigned first_component = io_component(intrin, cb_data);
 
    if (devinfo->ver >= 20) {
-      nir_def *addr = nir_iadd(b, handle, nir_ishl_imm(b, offset, 4));
-      return nir_load_urb_lsc_intel(b, intrin->def.num_components, bits, addr,
-                                    16 * base + 4 * io_component(intrin));
+      offset = nir_ishl_imm(b, offset, cb_data->vec4_access ? 4 : 2);
+      return nir_load_urb_lsc_intel(b, intrin->def.num_components, bits,
+                                    nir_iadd(b, handle, offset),
+                                    16 * base + 4 * first_component,
+                                    .access = access);
    }
 
-   /* Load a whole vec4 and return the desired portion */
-   const unsigned first_component = io_component(intrin);
-   const unsigned components = intrin->def.num_components + first_component;
-   assert(components <= 4);
+   /* Load a whole vec4 or vec8 and return the desired portion */
+   nir_component_mask_t mask = nir_component_mask(intrin->def.num_components);
+
+   /* If the offset is in vec4 units, do a straightforward load */
+   if (cb_data->vec4_access) {
+      assert(intrin->def.num_components <= 4);
+      nir_def *load =
+         nir_load_urb_vec4_intel(b, 4, bits, handle, offset,
+                                 .base = base, .access = access);
+      return nir_channels(b, load, mask << first_component);
+   }
+
+   /* Otherwise, the offset is in 32-bit units.  Split it into a vec4-aligned
+    * slot offset and a 32-bit component offset.
+    */
+   nir_def *mod = nir_iand_imm(b, offset, 0x3);
+   nir_def *vec4_offset = nir_ishr_imm(b, offset, 2);
+
+   const bool static_mod = io_vec4_static_mod(offset, &first_component);
+   const bool single_vec4 = (static_mod || intrin->def.num_components == 1)
+      && first_component + intrin->def.num_components <= 4;
 
    nir_def *load =
-      nir_load_urb_vec4_intel(b, components, bits, handle, offset,
-                              .base = base, .access = access);
-   nir_component_mask_t mask =
-      nir_component_mask(intrin->def.num_components) << first_component;
+      nir_load_urb_vec4_intel(b, single_vec4 ? 4 : 8, bits, handle,
+                              vec4_offset, .base = base, .access = access);
 
-   return nir_channels(b, load, mask);
+   if (static_mod) {
+      return nir_channels(b, load, mask << first_component);
+   } else {
+      nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+      for (unsigned i = 0; i < intrin->def.num_components; i++) {
+         comps[i] =
+            nir_vector_extract(b, load,
+                               nir_iadd_imm(b, mod, first_component + i));
+      }
+      return nir_vec(b, comps, intrin->def.num_components);
+   }
 }
 
 static void
 store_urb(nir_builder *b,
-          const struct intel_device_info *devinfo,
+          const struct brw_lower_urb_cb_data *cb_data,
           nir_intrinsic_instr *intrin,
-          nir_def *urb_handle)
+          nir_def *urb_handle,
+          nir_def *offset)
 {
-   nir_def *src = intrin->src[0].ssa;
-   nir_def *offset = nir_get_io_offset_src(intrin)->ssa;
-
+   const struct intel_device_info *devinfo = cb_data->devinfo;
+   const unsigned base = io_base_slot(intrin, cb_data);
+   unsigned first_component = io_component(intrin, cb_data);
    unsigned mask = nir_intrinsic_write_mask(intrin);
 
+   nir_def *src = intrin->src[0].ssa;
+
    if (devinfo->ver >= 20) {
-      nir_def *addr = nir_iadd(b, urb_handle, nir_ishl_imm(b, offset, 4));
+      offset = nir_ishl_imm(b, offset, cb_data->vec4_access ? 4 : 2);
+      nir_def *addr = nir_iadd(b, urb_handle, offset);
       while (mask) {
          int start, count;
          u_bit_scan_consecutive_range(&mask, &start, &count);
 
          const unsigned cur_mask = BITFIELD_MASK(count) << start;
-         const unsigned base = 16 * nir_intrinsic_base(intrin) +
-                               4 * (start + io_component(intrin));
+         const unsigned cur_base = 16 * base + 4 * (start + first_component);
 
          nir_store_urb_lsc_intel(b, nir_channels(b, src, cur_mask), addr,
-                                 .base = base);
+                                 .base = cur_base);
       }
-   } else {
-      const unsigned first_component = io_component(intrin);
-      if (first_component) {
-         const unsigned components = src->num_components + first_component;
-         assert(components <= 4);
-
-         mask <<= first_component;
-         src = nir_shift_channels(b, src, first_component, components);
-      }
-      nir_store_urb_vec4_intel(b, src, urb_handle, offset,
-                               nir_imm_int(b, mask),
-                               .base = nir_intrinsic_base(intrin));
+      return;
    }
+
+   nir_def *channel_mask = nir_imm_int(b, mask);
+
+   const bool static_mod = cb_data->vec4_access ||
+                           io_vec4_static_mod(offset, &first_component);
+
+   if (static_mod) {
+      src = nir_shift_channels(b, src, first_component,
+                               align(src->num_components + first_component, 4));
+      channel_mask = nir_ishl_imm(b, channel_mask, first_component);
+   } else {
+      offset = nir_iadd_imm(b, offset, first_component);
+
+      nir_def *undef = nir_undef(b, 1, src->bit_size);
+      nir_def *mod = nir_iand_imm(b, offset, 0x3);
+      channel_mask = nir_ishl(b, channel_mask, mod);
+
+      nir_def *comps[8];
+      for (unsigned i = 0; i < 8; i++) {
+         nir_def *cond = nir_i2b(b, nir_iand_imm(b, channel_mask, 1u << i));
+         nir_def *src_idx = nir_imax_imm(b, nir_isub_imm(b, i, mod), 0);
+         nir_def *src_comp = src->num_components == 1 ? src :
+            nir_vector_extract(b, src, src_idx);
+
+         comps[i] = nir_bcsel(b, cond, src_comp, undef);
+      }
+      src = nir_vec(b, comps, 8);
+   }
+
+   nir_def *vec4_offset =
+      cb_data->vec4_access ? offset : nir_ishr_imm(b, offset, 2);
+
+   nir_store_urb_vec4_intel(b, src, urb_handle, vec4_offset, channel_mask,
+                            .base = base);
 }
 
 static nir_def *
@@ -173,18 +341,16 @@ load_push_input(nir_builder *b, nir_intrinsic_instr *io, unsigned byte_offset)
 
 static nir_def *
 try_load_push_input(nir_builder *b,
-                    const struct intel_device_info *devinfo,
-                    nir_intrinsic_instr *io)
+                    const struct brw_lower_urb_cb_data *cb_data,
+                    nir_intrinsic_instr *io,
+                    nir_def *offset)
 {
-   nir_src *offset = nir_get_io_offset_src(io);
-   if (!nir_src_is_const(*offset))
+   if (!nir_def_is_const(offset) || !cb_data->vec4_access)
       return NULL;
 
-   /* nir_io_add_const_offset_to_base guarantees this */
-   assert(nir_src_as_uint(*offset) == 0);
-
-   const uint32_t base = nir_intrinsic_base(io);
-   const uint32_t byte_offset = 16 * base + 4 * io_component(io);
+   const unsigned base = io_base_slot(io, cb_data) +
+                         nir_src_as_uint(nir_src_for_ssa(offset));
+   const uint32_t byte_offset = 16 * base + 4 * io_component(io, cb_data);
    assert((byte_offset % 4) == 0);
 
    const enum mesa_shader_stage stage = b->shader->info.stage;
@@ -201,15 +367,18 @@ try_load_push_input(nir_builder *b,
 static bool
 lower_urb_inputs(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
-   const struct intel_device_info *devinfo = data;
+   const struct brw_lower_urb_cb_data *cb_data = data;
 
    if (intrin->intrinsic == nir_intrinsic_load_input ||
        intrin->intrinsic == nir_intrinsic_load_per_vertex_input) {
       b->cursor = nir_before_instr(&intrin->instr);
+      b->constant_fold_alu = true;
 
-      nir_def *load = try_load_push_input(b, devinfo, intrin);
+      nir_def *offset = urb_offset(b, cb_data, intrin);
+
+      nir_def *load = try_load_push_input(b, cb_data, intrin, offset);
       if (!load) {
-         load = load_urb(b, devinfo, intrin, input_handle(b, intrin),
+         load = load_urb(b, cb_data, intrin, input_handle(b, intrin), offset,
                          ACCESS_CAN_REORDER | ACCESS_NON_WRITEABLE);
       }
       nir_def_replace(&intrin->def, load);
@@ -221,20 +390,25 @@ lower_urb_inputs(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 static bool
 lower_urb_outputs(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
 {
-   const struct intel_device_info *devinfo = data;
+   const struct brw_lower_urb_cb_data *cb_data = data;
 
    b->cursor = nir_before_instr(&intrin->instr);
+   b->constant_fold_alu = true;
 
    nir_def *load = NULL;
 
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_output:
    case nir_intrinsic_load_per_vertex_output:
-      load = load_urb(b, devinfo, intrin, output_handle(b), 0);
+   case nir_intrinsic_load_per_primitive_output:
+      load = load_urb(b, cb_data, intrin, output_handle(b),
+                      urb_offset(b, cb_data, intrin), 0);
       break;
    case nir_intrinsic_store_output:
    case nir_intrinsic_store_per_vertex_output:
-      store_urb(b, devinfo, intrin, output_handle(b));
+   case nir_intrinsic_store_per_primitive_output:
+      store_urb(b, cb_data, intrin, output_handle(b),
+                urb_offset(b, cb_data, intrin));
       break;
    case nir_intrinsic_load_per_view_output:
    case nir_intrinsic_store_per_view_output:
@@ -251,22 +425,60 @@ lower_urb_outputs(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    return true;
 }
 
-static bool
-lower_inputs_to_urb_intrinsics(nir_shader *nir,
-                               const struct intel_device_info *devinfo)
+bool
+brw_nir_lower_inputs_to_urb_intrinsics(nir_shader *nir,
+                                       const struct brw_lower_urb_cb_data *cd)
 {
    return nir_shader_intrinsics_pass(nir, lower_urb_inputs,
-                                     nir_metadata_control_flow,
-                                     (void *) devinfo);
+                                     nir_metadata_control_flow, (void *) cd);
+}
+
+bool
+brw_nir_lower_outputs_to_urb_intrinsics(nir_shader *nir,
+                                        const struct brw_lower_urb_cb_data *cd)
+{
+   return nir_shader_intrinsics_pass(nir, lower_urb_outputs,
+                                     nir_metadata_control_flow, (void *) cd);
 }
 
 static bool
-lower_outputs_to_urb_intrinsics(nir_shader *nir,
-                                const struct intel_device_info *devinfo)
+lower_task_payload_to_urb(nir_builder *b, nir_intrinsic_instr *io, void *data)
 {
-   return nir_shader_intrinsics_pass(nir, lower_urb_outputs,
-                                     nir_metadata_control_flow,
-                                     (void *) devinfo);
+   const struct brw_lower_urb_cb_data *cb_data = data;
+   const enum mesa_shader_stage stage = b->shader->info.stage;
+
+   if (io->intrinsic != nir_intrinsic_load_task_payload &&
+       io->intrinsic != nir_intrinsic_store_task_payload)
+      return false;
+
+   b->cursor = nir_before_instr(&io->instr);
+   b->constant_fold_alu = true;
+
+   /* Convert byte offset to dword offset */
+   nir_def *offset = nir_ishr_imm(b, nir_get_io_offset_src(io)->ssa, 2);
+
+   if (io->intrinsic == nir_intrinsic_store_task_payload) {
+      store_urb(b, cb_data, io, output_handle(b), offset);
+      nir_instr_remove(&io->instr);
+   } else {
+      const bool input = stage == MESA_SHADER_MESH;
+      nir_def *handle = input ? input_handle(b, io) : output_handle(b);
+      nir_def *load = load_urb(b, cb_data, io, handle, offset,
+                               ACCESS_CAN_REORDER |
+                               (input ? ACCESS_NON_WRITEABLE : 0));
+      nir_def_replace(&io->def, load);
+   }
+
+   return true;
+}
+
+static bool
+lower_task_payload_to_urb_intrinsics(nir_shader *nir,
+                                     const struct intel_device_info *devinfo)
+{
+   struct brw_lower_urb_cb_data cb_data = { .devinfo = devinfo };
+   return nir_shader_intrinsics_pass(nir, lower_task_payload_to_urb,
+                                     nir_metadata_control_flow, &cb_data);
 }
 
 static bool
@@ -499,82 +711,6 @@ remap_tess_levels(nir_shader *nir,
                                      nir_metadata_control_flow, &cb);
 }
 
-static bool
-remap_patch_urb_offsets_instr(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
-{
-   const struct intel_vue_map *vue_map = data;
-
-   if (!(b->shader->info.stage == MESA_SHADER_TESS_CTRL && is_output(intrin)) &&
-       !(b->shader->info.stage == MESA_SHADER_TESS_EVAL && is_input(intrin)))
-      return false;
-
-   nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
-   gl_varying_slot varying = io_sem.location;
-
-   int vue_slot = vue_map->varying_to_slot[varying];
-   assert(vue_slot != -1);
-   nir_intrinsic_set_base(intrin, vue_slot);
-
-   nir_src *vertex = nir_get_io_arrayed_index_src(intrin);
-   if (vertex) {
-      b->cursor = nir_before_instr(&intrin->instr);
-
-      bool dyn_tess_config =
-         b->shader->info.stage == MESA_SHADER_TESS_EVAL &&
-         vue_map->layout != INTEL_VUE_LAYOUT_FIXED;
-      nir_def *num_per_vertex_slots =
-         dyn_tess_config ? intel_nir_tess_field(b, PER_VERTEX_SLOTS) :
-         nir_imm_int(b, vue_map->num_per_vertex_slots);
-
-      /* Multiply by the number of per-vertex slots. */
-      nir_def *vertex_offset = nir_imul(b, vertex->ssa, num_per_vertex_slots);
-
-      /* Add it to the existing offset */
-      nir_src *offset = nir_get_io_offset_src(intrin);
-      nir_def *total_offset = nir_iadd(b, vertex_offset, offset->ssa);
-
-      /* In the Tessellation evaluation shader, reposition the offset of
-       * builtins when using separate layout.
-       */
-      if (dyn_tess_config) {
-         if (varying < VARYING_SLOT_VAR0) {
-            nir_def *builtins_offset = intel_nir_tess_field(b, BUILTINS);
-            nir_def *builtins_base_offset = nir_iadd_imm(
-               b, builtins_offset,
-               vue_map->varying_to_slot[varying] - vue_map->builtins_slot_offset);
-
-            total_offset = nir_iadd(b, total_offset, builtins_base_offset);
-         } else {
-            nir_def *vertices_offset = intel_nir_tess_field(b, PER_PATCH_SLOTS);
-            nir_def *vertices_base_offset = nir_iadd_imm(
-               b, vertices_offset,
-               vue_map->varying_to_slot[varying] - vue_map->num_per_patch_slots);
-
-            total_offset = nir_iadd(b, total_offset, vertices_base_offset);
-         }
-         nir_intrinsic_set_base(intrin, 0);
-      }
-
-      nir_src_rewrite(offset, total_offset);
-
-      /* Putting an address into offset_src requires that NIR validation of
-       * IO intrinsics is disabled.
-       */
-      io_sem.no_validate = 1;
-      nir_intrinsic_set_io_semantics(intrin, io_sem);
-   }
-
-   return true;
-}
-
-static bool
-remap_patch_urb_offsets(nir_shader *nir,
-                        const struct intel_vue_map *vue_map)
-{
-   return nir_shader_intrinsics_pass(nir, remap_patch_urb_offsets_instr,
-                                     nir_metadata_control_flow, (void *)vue_map);
-}
-
 /* Replace store_per_view_output to plain store_output, mapping the view index
  * to IO offset. Because we only use per-view outputs for position, the offset
  * pitch is always 1. */
@@ -772,8 +908,8 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
 }
 
 void
-brw_nir_lower_vue_inputs(nir_shader *nir,
-                         const struct intel_vue_map *vue_map)
+brw_nir_lower_gs_inputs(nir_shader *nir,
+                        const struct intel_vue_map *vue_map)
 {
    nir_foreach_shader_in_variable(var, nir)
       var->data.driver_location = var->data.location;
@@ -827,9 +963,6 @@ brw_nir_lower_tes_inputs(nir_shader *nir,
 {
    NIR_PASS(_, nir, nir_lower_tess_level_array_vars_to_vec);
 
-   nir_foreach_shader_in_variable(var, nir)
-      var->data.driver_location = var->data.location;
-
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4,
             nir_lower_io_lower_64bit_to_32);
 
@@ -840,15 +973,17 @@ brw_nir_lower_tes_inputs(nir_shader *nir,
 
    NIR_PASS(_, nir, remap_tess_levels, devinfo,
             nir->info.tess._primitive_mode);
-   NIR_PASS(_, nir, remap_patch_urb_offsets, vue_map);
 
-   /* remap_patch_urb_offsets can add constant math into the shader,
-    * just fold it for the backend.
-    */
-   NIR_PASS(_, nir, nir_opt_algebraic);
-   NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, lower_inputs_to_urb_intrinsics, devinfo);
+   const struct brw_lower_urb_cb_data cb_data = {
+      .devinfo = devinfo,
+      .vec4_access = true,
+      .varying_to_slot = vue_map->varying_to_slot,
+      .per_vertex_stride = vue_map->num_per_vertex_slots * 16,
+      .dynamic_tes = vue_map->layout == INTEL_VUE_LAYOUT_SEPARATE,
+      .tes_builtins_slot_offset = vue_map->builtins_slot_offset,
+      .tes_per_patch_slots = vue_map->num_per_patch_slots,
+   };
+   NIR_PASS(_, nir, brw_nir_lower_inputs_to_urb_intrinsics, &cb_data);
 }
 
 static bool
@@ -1110,9 +1245,19 @@ brw_nir_lower_tcs_inputs(nir_shader *nir,
                          const struct intel_device_info *devinfo,
                          const struct intel_vue_map *input_vue_map)
 {
-   brw_nir_lower_vue_inputs(nir, input_vue_map);
+   /* Inputs are stored in vec4 slots, so use type_size_vec4(). */
+   NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4,
+            nir_lower_io_lower_64bit_to_32);
 
-   NIR_PASS(_, nir, lower_inputs_to_urb_intrinsics, devinfo);
+   /* Fold constant offset srcs for IO. */
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+
+   const struct brw_lower_urb_cb_data cb_data = {
+      .devinfo = devinfo,
+      .vec4_access = true,
+      .varying_to_slot = input_vue_map->varying_to_slot,
+   };
+   NIR_PASS(_, nir, brw_nir_lower_inputs_to_urb_intrinsics, &cb_data);
 }
 
 void
@@ -1124,10 +1269,6 @@ brw_nir_lower_tcs_outputs(nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_tess_level_array_vars_to_vec);
    NIR_PASS(_, nir, nir_opt_combine_stores, nir_var_shader_out);
 
-   nir_foreach_shader_out_variable(var, nir) {
-      var->data.driver_location = var->data.location;
-   }
-
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_out, type_size_vec4,
             nir_lower_io_lower_64bit_to_32);
 
@@ -1137,14 +1278,14 @@ brw_nir_lower_tcs_outputs(nir_shader *nir,
    NIR_PASS(_, nir, nir_opt_constant_folding);
 
    NIR_PASS(_, nir, remap_tess_levels, devinfo, tes_primitive_mode);
-   NIR_PASS(_, nir, remap_patch_urb_offsets, vue_map);
 
-   /* remap_patch_urb_offsets can add constant math into the shader,
-    * just fold it for the backend.
-    */
-   NIR_PASS(_, nir, nir_opt_constant_folding);
-
-   NIR_PASS(_, nir, lower_outputs_to_urb_intrinsics, devinfo);
+   const struct brw_lower_urb_cb_data cb_data = {
+      .devinfo = devinfo,
+      .vec4_access = true,
+      .varying_to_slot = vue_map->varying_to_slot,
+      .per_vertex_stride = vue_map->num_per_vertex_slots * 16,
+   };
+   NIR_PASS(_, nir, brw_nir_lower_outputs_to_urb_intrinsics, &cb_data);
 }
 
 void
@@ -2462,6 +2603,12 @@ brw_postprocess_nir_opts(nir_shader *nir, const struct brw_compiler *compiler,
 
    brw_vectorize_lower_mem_access(nir, compiler, robust_flags);
 
+   /* Do this after lowering memory access bit-sizes */
+   if (nir->info.stage == MESA_SHADER_MESH ||
+       nir->info.stage == MESA_SHADER_TASK) {
+      OPT(lower_task_payload_to_urb_intrinsics, devinfo);
+   }
+
    /* Needs to be prior int64 lower because it generates 64bit address
     * manipulations
     */
@@ -2670,15 +2817,6 @@ brw_postprocess_nir_out_of_ssa(nir_shader *nir,
 
    if (OPT(nir_opt_rematerialize_compares))
       OPT(nir_opt_dce);
-
-   /* The mesh stages require this pass to be called at the last minute,
-    * but if anything is done by it, it will also constant fold, and that
-    * undoes the work done by nir_trivialize_registers, so call it right
-    * before that one instead.
-    */
-   if (nir->info.stage == MESA_SHADER_MESH ||
-       nir->info.stage == MESA_SHADER_TASK)
-      brw_nir_adjust_payload(nir);
 
    nir_trivialize_registers(nir);
 

@@ -940,10 +940,6 @@ brw_generator::generate_code(const brw_shader &s,
          brw_SRND(p, dst, src[0], src[1]);
          break;
 
-      case BRW_OPCODE_LINE:
-         brw_LINE(p, dst, src[0], src[1]);
-         break;
-
       case BRW_OPCODE_DPAS: {
          assert(devinfo->verx10 >= 125);
          const brw_dpas_inst *dpas = inst->as_dpas();
@@ -1009,12 +1005,10 @@ brw_generator::generate_code(const brw_shader &s,
 	 break;
       case BRW_OPCODE_ROL:
 	 assert(devinfo->ver >= 11);
-	 assert(src[0].type == dst.type);
 	 brw_ROL(p, dst, src[0], src[1]);
 	 break;
       case BRW_OPCODE_ROR:
 	 assert(devinfo->ver >= 11);
-	 assert(src[0].type == dst.type);
 	 brw_ROR(p, dst, src[0], src[1]);
 	 break;
       case BRW_OPCODE_CMP:

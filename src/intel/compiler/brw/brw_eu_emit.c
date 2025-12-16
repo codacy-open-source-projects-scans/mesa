@@ -918,104 +918,12 @@ ALU2(ADDC)
 ALU2(SUBB)
 ALU3(ADD3)
 ALU1(MOV)
-
-brw_eu_inst *
-brw_ADD(struct brw_codegen *p, struct brw_reg dest,
-        struct brw_reg src0, struct brw_reg src1)
-{
-   /* 6.2.2: add */
-   if (src0.type == BRW_TYPE_F ||
-       (src0.file == IMM &&
-	src0.type == BRW_TYPE_VF)) {
-      assert(src1.type != BRW_TYPE_UD);
-      assert(src1.type != BRW_TYPE_D);
-   }
-
-   if (src1.type == BRW_TYPE_F ||
-       (src1.file == IMM &&
-	src1.type == BRW_TYPE_VF)) {
-      assert(src0.type != BRW_TYPE_UD);
-      assert(src0.type != BRW_TYPE_D);
-   }
-
-   return brw_alu2(p, BRW_OPCODE_ADD, dest, src0, src1);
-}
-
-brw_eu_inst *
-brw_AVG(struct brw_codegen *p, struct brw_reg dest,
-        struct brw_reg src0, struct brw_reg src1)
-{
-   assert(dest.type == src0.type);
-   assert(src0.type == src1.type);
-   switch (src0.type) {
-   case BRW_TYPE_B:
-   case BRW_TYPE_UB:
-   case BRW_TYPE_W:
-   case BRW_TYPE_UW:
-   case BRW_TYPE_D:
-   case BRW_TYPE_UD:
-      break;
-   default:
-      UNREACHABLE("Bad type for brw_AVG");
-   }
-
-   return brw_alu2(p, BRW_OPCODE_AVG, dest, src0, src1);
-}
-
-brw_eu_inst *
-brw_MUL(struct brw_codegen *p, struct brw_reg dest,
-        struct brw_reg src0, struct brw_reg src1)
-{
-   /* 6.32.38: mul */
-   if (src0.type == BRW_TYPE_D ||
-       src0.type == BRW_TYPE_UD ||
-       src1.type == BRW_TYPE_D ||
-       src1.type == BRW_TYPE_UD) {
-      assert(dest.type != BRW_TYPE_F);
-   }
-
-   if (src0.type == BRW_TYPE_F ||
-       (src0.file == IMM &&
-	src0.type == BRW_TYPE_VF)) {
-      assert(src1.type != BRW_TYPE_UD);
-      assert(src1.type != BRW_TYPE_D);
-   }
-
-   if (src1.type == BRW_TYPE_F ||
-       (src1.file == IMM &&
-	src1.type == BRW_TYPE_VF)) {
-      assert(src0.type != BRW_TYPE_UD);
-      assert(src0.type != BRW_TYPE_D);
-   }
-
-   assert(!brw_reg_is_arf(src0, BRW_ARF_ACCUMULATOR));
-   assert(!brw_reg_is_arf(src1, BRW_ARF_ACCUMULATOR));
-
-   return brw_alu2(p, BRW_OPCODE_MUL, dest, src0, src1);
-}
-
-brw_eu_inst *
-brw_LINE(struct brw_codegen *p, struct brw_reg dest,
-         struct brw_reg src0, struct brw_reg src1)
-{
-   src0.vstride = BRW_VERTICAL_STRIDE_0;
-   src0.width = BRW_WIDTH_1;
-   src0.hstride = BRW_HORIZONTAL_STRIDE_0;
-   return brw_alu2(p, BRW_OPCODE_LINE, dest, src0, src1);
-}
-
-brw_eu_inst *
-brw_PLN(struct brw_codegen *p, struct brw_reg dest,
-        struct brw_reg src0, struct brw_reg src1)
-{
-   src0.vstride = BRW_VERTICAL_STRIDE_0;
-   src0.width = BRW_WIDTH_1;
-   src0.hstride = BRW_HORIZONTAL_STRIDE_0;
-   src1.vstride = BRW_VERTICAL_STRIDE_8;
-   src1.width = BRW_WIDTH_8;
-   src1.hstride = BRW_HORIZONTAL_STRIDE_1;
-   return brw_alu2(p, BRW_OPCODE_PLN, dest, src0, src1);
-}
+ALU2(MUL)
+ALU2(AVG)
+ALU2(ADD)
+ALU2(SRND)
+ALU2(LINE)
+ALU2(PLN)
 
 brw_eu_inst *
 brw_DPAS(struct brw_codegen *p, enum gfx12_systolic_depth sdepth,
@@ -1024,15 +932,6 @@ brw_DPAS(struct brw_codegen *p, enum gfx12_systolic_depth sdepth,
 {
    return brw_dpas_three_src(p, BRW_OPCODE_DPAS, sdepth, rcount, dest, src0,
                              src1, src2);
-}
-
-brw_eu_inst *
-brw_SRND(struct brw_codegen *p, struct brw_reg dest,
-         struct brw_reg src0, struct brw_reg src1)
-{
-   assert(dest.type == BRW_TYPE_HF);
-   assert(src0.type == BRW_TYPE_F);
-   return brw_alu2(p, BRW_OPCODE_SRND, dest, src0, src1);
 }
 
 void brw_NOP(struct brw_codegen *p)
@@ -1399,30 +1298,7 @@ void gfx6_math(struct brw_codegen *p,
    const struct intel_device_info *devinfo = p->devinfo;
    brw_eu_inst *insn = next_insn(p, BRW_OPCODE_MATH);
 
-   assert(dest.file == FIXED_GRF);
-
    assert(dest.hstride == BRW_HORIZONTAL_STRIDE_1);
-
-   if (function == BRW_MATH_FUNCTION_INT_DIV_QUOTIENT ||
-       function == BRW_MATH_FUNCTION_INT_DIV_REMAINDER ||
-       function == BRW_MATH_FUNCTION_INT_DIV_QUOTIENT_AND_REMAINDER) {
-      assert(src0.type != BRW_TYPE_F);
-      assert(src1.type != BRW_TYPE_F);
-      assert(src1.file == FIXED_GRF ||
-             src1.file == IMM);
-      /* From BSpec 6647/47428 "[Instruction] Extended Math Function":
-       *     INT DIV function does not support source modifiers.
-       */
-      assert(!src0.negate);
-      assert(!src0.abs);
-      assert(!src1.negate);
-      assert(!src1.abs);
-   } else {
-      assert(src0.type == BRW_TYPE_F ||
-             (src0.type == BRW_TYPE_HF && devinfo->ver >= 9));
-      assert(src1.type == BRW_TYPE_F ||
-             (src1.type == BRW_TYPE_HF && devinfo->ver >= 9));
-   }
 
   /* This workaround says that we cannot use scalar broadcast with HF types.
    * However, for is_scalar values, all 16 elements contain the same value, so
