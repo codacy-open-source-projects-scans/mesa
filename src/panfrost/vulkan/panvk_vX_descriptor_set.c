@@ -307,6 +307,7 @@ panvk_destroy_descriptor_pool(struct panvk_device *device,
       util_vma_heap_finish(&pool->desc_heap);
       panvk_priv_bo_unref(pool->desc_bo);
    } else if (pool->host_only_mem) {
+      util_vma_heap_finish(&pool->desc_heap);
       vk_free2(&device->vk.alloc, pAllocator, (void *)pool->host_only_mem);
       pool->host_only_mem = 0;
    }
@@ -381,7 +382,7 @@ panvk_per_arch(CreateDescriptorPool)(
    }
 
    /* initialize to all ones to indicate all sets are free */
-   BITSET_SET_RANGE(free_sets, 0, pCreateInfo->maxSets - 1);
+   BITSET_SET_COUNT(free_sets, 0, pCreateInfo->maxSets);
    pool->free_sets = free_sets;
    pool->sets = sets;
    pool->max_sets = pCreateInfo->maxSets;
@@ -641,7 +642,7 @@ panvk_per_arch(ResetDescriptorPool)(VkDevice _device, VkDescriptorPool _pool,
    for (uint32_t i = 0; i < pool->max_sets; i++)
       panvk_desc_pool_free_set(pool, &pool->sets[i]);
 
-   BITSET_SET_RANGE(pool->free_sets, 0, pool->max_sets - 1);
+   BITSET_SET_COUNT(pool->free_sets, 0, pool->max_sets);
    return VK_SUCCESS;
 }
 
