@@ -788,9 +788,7 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
   rustc = meson.get_compiler('rust')
   rust = import('rust')
 
-  # Keep this in sync with the MINIMUM_SUPPORTED_RUST_VERSION in
-  # .gitlab-ci/container/build-rust.sh and the `rustup default` line in
-  # .gitlab-ci/meson/build.sh
+  # Keep this in sync with the `msrv` in clippy.toml
   if rustc.version().version_compare('< 1.82')
     error('Mesa requires Rust 1.82.0 or newer')
   endif
@@ -821,6 +819,19 @@ if with_gallium_rusticl or with_nouveau_vk or with_tools.contains('etnaviv') or 
   if rustc.version().version_compare('>= 1.88')
     bindgen_output_args += ['--raw-line', '#![allow(unnecessary_transmutes)]']
   endif
+
+  rust_global_args = [
+    # We want to be able to write `else { if {} }` when it makes more sense than
+    # collapsing it into `else if {}`.
+    '-Aclippy::collapsible_else_if',
+
+    # "Needless lifetimes" might be needless but they're harmless and we
+    # prefer being explicit, so allow them.
+    '-Aclippy::needless_lifetimes',
+
+    # Being explicit has value, allow it.
+    '-Aclippy::question_mark',
+  ]
 
   rust_2024_lint_args = [
     '-Dboxed_slice_into_iter',

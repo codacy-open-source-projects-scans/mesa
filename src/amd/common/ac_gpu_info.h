@@ -20,6 +20,7 @@ extern "C" {
 #define AMD_MAX_WGP        60
 
 struct amdgpu_gpu_info;
+struct drm_amdgpu_info_device;
 
 struct amd_ip_info {
    uint8_t ver_major;
@@ -29,6 +30,46 @@ struct amd_ip_info {
    uint8_t num_instances;
    uint32_t ib_alignment;
    uint32_t ib_pad_dw_mask;
+};
+
+struct ac_cu_info {
+   uint32_t max_waves_per_simd;
+   uint32_t num_physical_sgprs_per_simd;
+   uint32_t num_physical_wave64_vgprs_per_simd;
+   uint32_t num_simd_per_compute_unit;
+   uint32_t min_sgpr_alloc;
+   uint32_t max_sgpr_alloc;
+   uint32_t sgpr_alloc_granularity;
+   uint32_t min_wave64_vgpr_alloc;
+   uint32_t max_vgpr_alloc;
+   uint32_t wave64_vgpr_alloc_granularity;
+
+   /* Flags */
+   bool has_lds_bank_count_16 : 1;
+   bool has_sram_ecc_enabled : 1;
+   /* Whether image_sample* instructions can be either a sampler or no-sampler access.*/
+   bool has_point_sample_accel : 1;
+   bool has_fast_fma32 : 1;
+   /* Whether chips support fused v_fma_mix* instructions.
+    * Otherwise, unfused v_mad_mix* is available on GFX9.
+    */
+   bool has_fma_mix : 1;
+   /* Whether chips support unfused multiply-add instructions. */
+   bool has_mad32 : 1;
+   /* Whether chips support double rate packed math instructions. */
+   bool has_packed_math_16bit : 1;
+   /* Whether chips support dot product instructions. A subset of these support a smaller
+    * instruction encoding which accumulates with the destination.
+    */
+   bool has_accelerated_dot_product : 1;
+   /* Device supports hardware-accelerated raytracing using
+    * image_bvh*_intersect_ray instructions
+    */
+   bool has_image_bvh_intersect_ray : 1;
+   /* Some GFX6 GPUs have a bug where it only looks at the x writemask component. */
+   bool has_gfx6_mrt_export_bug : 1;
+   /* Pre-GFX9: A bug where the alpha component of 10_10_10_2 formats is always unsigned.*/
+   bool has_vtx_format_alpha_adjust_bug : 1;
 };
 
 struct radeon_info {
@@ -87,8 +128,6 @@ struct radeon_info {
    bool rbplus_allowed; /* if RB+ is allowed */
    bool has_load_ctx_reg_pkt;
    bool has_out_of_order_rast;
-   bool has_packed_math_16bit;
-   bool has_accelerated_dot_product;
    bool cpdma_prefetch_writes_memory;
    bool has_gfx9_scissor_bug;
    bool has_htile_stencil_mipmap_bug;
@@ -273,6 +312,7 @@ struct radeon_info {
    bool uses_kernel_cu_mask;
 
    /* Shader cores. */
+   struct ac_cu_info cu_info;
    uint16_t cu_mask[AMD_MAX_SE][AMD_MAX_SA_PER_SE];
    uint32_t r600_max_quad_pipes; /* wave size / 16 */
    uint32_t max_good_cu_per_sa;
@@ -280,16 +320,6 @@ struct radeon_info {
    uint32_t max_se;             /* number of shader engines incl. disabled ones */
    uint32_t max_sa_per_se;      /* shader arrays per shader engine */
    uint32_t num_cu_per_sh;
-   uint32_t max_waves_per_simd;
-   uint32_t num_physical_sgprs_per_simd;
-   uint32_t num_physical_wave64_vgprs_per_simd;
-   uint32_t num_simd_per_compute_unit;
-   uint32_t min_sgpr_alloc;
-   uint32_t max_sgpr_alloc;
-   uint32_t sgpr_alloc_granularity;
-   uint32_t min_wave64_vgpr_alloc;
-   uint32_t max_vgpr_alloc;
-   uint32_t wave64_vgpr_alloc_granularity;
    uint32_t scratch_wavesize_granularity_shift;
    uint32_t scratch_wavesize_granularity;
    uint32_t max_scratch_waves;
@@ -345,11 +375,6 @@ struct radeon_info {
       uint32_t sdma_csa_size;
       uint32_t sdma_csa_alignment;
    } fw_based_mcbp;
-
-   /* Device supports hardware-accelerated raytracing using
-    * image_bvh*_intersect_ray instructions
-    */
-   bool has_image_bvh_intersect_ray;
 };
 
 enum ac_query_gpu_info_result {
@@ -360,6 +385,7 @@ enum ac_query_gpu_info_result {
 
 enum ac_query_gpu_info_result ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
                                                 bool require_pci_bus_info);
+void ac_fill_cu_info(struct radeon_info *info, struct drm_amdgpu_info_device *device_info);
 
 void ac_compute_driver_uuid(char *uuid, size_t size);
 

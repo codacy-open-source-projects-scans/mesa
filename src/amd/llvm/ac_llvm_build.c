@@ -1139,7 +1139,8 @@ LLVMValueRef ac_build_safe_tbuffer_load(struct ac_llvm_context *ctx, LLVMValueRe
                                         enum gl_access_qualifier access,
                                         bool can_speculate)
 {
-   const struct ac_vtx_format_info *vtx_info = ac_get_vtx_format_info(ctx->gfx_level, ctx->info->family, format);
+   const struct ac_vtx_format_info *vtx_info =
+      ac_get_vtx_format_info(ctx->gfx_level, ctx->info->cu_info.has_vtx_format_alpha_adjust_bug, format);
    const unsigned max_channels = vtx_info->num_channels;
    LLVMValueRef voffset_plus_const =
       LLVMBuildAdd(ctx->builder, base_voffset, LLVMConstInt(ctx->i32, const_offset, 0), "");
@@ -1470,8 +1471,7 @@ void ac_build_export(struct ac_llvm_context *ctx, struct ac_export_args *a)
     * X writemask component.
     */
    unsigned enabled_channels = a->enabled_channels;
-   if (ctx->gfx_level == GFX6 && ctx->info->family != CHIP_OLAND &&
-       ctx->info->family  != CHIP_HAINAN && enabled_channels &&
+   if (ctx->info->cu_info.has_gfx6_mrt_export_bug && enabled_channels &&
        a->target <= V_008DFC_SQ_EXP_MRTZ) {
       enabled_channels |= 1;
    }

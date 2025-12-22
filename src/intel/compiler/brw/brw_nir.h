@@ -186,6 +186,9 @@ void brw_nir_lower_fs_barycentrics(nir_shader *shader);
 struct brw_lower_urb_cb_data {
    const struct intel_device_info *devinfo;
 
+   /** Maximum amount of pushed data in bytes */
+   unsigned max_push_bytes;
+
    /* If true, all access is guaranteed to be vec4 (128-bit) aligned.
     * offset and base are in units of 128-bit vec4 slots.
     *
@@ -232,7 +235,9 @@ bool brw_nir_lower_outputs_to_urb_intrinsics(nir_shader *, const struct brw_lowe
 
 void brw_nir_lower_vs_inputs(nir_shader *nir);
 void brw_nir_lower_gs_inputs(nir_shader *nir,
-                             const struct intel_vue_map *vue_map);
+                             const struct intel_device_info *devinfo,
+                             const struct intel_vue_map *vue_map,
+                             unsigned *out_urb_read_length);
 void brw_nir_lower_tes_inputs(nir_shader *nir,
                               const struct intel_device_info *devinfo,
                               const struct intel_vue_map *vue);

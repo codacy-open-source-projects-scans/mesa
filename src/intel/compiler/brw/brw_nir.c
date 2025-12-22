@@ -345,21 +345,29 @@ try_load_push_input(nir_builder *b,
                     nir_intrinsic_instr *io,
                     nir_def *offset)
 {
-   if (!nir_def_is_const(offset) || !cb_data->vec4_access)
+   const enum mesa_shader_stage stage = b->shader->info.stage;
+
+   if (!nir_def_is_const(offset))
       return NULL;
 
-   const unsigned base = io_base_slot(io, cb_data) +
-                         nir_src_as_uint(nir_src_for_ssa(offset));
-   const uint32_t byte_offset = 16 * base + 4 * io_component(io, cb_data);
+   const unsigned offset_unit = cb_data->vec4_access ? 16 : 4;
+   uint32_t byte_offset =
+      16 * io_base_slot(io, cb_data) + 4 * io_component(io, cb_data) +
+      offset_unit * nir_src_as_uint(nir_src_for_ssa(offset));
    assert((byte_offset % 4) == 0);
 
-   const enum mesa_shader_stage stage = b->shader->info.stage;
-   static const unsigned max_push_bytes[MESA_SHADER_MESH + 1] = {
-      [MESA_SHADER_TESS_EVAL] = 32 * 16 /* 32 vec4s */
-   };
-
-   if (byte_offset >= max_push_bytes[stage])
+   if (byte_offset >= cb_data->max_push_bytes)
       return NULL;
+
+   if (stage == MESA_SHADER_GEOMETRY) {
+      /* GS push inputs still use load_per_vertex_input */
+      const nir_io_semantics io_sem = nir_intrinsic_io_semantics(io);
+      const int slot = cb_data->varying_to_slot[io_sem.location];
+      assert(slot != -1);
+      nir_intrinsic_set_base(io, slot);
+      nir_intrinsic_set_component(io, io_component(io, cb_data));
+      return &io->def;
+   }
 
    return load_push_input(b, io, byte_offset);
 }
@@ -381,7 +389,8 @@ lower_urb_inputs(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
          load = load_urb(b, cb_data, intrin, input_handle(b, intrin), offset,
                          ACCESS_CAN_REORDER | ACCESS_NON_WRITEABLE);
       }
-      nir_def_replace(&intrin->def, load);
+      if (load != &intrin->def)
+         nir_def_replace(&intrin->def, load);
       return true;
    }
    return false;
@@ -909,11 +918,10 @@ brw_nir_lower_vs_inputs(nir_shader *nir)
 
 void
 brw_nir_lower_gs_inputs(nir_shader *nir,
-                        const struct intel_vue_map *vue_map)
+                        const struct intel_device_info *devinfo,
+                        const struct intel_vue_map *vue_map,
+                        unsigned *out_urb_read_length)
 {
-   nir_foreach_shader_in_variable(var, nir)
-      var->data.driver_location = var->data.location;
-
    /* Inputs are stored in vec4 slots, so use type_size_vec4(). */
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in, type_size_vec4,
             nir_lower_io_lower_64bit_to_32);
@@ -921,39 +929,36 @@ brw_nir_lower_gs_inputs(nir_shader *nir,
    /* Fold constant offset srcs for IO. */
    NIR_PASS(_, nir, nir_opt_constant_folding);
 
-   nir_foreach_function_impl(impl, nir) {
-      nir_foreach_block(block, impl) {
-         nir_foreach_instr(instr, block) {
-            if (instr->type != nir_instr_type_intrinsic)
-               continue;
+   unsigned urb_read_length = 0;
 
-            nir_intrinsic_instr *intrin = nir_instr_as_intrinsic(instr);
+   if (nir->info.gs.invocations == 1) {
+      /* URB read length is in 256-bit units, which is two vec4s. */
+      urb_read_length = DIV_ROUND_UP(vue_map->num_slots, 2);
 
-            if (intrin->intrinsic == nir_intrinsic_load_input ||
-                intrin->intrinsic == nir_intrinsic_load_per_vertex_input) {
-               /* Offset 0 is the VUE header, which contains
-                * VARYING_SLOT_LAYER [.y], VARYING_SLOT_VIEWPORT [.z], and
-                * VARYING_SLOT_PSIZ [.w].
-                */
-               nir_io_semantics io_sem = nir_intrinsic_io_semantics(intrin);
-               gl_varying_slot varying = io_sem.location;
-               int vue_slot;
-               switch (varying) {
-               case VARYING_SLOT_PSIZ:
-                  nir_intrinsic_set_base(intrin, 0);
-                  nir_intrinsic_set_component(intrin, 3);
-                  break;
+      /* Because we're operating in scalar mode, the two vec4s take
+       * up 8 registers.  Additionally, the GS reads URB Read Length
+       * for each vertex being processed, each unit of read length
+       * takes up 8 * VerticesIn registers.
+       */
+      const unsigned regs_per_read = 8 * nir->info.gs.vertices_in;
 
-               default:
-                  vue_slot = vue_map->varying_to_slot[varying];
-                  assert(vue_slot != -1);
-                  nir_intrinsic_set_base(intrin, vue_slot);
-                  break;
-               }
-            }
-         }
-      }
+      /* Limit to 24 registers worth of pushed inputs */
+      const unsigned max_push_regs = 24;
+
+      if (urb_read_length * regs_per_read > max_push_regs)
+         urb_read_length = max_push_regs / regs_per_read;
    }
+
+   *out_urb_read_length = urb_read_length;
+
+   const struct brw_lower_urb_cb_data cb_data = {
+      .devinfo = devinfo,
+      .vec4_access = true,
+      /* pushed bytes per vertex */
+      .max_push_bytes = urb_read_length * 8 * sizeof(uint32_t),
+      .varying_to_slot = vue_map->varying_to_slot,
+   };
+   NIR_PASS(_, nir, brw_nir_lower_inputs_to_urb_intrinsics, &cb_data);
 }
 
 void
@@ -977,6 +982,7 @@ brw_nir_lower_tes_inputs(nir_shader *nir,
    const struct brw_lower_urb_cb_data cb_data = {
       .devinfo = devinfo,
       .vec4_access = true,
+      .max_push_bytes = 32 * 16, /* 32 vec4s */
       .varying_to_slot = vue_map->varying_to_slot,
       .per_vertex_stride = vue_map->num_per_vertex_slots * 16,
       .dynamic_tes = vue_map->layout == INTEL_VUE_LAYOUT_SEPARATE,
@@ -2544,13 +2550,11 @@ brw_postprocess_nir_opts(nir_shader *nir, const struct brw_compiler *compiler,
    if (OPT(nir_lower_tex, &tex_options))
       OPT(nir_lower_tex, &tex_options);
 
-   /* MCS lowering can introduce u2u16 conversions. We need to lower those to
-    * make constant offsets detectable by brw_nir_texture_backend_opcode().
-    */
-   if (OPT(brw_nir_lower_mcs_fetch, devinfo))
-      OPT(nir_opt_constant_folding);
-
+   OPT(brw_nir_lower_mcs_fetch, devinfo);
    OPT(intel_nir_lower_sparse_intrinsics);
+
+   /* Any constants leftover should be folded so we have constant textures */
+   OPT(nir_opt_constant_folding);
 
    /* Needs to happen before the backend opcode selection */
    OPT(brw_nir_pre_lower_texture);
@@ -3043,18 +3047,20 @@ enum brw_reg_type
 brw_type_for_base_type(enum glsl_base_type base_type)
 {
    switch (base_type) {
-   case GLSL_TYPE_UINT:      return BRW_TYPE_UD;
-   case GLSL_TYPE_INT:       return BRW_TYPE_D;
-   case GLSL_TYPE_FLOAT:     return BRW_TYPE_F;
-   case GLSL_TYPE_FLOAT16:   return BRW_TYPE_HF;
-   case GLSL_TYPE_BFLOAT16:  return BRW_TYPE_BF;
-   case GLSL_TYPE_DOUBLE:    return BRW_TYPE_DF;
-   case GLSL_TYPE_UINT16:    return BRW_TYPE_UW;
-   case GLSL_TYPE_INT16:     return BRW_TYPE_W;
-   case GLSL_TYPE_UINT8:     return BRW_TYPE_UB;
-   case GLSL_TYPE_INT8:      return BRW_TYPE_B;
-   case GLSL_TYPE_UINT64:    return BRW_TYPE_UQ;
-   case GLSL_TYPE_INT64:     return BRW_TYPE_Q;
+   case GLSL_TYPE_UINT:         return BRW_TYPE_UD;
+   case GLSL_TYPE_INT:          return BRW_TYPE_D;
+   case GLSL_TYPE_FLOAT:        return BRW_TYPE_F;
+   case GLSL_TYPE_FLOAT16:      return BRW_TYPE_HF;
+   case GLSL_TYPE_BFLOAT16:     return BRW_TYPE_BF;
+   case GLSL_TYPE_FLOAT_E4M3FN: return BRW_TYPE_HF8;
+   case GLSL_TYPE_FLOAT_E5M2:   return BRW_TYPE_BF8;
+   case GLSL_TYPE_DOUBLE:       return BRW_TYPE_DF;
+   case GLSL_TYPE_UINT16:       return BRW_TYPE_UW;
+   case GLSL_TYPE_INT16:        return BRW_TYPE_W;
+   case GLSL_TYPE_UINT8:        return BRW_TYPE_UB;
+   case GLSL_TYPE_INT8:         return BRW_TYPE_B;
+   case GLSL_TYPE_UINT64:       return BRW_TYPE_UQ;
+   case GLSL_TYPE_INT64:        return BRW_TYPE_Q;
 
    default:
       UNREACHABLE("invalid base type");

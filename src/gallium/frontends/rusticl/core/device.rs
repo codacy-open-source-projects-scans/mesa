@@ -30,7 +30,6 @@ use std::convert::TryInto;
 use std::env;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::mem::transmute;
 use std::num::NonZeroU64;
 use std::ops::Deref;
 use std::os::raw::*;
@@ -107,9 +106,9 @@ impl DeviceCaps {
         Self {
             has_images: has_images,
             has_timestamp: cap_timestamp && timer_resolution > 0,
-            image_2d_size: has_images.then_some(image_2d_size).unwrap_or_default(),
-            max_read_images: has_images.then_some(max_read_images).unwrap_or_default(),
-            max_write_images: has_images.then_some(max_write_images).unwrap_or_default(),
+            image_2d_size: if has_images { image_2d_size } else { 0 },
+            max_read_images: if has_images { max_read_images } else { 0 },
+            max_write_images: if has_images { max_write_images } else { 0 },
             timer_resolution: timer_resolution,
             has_create_fence_fd: ctx.is_create_fence_fd_supported(),
             ..Default::default()
@@ -1421,7 +1420,7 @@ pub fn get_devs_for_type(device_type: cl_device_type) -> Vec<&'static Device> {
 
 pub fn get_dev_for_uuid(uuid: [c_char; UUID_SIZE]) -> Option<&'static Device> {
     devs().iter().find(|d| {
-        let uuid: [c_uchar; UUID_SIZE] = unsafe { transmute(uuid) };
+        let uuid: [c_uchar; UUID_SIZE] = uuid.map(|val| val as c_uchar);
         uuid == d.screen().device_uuid().unwrap()
     })
 }

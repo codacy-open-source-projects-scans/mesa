@@ -338,71 +338,72 @@ tu_push_consts_type(const struct tu_pipeline_layout *layout,
    }
 }
 
-template <chip CHIP>
-struct xs_config {
-   uint16_t reg_sp_xs_config;
-   uint16_t reg_hlsq_xs_ctrl;
-};
+static uint32_t
+sp_xs_config(const struct ir3_shader_variant *v)
+{
+   if (!v)
+      return 0;
 
-template <chip CHIP>
-static const xs_config<CHIP> xs_configs[] = {
-   [MESA_SHADER_VERTEX] = {
-      REG_A6XX_SP_VS_CONFIG,
-      CHIP == A6XX ? REG_A6XX_SP_VS_CONST_CONFIG : REG_A7XX_SP_VS_CONST_CONFIG,
-   },
-   [MESA_SHADER_TESS_CTRL] = {
-      REG_A6XX_SP_HS_CONFIG,
-      CHIP == A6XX ? REG_A6XX_SP_HS_CONST_CONFIG : REG_A7XX_SP_HS_CONST_CONFIG,
-   },
-   [MESA_SHADER_TESS_EVAL] = {
-      REG_A6XX_SP_DS_CONFIG,
-      CHIP == A6XX ? REG_A6XX_SP_DS_CONST_CONFIG : REG_A7XX_SP_DS_CONST_CONFIG,
-   },
-   [MESA_SHADER_GEOMETRY] = {
-      REG_A6XX_SP_GS_CONFIG,
-      CHIP == A6XX ? REG_A6XX_SP_GS_CONST_CONFIG : REG_A7XX_SP_GS_CONST_CONFIG,
-   },
-   [MESA_SHADER_FRAGMENT] = {
-      REG_A6XX_SP_PS_CONFIG,
-      CHIP == A6XX ? REG_A6XX_SP_PS_CONST_CONFIG : REG_A7XX_SP_PS_CONST_CONFIG,
-   },
-   [MESA_SHADER_COMPUTE] = {
-      REG_A6XX_SP_CS_CONFIG,
-      CHIP == A6XX ? REG_A6XX_SP_CS_CONST_CONFIG : REG_A7XX_SP_CS_CONST_CONFIG,
-   },
-};
+   return A6XX_SP_VS_CONFIG_ENABLED |
+         COND(v->bindless_tex, A6XX_SP_VS_CONFIG_BINDLESS_TEX) |
+         COND(v->bindless_samp, A6XX_SP_VS_CONFIG_BINDLESS_SAMP) |
+         COND(v->bindless_ibo, A6XX_SP_VS_CONFIG_BINDLESS_UAV) |
+         COND(v->bindless_ubo, A6XX_SP_VS_CONFIG_BINDLESS_UBO) |
+         A6XX_SP_VS_CONFIG_NUAV(ir3_shader_num_uavs(v)) |
+         A6XX_SP_VS_CONFIG_NTEX(v->num_samp) |
+         A6XX_SP_VS_CONFIG_NSAMP(v->num_samp);
+}
+
+static bool
+push_shared_consts(const struct ir3_shader_variant *v)
+{
+   return v && v->shader_options.push_consts_type == IR3_PUSH_CONSTS_SHARED_PREAMBLE;
+}
 
 template <chip CHIP>
 void
-tu6_emit_xs_config(struct tu_crb &crb,
-                   mesa_shader_stage stage, /* xs->type, but xs may be NULL */
-                   const struct ir3_shader_variant *xs)
+tu6_emit_xs_config(struct tu_crb &crb, struct tu_shader_stages stages)
 {
-   const struct xs_config<CHIP> *cfg = &xs_configs<CHIP>[stage];
+   if (stages.cs) {
+      crb.add(SP_CS_CONST_CONFIG(CHIP,
+         .constlen = stages.cs->constlen,
+         .enabled = true,
+         .read_imm_shared_consts = push_shared_consts(stages.cs),
+      ));
+      crb.add(A6XX_SP_CS_CONFIG(.dword = sp_xs_config(stages.cs)));
+   } else {
+      crb.add(SP_VS_CONST_CONFIG(CHIP,
+         .constlen = COND(stages.vs, stages.vs->constlen),
+         .enabled = stages.vs,
+         .read_imm_shared_consts = push_shared_consts(stages.vs),
+      ));
+      crb.add(SP_HS_CONST_CONFIG(CHIP,
+         .constlen = COND(stages.hs, stages.hs->constlen),
+         .enabled = stages.hs,
+         .read_imm_shared_consts = push_shared_consts(stages.hs),
+      ));
+      crb.add(SP_DS_CONST_CONFIG(CHIP,
+         .constlen = COND(stages.ds, stages.ds->constlen),
+         .enabled = stages.ds,
+         .read_imm_shared_consts = push_shared_consts(stages.ds),
+      ));
+      crb.add(SP_GS_CONST_CONFIG(CHIP,
+         .constlen = COND(stages.gs, stages.gs->constlen),
+         .enabled = stages.gs,
+         .read_imm_shared_consts = push_shared_consts(stages.gs),
+      ));
+      crb.add(SP_PS_CONST_CONFIG(CHIP,
+         .constlen = COND(stages.fs, stages.fs->constlen),
+         .enabled = stages.fs,
+         .read_imm_shared_consts = push_shared_consts(stages.fs),
+      ));
 
-   if (!xs) {
-      /* shader stage disabled */
-      crb.add(tu_reg_value { .reg = cfg->reg_sp_xs_config, .value = 0 });
-      crb.add(tu_reg_value { .reg = cfg->reg_hlsq_xs_ctrl, .value = 0 });
-      return;
+      crb.add(A6XX_SP_VS_CONFIG(.dword = sp_xs_config(stages.vs)));
+      crb.add(A6XX_SP_HS_CONFIG(.dword = sp_xs_config(stages.hs)));
+      crb.add(A6XX_SP_DS_CONFIG(.dword = sp_xs_config(stages.ds)));
+      crb.add(A6XX_SP_GS_CONFIG(.dword = sp_xs_config(stages.gs)));
+      crb.add(A6XX_SP_PS_CONFIG(.dword = sp_xs_config(stages.fs)));
    }
-
-   crb.add(tu_reg_value {
-      .reg = cfg->reg_sp_xs_config,
-      .value = A6XX_SP_VS_CONFIG_ENABLED |
-               COND(xs->bindless_tex, A6XX_SP_VS_CONFIG_BINDLESS_TEX) |
-               COND(xs->bindless_samp, A6XX_SP_VS_CONFIG_BINDLESS_SAMP) |
-               COND(xs->bindless_ibo, A6XX_SP_VS_CONFIG_BINDLESS_UAV) |
-               COND(xs->bindless_ubo, A6XX_SP_VS_CONFIG_BINDLESS_UBO) |
-               A6XX_SP_VS_CONFIG_NTEX(xs->num_samp) |
-               A6XX_SP_VS_CONFIG_NSAMP(xs->num_samp) });
-   crb.add(tu_reg_value {
-      .reg = cfg->reg_hlsq_xs_ctrl,
-      .value = A6XX_SP_VS_CONST_CONFIG_CONSTLEN(xs->constlen) |
-               A6XX_SP_VS_CONST_CONFIG_ENABLED |
-               COND(xs->shader_options.push_consts_type ==
-                       IR3_PUSH_CONSTS_SHARED_PREAMBLE,
-                    A7XX_SP_VS_CONST_CONFIG_READ_IMM_SHARED_CONSTS) });
 }
 TU_GENX(tu6_emit_xs_config);
 
@@ -782,73 +783,6 @@ tu6_emit_vpc(struct tu_cs *cs,
              const struct ir3_shader_variant *gs,
              const struct ir3_shader_variant *fs)
 {
-   /* note: doesn't compile as static because of the array regs.. */
-   const struct reg_config {
-      uint16_t reg_sp_xs_out_reg;
-      uint16_t reg_sp_xs_vpc_dst_reg;
-      uint16_t reg_vpc_xs_pack;
-      uint16_t reg_vpc_xs_clip_cntl;
-      uint16_t reg_vpc_xs_clip_cntl_v2;
-      uint16_t reg_gras_xs_cl_cntl;
-      uint16_t reg_pc_xs_out_cntl;
-      uint16_t reg_sp_xs_primitive_cntl;
-      uint16_t reg_vpc_xs_layer_cntl;
-      uint16_t reg_vpc_xs_layer_cntl_v2;
-      uint16_t reg_gras_xs_layer_cntl;
-   } reg_config[] = {
-      [MESA_SHADER_VERTEX] = {
-         REG_A6XX_SP_VS_OUTPUT_REG(0),
-         REG_A6XX_SP_VS_VPC_DEST_REG(0),
-         REG_A6XX_VPC_VS_CNTL,
-         REG_A6XX_VPC_VS_CLIP_CULL_CNTL,
-         REG_A6XX_VPC_VS_CLIP_CULL_CNTL_V2,
-         REG_A6XX_GRAS_CL_VS_CLIP_CULL_DISTANCE,
-         REG_A6XX_PC_VS_CNTL,
-         REG_A6XX_SP_VS_OUTPUT_CNTL,
-         REG_A6XX_VPC_VS_SIV_CNTL,
-         REG_A6XX_VPC_VS_SIV_CNTL_V2,
-         REG_A6XX_GRAS_SU_VS_SIV_CNTL,
-      },
-      [MESA_SHADER_TESS_CTRL] = {
-         0,
-         0,
-         0,
-         0,
-         0,
-         0,
-         REG_A6XX_PC_HS_CNTL,
-         0,
-         0,
-         0
-      },
-      [MESA_SHADER_TESS_EVAL] = {
-         REG_A6XX_SP_DS_OUTPUT_REG(0),
-         REG_A6XX_SP_DS_VPC_DEST_REG(0),
-         REG_A6XX_VPC_DS_CNTL,
-         REG_A6XX_VPC_DS_CLIP_CULL_CNTL,
-         REG_A6XX_VPC_DS_CLIP_CULL_CNTL_V2,
-         REG_A6XX_GRAS_CL_DS_CLIP_CULL_DISTANCE,
-         REG_A6XX_PC_DS_CNTL,
-         REG_A6XX_SP_DS_OUTPUT_CNTL,
-         REG_A6XX_VPC_DS_SIV_CNTL,
-         REG_A6XX_VPC_DS_SIV_CNTL_V2,
-         REG_A6XX_GRAS_SU_DS_SIV_CNTL,
-      },
-      [MESA_SHADER_GEOMETRY] = {
-         REG_A6XX_SP_GS_OUTPUT_REG(0),
-         REG_A6XX_SP_GS_VPC_DEST_REG(0),
-         REG_A6XX_VPC_GS_CNTL,
-         REG_A6XX_VPC_GS_CLIP_CULL_CNTL,
-         REG_A6XX_VPC_GS_CLIP_CULL_CNTL_V2,
-         REG_A6XX_GRAS_CL_GS_CLIP_CULL_DISTANCE,
-         REG_A6XX_PC_GS_CNTL,
-         REG_A6XX_SP_GS_OUTPUT_CNTL,
-         REG_A6XX_VPC_GS_SIV_CNTL,
-         REG_A6XX_VPC_GS_SIV_CNTL_V2,
-         REG_A6XX_GRAS_SU_GS_SIV_CNTL,
-      },
-   };
-
    const struct ir3_shader_variant *last_shader;
    if (gs) {
       last_shader = gs;
@@ -857,8 +791,6 @@ tu6_emit_vpc(struct tu_cs *cs,
    } else {
       last_shader = vs;
    }
-
-   const struct reg_config *cfg = &reg_config[last_shader->type];
 
    struct ir3_shader_linkage linkage = {
       .primid_loc = 0xff,
@@ -961,6 +893,8 @@ tu6_emit_vpc(struct tu_cs *cs,
    if (linkage.cnt == 0)
       ir3_link_add(&linkage, 0, 0, 0x1, linkage.max_loc);
 
+   tu6_emit_vpc_varying_modes<CHIP>(cs, fs, last_shader);
+
    /* map outputs of the last shader to VPC */
    assert(linkage.cnt <= 32);
    const uint32_t sp_out_count = DIV_ROUND_UP(linkage.cnt, 2);
@@ -975,30 +909,121 @@ tu6_emit_vpc(struct tu_cs *cs,
          A6XX_SP_VS_VPC_DEST_REG_OUTLOC0(linkage.var[i].loc);
    }
 
-   tu_cs_emit_pkt4(cs, cfg->reg_sp_xs_out_reg, sp_out_count);
-   tu_cs_emit_array(cs, sp_out, sp_out_count);
+   tu_crb crb = cs->crb(sp_out_count + sp_vpc_dst_count + 12);
+   uint32_t *regs;
 
-   tu_cs_emit_pkt4(cs, cfg->reg_sp_xs_vpc_dst_reg, sp_vpc_dst_count);
-   tu_cs_emit_array(cs, sp_vpc_dst, sp_vpc_dst_count);
+   switch (last_shader->type) {
+   case MESA_SHADER_VERTEX:
+      regs = (uint32_t *)sp_out;
+      for (unsigned i = 0; i < sp_out_count; i++)
+         crb.add(A6XX_SP_VS_OUTPUT_REG(i, .dword = regs[i]));
 
-   tu_cs_emit_pkt4(cs, cfg->reg_vpc_xs_pack, 1);
-   tu_cs_emit(cs, A6XX_VPC_VS_CNTL_POSITIONLOC(position_loc) |
-                  A6XX_VPC_VS_CNTL_PSIZELOC(pointsize_loc) |
-                  A6XX_VPC_VS_CNTL_STRIDE_IN_VPC(linkage.max_loc) |
-                  A6XX_VPC_VS_CNTL_EXTRAPOS(extra_pos));
+      regs = (uint32_t *)sp_vpc_dst;
+      for (unsigned i = 0; i < sp_vpc_dst_count; i++)
+         crb.add(A6XX_SP_VS_VPC_DEST_REG(i, .dword = regs[i]));
 
-   tu_cs_emit_pkt4(cs, cfg->reg_vpc_xs_clip_cntl, 1);
-   tu_cs_emit(cs, A6XX_VPC_VS_CLIP_CULL_CNTL_CLIP_MASK(clip_cull_mask) |
-                  A6XX_VPC_VS_CLIP_CULL_CNTL_CLIP_DIST_03_LOC(clip0_loc) |
-                  A6XX_VPC_VS_CLIP_CULL_CNTL_CLIP_DIST_47_LOC(clip1_loc));
-   tu_cs_emit_pkt4(cs, cfg->reg_vpc_xs_clip_cntl_v2, 1);
-   tu_cs_emit(cs, A6XX_VPC_VS_CLIP_CULL_CNTL_CLIP_MASK(clip_cull_mask) |
-                  A6XX_VPC_VS_CLIP_CULL_CNTL_CLIP_DIST_03_LOC(clip0_loc) |
-                  A6XX_VPC_VS_CLIP_CULL_CNTL_CLIP_DIST_47_LOC(clip1_loc));
+      crb.add(VPC_VS_CNTL(CHIP,
+         .stride_in_vpc = linkage.max_loc,
+         .positionloc = position_loc,
+         .psizeloc = pointsize_loc,
+         .extrapos = extra_pos,
+      ));
 
-   tu_cs_emit_pkt4(cs, cfg->reg_gras_xs_cl_cntl, 1);
-   tu_cs_emit(cs, A6XX_GRAS_CL_VS_CLIP_CULL_DISTANCE_CLIP_MASK(last_shader->clip_mask) |
-                  A6XX_GRAS_CL_VS_CLIP_CULL_DISTANCE_CULL_MASK(last_shader->cull_mask));
+      crb.add(VPC_VS_CLIP_CULL_CNTL(CHIP,
+         .clip_mask = clip_cull_mask,
+         .clip_dist_03_loc = clip0_loc,
+         .clip_dist_47_loc = clip1_loc,
+      ));
+
+      if (CHIP <= A7XX) {
+         crb.add(VPC_VS_CLIP_CULL_CNTL_V2(CHIP,
+            .clip_mask = clip_cull_mask,
+            .clip_dist_03_loc = clip0_loc,
+            .clip_dist_47_loc = clip1_loc,
+         ));
+      }
+
+      crb.add(GRAS_CL_VS_CLIP_CULL_DISTANCE(CHIP,
+         .clip_mask = last_shader->clip_mask,
+         .cull_mask = last_shader->cull_mask,
+      ));
+
+      break;
+   case MESA_SHADER_TESS_EVAL:
+      regs = (uint32_t *)sp_out;
+      for (unsigned i = 0; i < sp_out_count; i++)
+         crb.add(A6XX_SP_DS_OUTPUT_REG(i, .dword = regs[i]));
+
+      regs = (uint32_t *)sp_vpc_dst;
+      for (unsigned i = 0; i < sp_vpc_dst_count; i++)
+         crb.add(A6XX_SP_DS_VPC_DEST_REG(i, .dword = regs[i]));
+
+      crb.add(VPC_DS_CNTL(CHIP,
+         .stride_in_vpc = linkage.max_loc,
+         .positionloc = position_loc,
+         .psizeloc = pointsize_loc,
+         .extrapos = extra_pos,
+      ));
+
+      crb.add(VPC_DS_CLIP_CULL_CNTL(CHIP,
+         .clip_mask = clip_cull_mask,
+         .clip_dist_03_loc = clip0_loc,
+         .clip_dist_47_loc = clip1_loc,
+      ));
+
+      if (CHIP <= A7XX) {
+         crb.add(VPC_DS_CLIP_CULL_CNTL_V2(CHIP,
+            .clip_mask = clip_cull_mask,
+            .clip_dist_03_loc = clip0_loc,
+            .clip_dist_47_loc = clip1_loc,
+         ));
+      }
+
+      crb.add(GRAS_CL_DS_CLIP_CULL_DISTANCE(CHIP,
+         .clip_mask = last_shader->clip_mask,
+         .cull_mask = last_shader->cull_mask,
+      ));
+
+      break;
+   case MESA_SHADER_GEOMETRY:
+      regs = (uint32_t *)sp_out;
+      for (unsigned i = 0; i < sp_out_count; i++)
+         crb.add(A6XX_SP_GS_OUTPUT_REG(i, .dword = regs[i]));
+
+      regs = (uint32_t *)sp_vpc_dst;
+      for (unsigned i = 0; i < sp_vpc_dst_count; i++)
+         crb.add(A6XX_SP_GS_VPC_DEST_REG(i, .dword = regs[i]));
+
+      crb.add(VPC_GS_CNTL(CHIP,
+         .stride_in_vpc = linkage.max_loc,
+         .positionloc = position_loc,
+         .psizeloc = pointsize_loc,
+         .extrapos = extra_pos,
+      ));
+
+      crb.add(VPC_GS_CLIP_CULL_CNTL(CHIP,
+         .clip_mask = clip_cull_mask,
+         .clip_dist_03_loc = clip0_loc,
+         .clip_dist_47_loc = clip1_loc,
+      ));
+
+      if (CHIP <= A7XX) {
+         crb.add(VPC_GS_CLIP_CULL_CNTL_V2(CHIP,
+            .clip_mask = clip_cull_mask,
+            .clip_dist_03_loc = clip0_loc,
+            .clip_dist_47_loc = clip1_loc,
+         ));
+      }
+
+      crb.add(GRAS_CL_GS_CLIP_CULL_DISTANCE(CHIP,
+         .clip_mask = last_shader->clip_mask,
+         .cull_mask = last_shader->cull_mask,
+      ));
+
+      break;
+   default:
+      UNREACHABLE("bad last_shader type");
+   }
 
    const struct ir3_shader_variant *geom_shaders[] = { vs, hs, ds, gs };
 
@@ -1009,18 +1034,50 @@ tu6_emit_vpc(struct tu_cs *cs,
 
       bool primid = shader->type != MESA_SHADER_VERTEX &&
          VALIDREG(ir3_find_sysval_regid(shader, SYSTEM_VALUE_PRIMITIVE_ID));
+      bool last = shader == last_shader;
 
-      tu_cs_emit_pkt4(cs, reg_config[shader->type].reg_pc_xs_out_cntl, 1);
-      if (shader == last_shader) {
-         tu_cs_emit(cs, A6XX_PC_VS_CNTL_STRIDE_IN_VPC(linkage.max_loc) |
-                        CONDREG(pointsize_regid, A6XX_PC_VS_CNTL_PSIZE) |
-                        CONDREG(layer_regid, A6XX_PC_VS_CNTL_LAYER) |
-                        CONDREG(view_regid, A6XX_PC_VS_CNTL_VIEW) |
-                        COND(primid, A6XX_PC_VS_CNTL_PRIMITIVE_ID) |
-                        A6XX_PC_VS_CNTL_CLIP_MASK(clip_cull_mask) |
-                        CONDREG(shading_rate_regid, A6XX_PC_VS_CNTL_SHADINGRATE));
-      } else {
-         tu_cs_emit(cs, COND(primid, A6XX_PC_VS_CNTL_PRIMITIVE_ID));
+
+      switch (shader->type) {
+      case MESA_SHADER_VERTEX:
+         crb.add(PC_VS_CNTL(CHIP,
+            .stride_in_vpc = COND(last, linkage.max_loc),
+            .psize = COND(last, VALIDREG(pointsize_regid)),
+            .layer = COND(last, VALIDREG(layer_regid)),
+            .view = COND(last, VALIDREG(view_regid)),
+            .primitive_id = primid,
+            .clip_mask = COND(last, clip_cull_mask),
+            .shadingrate = COND(last, VALIDREG(shading_rate_regid)),
+         ));
+         break;
+      case MESA_SHADER_TESS_CTRL:
+         assert(!last);
+         crb.add(PC_HS_CNTL(CHIP,
+            .primitive_id = primid,
+         ));
+      case MESA_SHADER_TESS_EVAL:
+         crb.add(PC_DS_CNTL(CHIP,
+            .stride_in_vpc = COND(last, linkage.max_loc),
+            .psize = COND(last, VALIDREG(pointsize_regid)),
+            .layer = COND(last, VALIDREG(layer_regid)),
+            .view = COND(last, VALIDREG(view_regid)),
+            .primitive_id = primid,
+            .clip_mask = COND(last, clip_cull_mask),
+            .shadingrate = COND(last, VALIDREG(shading_rate_regid)),
+         ));
+         break;
+      case MESA_SHADER_GEOMETRY:
+         crb.add(PC_GS_CNTL(CHIP,
+            .stride_in_vpc = COND(last, linkage.max_loc),
+            .psize = COND(last, VALIDREG(pointsize_regid)),
+            .layer = COND(last, VALIDREG(layer_regid)),
+            .view = COND(last, VALIDREG(view_regid)),
+            .primitive_id = primid,
+            .clip_mask = COND(last, clip_cull_mask),
+            .shadingrate = COND(last, VALIDREG(shading_rate_regid)),
+         ));
+         break;
+      default:
+         break;
       }
    }
 
@@ -1028,24 +1085,67 @@ tu6_emit_vpc(struct tu_cs *cs,
    if (gs)
       assert(flags_regid != INVALID_REG);
 
-   tu_cs_emit_pkt4(cs, cfg->reg_sp_xs_primitive_cntl, 1);
-   tu_cs_emit(cs, A6XX_SP_VS_OUTPUT_CNTL_OUT(linkage.cnt) |
-                  A6XX_SP_GS_OUTPUT_CNTL_FLAGS_REGID(flags_regid));
-
-   tu_cs_emit_pkt4(cs, cfg->reg_vpc_xs_layer_cntl, 1);
-   tu_cs_emit(cs, A6XX_VPC_VS_SIV_CNTL_LAYERLOC(layer_loc) |
-                  A6XX_VPC_VS_SIV_CNTL_VIEWLOC(view_loc) |
-                  A6XX_VPC_VS_SIV_CNTL_SHADINGRATELOC(shading_rate_loc));
-   tu_cs_emit_pkt4(cs, cfg->reg_vpc_xs_layer_cntl_v2, 1);
-   tu_cs_emit(cs, A6XX_VPC_VS_SIV_CNTL_LAYERLOC(layer_loc) |
-                  A6XX_VPC_VS_SIV_CNTL_VIEWLOC(view_loc) |
-                  A6XX_VPC_VS_SIV_CNTL_SHADINGRATELOC(shading_rate_loc));
-
-   tu_cs_emit_pkt4(cs, cfg->reg_gras_xs_layer_cntl, 1);
-   tu_cs_emit(cs, CONDREG(layer_regid, A6XX_GRAS_SU_VS_SIV_CNTL_WRITES_LAYER) |
-                  CONDREG(view_regid, A6XX_GRAS_SU_VS_SIV_CNTL_WRITES_VIEW));
-
-   tu6_emit_vpc_varying_modes<CHIP>(cs, fs, last_shader);
+   switch (last_shader->type) {
+   case MESA_SHADER_VERTEX:
+      crb.add(A6XX_SP_VS_OUTPUT_CNTL(.out = linkage.cnt));
+      crb.add(VPC_VS_SIV_CNTL(CHIP,
+         .layerloc = layer_loc,
+         .viewloc = view_loc,
+         .shadingrateloc = shading_rate_loc,
+      ));
+      if (CHIP <= A7XX) {
+         crb.add(VPC_VS_SIV_CNTL_V2(CHIP,
+            .layerloc = layer_loc,
+            .viewloc = view_loc,
+            .shadingrateloc = shading_rate_loc,
+         ));
+      }
+      crb.add(GRAS_SU_VS_SIV_CNTL(CHIP,
+         .writes_layer = VALIDREG(layer_regid),
+         .writes_view = VALIDREG(view_regid),
+      ));
+      break;
+   case MESA_SHADER_TESS_EVAL:
+      crb.add(A6XX_SP_DS_OUTPUT_CNTL(.out = linkage.cnt));
+      crb.add(VPC_DS_SIV_CNTL(CHIP,
+         .layerloc = layer_loc,
+         .viewloc = view_loc,
+         .shadingrateloc = shading_rate_loc,
+      ));
+      if (CHIP <= A7XX) {
+         crb.add(VPC_DS_SIV_CNTL_V2(CHIP,
+            .layerloc = layer_loc,
+            .viewloc = view_loc,
+            .shadingrateloc = shading_rate_loc,
+         ));
+      }
+      crb.add(GRAS_SU_DS_SIV_CNTL(CHIP,
+         .writes_layer = VALIDREG(layer_regid),
+         .writes_view = VALIDREG(view_regid),
+      ));
+      break;
+   case MESA_SHADER_GEOMETRY:
+      crb.add(A6XX_SP_GS_OUTPUT_CNTL(.out = linkage.cnt, .flags_regid = flags_regid));
+      crb.add(VPC_GS_SIV_CNTL(CHIP,
+         .layerloc = layer_loc,
+         .viewloc = view_loc,
+         .shadingrateloc = shading_rate_loc,
+      ));
+      if (CHIP <= A7XX) {
+         crb.add(VPC_GS_SIV_CNTL_V2(CHIP,
+            .layerloc = layer_loc,
+            .viewloc = view_loc,
+            .shadingrateloc = shading_rate_loc,
+         ));
+      }
+      crb.add(GRAS_SU_GS_SIV_CNTL(CHIP,
+         .writes_layer = VALIDREG(layer_regid),
+         .writes_view = VALIDREG(view_regid),
+      ));
+      break;
+   default:
+      UNREACHABLE("bad last_shader type");
+   }
 }
 TU_GENX(tu6_emit_vpc);
 
@@ -1159,8 +1259,7 @@ tu6_emit_patch_control_points(struct tu_cs *cs,
       patch_control_points * vs->variant->output_size / 4;
 
    /* Total attribute slots in HS incoming patch. */
-   tu_cs_emit_pkt4(cs, REG_A6XX_PC_HS_PARAM_1, 1);
-   tu_cs_emit(cs, patch_local_mem_size_16b);
+   tu_cs_emit_regs(cs, PC_HS_PARAM_1(CHIP, patch_local_mem_size_16b));
 
    const uint32_t wavesize = 64;
    const uint32_t vs_hs_local_mem_size = 16384;
@@ -1266,11 +1365,14 @@ tu6_emit_program_config(struct tu_cs *cs,
                           .ds_state = true, .gs_state = true,
                           .fs_state = true, .gfx_uav = true,
                           .gfx_shared_const = shared_consts_enable));
-   for (size_t stage_idx = MESA_SHADER_VERTEX;
-        stage_idx <= MESA_SHADER_FRAGMENT; stage_idx++) {
-      mesa_shader_stage stage = (mesa_shader_stage) stage_idx;
-      tu6_emit_xs_config<CHIP>(crb, stage, variants[stage]);
-   }
+
+   const struct ir3_shader_variant *vs = variants[MESA_SHADER_VERTEX];
+   const struct ir3_shader_variant *hs = variants[MESA_SHADER_TESS_CTRL];
+   const struct ir3_shader_variant *ds = variants[MESA_SHADER_TESS_EVAL];
+   const struct ir3_shader_variant *gs = variants[MESA_SHADER_GEOMETRY];
+   const struct ir3_shader_variant *fs = variants[MESA_SHADER_FRAGMENT];
+
+   tu6_emit_xs_config<CHIP>(crb, { .vs = vs, .hs = hs, .ds = ds, .gs = gs, .fs = fs });
 
    crb.flush();
 
@@ -1279,11 +1381,6 @@ tu6_emit_program_config(struct tu_cs *cs,
       mesa_shader_stage stage = (mesa_shader_stage) stage_idx;
       tu6_emit_dynamic_offset(cs, variants[stage], shaders[stage], prog);
    }
-
-   const struct ir3_shader_variant *vs = variants[MESA_SHADER_VERTEX];
-   const struct ir3_shader_variant *hs = variants[MESA_SHADER_TESS_CTRL];
-   const struct ir3_shader_variant *ds = variants[MESA_SHADER_TESS_EVAL];
-   const struct ir3_shader_variant *gs = variants[MESA_SHADER_GEOMETRY];
 
    if (hs) {
       tu6_emit_link_map(cs, vs, hs, SB6_HS_SHADER);
@@ -1304,8 +1401,9 @@ tu6_emit_program_config(struct tu_cs *cs,
          uint32_t vec4_size = gs->gs.vertices_in *
                               DIV_ROUND_UP(prev_stage_output_size, 4);
 
-         tu_cs_emit_pkt4(cs, REG_A6XX_PC_PRIMITIVE_CNTL_6, 1);
-         tu_cs_emit(cs, A6XX_PC_PRIMITIVE_CNTL_6_STRIDE_IN_VPC(vec4_size));
+         tu_cs_emit_regs(cs, PC_PRIMITIVE_CNTL_6(CHIP,
+            .stride_in_vpc = vec4_size,
+         ));
       }
 
       uint32_t prim_size = prev_stage_output_size;
@@ -2866,17 +2964,18 @@ void
 tu6_emit_sample_locations(struct tu_cs *cs, bool enable,
                           const struct vk_sample_locations_state *samp_loc)
 {
-   uint32_t sample_config =
-      COND(enable, A6XX_RB_MSAA_SAMPLE_POS_CNTL_LOCATION_ENABLE);
+   tu_cs_emit_regs(cs, GRAS_SC_MSAA_SAMPLE_POS_CNTL(CHIP,
+      .location_enable = enable,
+   ));
+   tu_cs_emit_regs(cs, A6XX_RB_MSAA_SAMPLE_POS_CNTL(
+      .location_enable = enable,
+   ));
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SC_MSAA_SAMPLE_POS_CNTL, 1);
-   tu_cs_emit(cs, sample_config);
-
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_MSAA_SAMPLE_POS_CNTL, 1);
-   tu_cs_emit(cs, sample_config);
-
-   tu_cs_emit_pkt4(cs, REG_A6XX_TPL1_MSAA_SAMPLE_POS_CNTL, 1);
-   tu_cs_emit(cs, sample_config);
+   if (CHIP <= A7XX) {
+      tu_cs_emit_regs(cs, TPL1_MSAA_SAMPLE_POS_CNTL(CHIP,
+         .location_enable = enable,
+      ));
+   }
 
    if (!enable)
       return;
@@ -2903,14 +3002,21 @@ tu6_emit_sample_locations(struct tu_cs *cs, bool enable,
                      A6XX_RB_PROGRAMMABLE_MSAA_POS_0_SAMPLE_0_Y(y))) << i*8;
    }
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_GRAS_SC_PROGRAMMABLE_MSAA_POS_0, 2);
-   tu_cs_emit_qw(cs, sample_locations);
+   tu_cs_emit_regs(cs,
+      GRAS_SC_PROGRAMMABLE_MSAA_POS_0(CHIP, .dword = sample_locations),
+      GRAS_SC_PROGRAMMABLE_MSAA_POS_1(CHIP, .dword = sample_locations >> 32),
+   );
+   tu_cs_emit_regs(cs,
+      A6XX_RB_PROGRAMMABLE_MSAA_POS_0(.dword = sample_locations),
+      A6XX_RB_PROGRAMMABLE_MSAA_POS_1(.dword = sample_locations >> 32),
+   );
 
-   tu_cs_emit_pkt4(cs, REG_A6XX_RB_PROGRAMMABLE_MSAA_POS_0, 2);
-   tu_cs_emit_qw(cs, sample_locations);
-
-   tu_cs_emit_pkt4(cs, REG_A6XX_TPL1_PROGRAMMABLE_MSAA_POS_0, 2);
-   tu_cs_emit_qw(cs, sample_locations);
+   if (CHIP <= A7XX) {
+      tu_cs_emit_regs(cs,
+         TPL1_PROGRAMMABLE_MSAA_POS_0(CHIP, .dword = sample_locations),
+         TPL1_PROGRAMMABLE_MSAA_POS_1(CHIP, .dword = sample_locations >> 32),
+      );
+   }
 }
 
 static const enum mesa_vk_dynamic_graphics_state tu_depth_bias_state[] = {

@@ -16,9 +16,12 @@
 
 #include <pthread.h>
 
+#include "util/list.h"
+
 #include "vk_object.h"
 
 #include "pvr_limits.h"
+#include "pvr_macros.h"
 
 struct pvr_render_target {
    struct pvr_rt_dataset *rt_dataset[PVR_MAX_MULTIVIEW];
@@ -65,12 +68,18 @@ struct pvr_framebuffer {
 struct pvr_device;
 struct pvr_renderpass_hwsetup_render;
 
-VkResult
-pvr_render_state_setup(struct pvr_device *device,
-                       const VkAllocationCallbacks *pAllocator,
-                       struct pvr_render_state *rstate,
-                       uint32_t render_count,
-                       const struct pvr_renderpass_hwsetup_render *renders);
+#ifdef PVR_PER_ARCH
+
+VkResult PVR_PER_ARCH(render_state_setup)(
+   struct pvr_device *device,
+   const VkAllocationCallbacks *pAllocator,
+   struct pvr_render_state *rstate,
+   uint32_t render_count,
+   const struct pvr_renderpass_hwsetup_render *renders);
+
+#   define pvr_render_state_setup PVR_PER_ARCH(render_state_setup)
+
+#endif
 
 void pvr_render_state_cleanup(struct pvr_device *device,
                               const struct pvr_render_state *rstate);

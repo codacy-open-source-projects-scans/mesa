@@ -85,6 +85,8 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    const uint32_t renderer_version = physical_dev->renderer_version;
    const struct vk_device_extension_table *exts =
       &physical_dev->renderer_extensions;
+   const struct vk_device_extension_table *supported_exts =
+      &physical_dev->base.vk.supported_extensions;
    struct vn_ring *ring = physical_dev->instance->ring.ring;
    VkPhysicalDeviceFeatures2 feats2 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
@@ -426,15 +428,17 @@ vn_physical_device_init_features(struct vn_physical_device *physical_dev)
    feats->deviceMemoryReport = true;
 
    /* VK_EXT_map_memory_placed */
-   feats->memoryMapPlaced = true;
-   feats->memoryMapRangePlaced = false;
-   feats->memoryUnmapReserve = true;
+   if (supported_exts->EXT_map_memory_placed) {
+      feats->memoryMapPlaced = true;
+      feats->memoryMapRangePlaced = false;
+      feats->memoryUnmapReserve = true;
+   }
 
 #ifdef VN_USE_WSI_PLATFORM
-   feats->presentId = true;
-   feats->presentId2 = true;
-   feats->presentWait = true;
-   feats->presentWait2 = true;
+   feats->presentId = supported_exts->KHR_present_id;
+   feats->presentId2 = supported_exts->KHR_present_id2;
+   feats->presentWait = supported_exts->KHR_present_wait;
+   feats->presentWait2 = supported_exts->KHR_present_wait2;
    feats->swapchainMaintenance1 = true;
 #endif
 
@@ -490,9 +494,16 @@ vn_physical_device_init_uuids(struct vn_physical_device *physical_dev)
 
    memcpy(props->driverUUID, sha1, VK_UUID_SIZE);
 
-   memset(props->deviceLUID, 0, VK_LUID_SIZE);
-   props->deviceNodeMask = 0;
-   props->deviceLUIDValid = false;
+   const struct vn_renderer *renderer = physical_dev->instance->renderer;
+   if (renderer->info.id.has_luid) {
+      props->deviceLUIDValid = true;
+      props->deviceNodeMask = renderer->info.id.node_mask;
+      memcpy(props->deviceLUID, renderer->info.id.luid, VK_LUID_SIZE);
+   } else {
+      memset(props->deviceLUID, 0, VK_LUID_SIZE);
+      props->deviceNodeMask = 0;
+      props->deviceLUIDValid = false;
+   }
 }
 
 static void
@@ -574,6 +585,8 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    struct vk_properties *props = &physical_dev->base.vk.properties;
    const struct vk_device_extension_table *exts =
       &physical_dev->renderer_extensions;
+   const struct vk_device_extension_table *supported_exts =
+      &physical_dev->base.vk.supported_extensions;
    VkPhysicalDeviceProperties2 props2 = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
    };
@@ -869,7 +882,8 @@ vn_physical_device_init_properties(struct vn_physical_device *physical_dev)
    props->minPlacedMemoryMapAlignment = os_page_size;
 
    /* VK_EXT_physical_device_drm */
-   VN_SET_VK_PROPS(props, &renderer_info->drm.props);
+   if (supported_exts->EXT_physical_device_drm)
+      VN_SET_VK_PROPS(props, &renderer_info->drm.props);
 
    /* VK_EXT_pci_bus_info */
    if (renderer_info->pci.has_bus_info)
@@ -1076,8 +1090,10 @@ vn_physical_device_init_external_fence_handles(
    physical_dev->external_fence_handles = 0;
 
    if (physical_dev->instance->renderer->info.has_external_sync) {
+#if !DETECT_OS_WINDOWS
       physical_dev->external_fence_handles =
          VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT;
+#endif
    }
 }
 
@@ -1127,8 +1143,10 @@ vn_physical_device_init_external_semaphore_handles(
    physical_dev->external_timeline_semaphore_handles = 0;
 
    if (physical_dev->instance->renderer->info.has_external_sync) {
+#if !DETECT_OS_WINDOWS
       physical_dev->external_binary_semaphore_handles =
          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT;
+#endif
    }
 }
 
@@ -1143,13 +1161,21 @@ vn_physical_device_get_native_extensions(
    memset(exts, 0, sizeof(*exts));
 
    if (physical_dev->instance->renderer->info.has_external_sync &&
-       physical_dev->renderer_sync_fd.fence_exportable)
-      exts->KHR_external_fence_fd = true;
+       physical_dev->renderer_sync_fd.fence_exportable) {
+      if (physical_dev->external_fence_handles ==
+          VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT) {
+         exts->KHR_external_fence_fd = true;
+      }
+   }
 
    if (physical_dev->instance->renderer->info.has_external_sync &&
        physical_dev->renderer_sync_fd.semaphore_importable &&
-       physical_dev->renderer_sync_fd.semaphore_exportable)
-      exts->KHR_external_semaphore_fd = true;
+       physical_dev->renderer_sync_fd.semaphore_exportable) {
+      if (physical_dev->external_binary_semaphore_handles ==
+          VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT) {
+         exts->KHR_external_semaphore_fd = true;
+      }
+   }
 
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
    if (physical_dev->external_memory.renderer_handle_type &&
@@ -1173,18 +1199,22 @@ vn_physical_device_get_native_extensions(
    }
 #else  /* VK_USE_PLATFORM_ANDROID_KHR */
    if (physical_dev->external_memory.renderer_handle_type) {
+#if !DETECT_OS_WINDOWS
       exts->KHR_external_memory_fd = true;
       exts->EXT_external_memory_dma_buf = true;
+#endif /* !DETECT_OS_WINDOWS */
    }
 #endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
 #ifdef VN_USE_WSI_PLATFORM
    if (physical_dev->renderer_sync_fd.semaphore_importable) {
       exts->KHR_incremental_present = true;
+#ifndef VK_USE_PLATFORM_WIN32_KHR
       exts->KHR_present_id = true;
       exts->KHR_present_id2 = true;
       exts->KHR_present_wait = true;
       exts->KHR_present_wait2 = true;
+#endif /* VK_USE_PLATFORM_WIN32_KHR */
       exts->KHR_swapchain = true;
       exts->KHR_swapchain_maintenance1 = true;
       exts->KHR_swapchain_mutable_format = true;
@@ -1202,7 +1232,7 @@ vn_physical_device_get_native_extensions(
    exts->EXT_pci_bus_info =
       physical_dev->instance->renderer->info.pci.has_bus_info ||
       renderer_exts->EXT_pci_bus_info;
-#endif
+#endif /* VN_USE_WSI_PLATFORM */
 
    /* Use common implementation but enable only when the renderer supports
     * VK_KHR_acceleration_structure because VK_KHR_deferred_host_operations is
@@ -1211,8 +1241,10 @@ vn_physical_device_get_native_extensions(
    exts->KHR_deferred_host_operations =
       physical_dev->ray_tracing && renderer_exts->KHR_acceleration_structure;
    exts->KHR_map_memory2 = true;
+#if !DETECT_OS_WINDOWS
    exts->EXT_map_memory_placed = true;
    exts->EXT_physical_device_drm = true;
+#endif
    /* use common implementation */
    exts->EXT_tooling_info = true;
    exts->EXT_device_memory_report = true;
@@ -1379,7 +1411,9 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = !VN_DEBUG(NO_GPL),
       .EXT_image_2d_view_of_3d = true,
+#if !DETECT_OS_WINDOWS
       .EXT_image_drm_format_modifier = true,
+#endif
       .EXT_image_sliced_view_of_3d = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
@@ -2978,20 +3012,6 @@ vn_GetPhysicalDeviceExternalSemaphoreProperties(
       pExternalSemaphoreProperties->exportFromImportedHandleTypes = 0;
       pExternalSemaphoreProperties->externalSemaphoreFeatures = 0;
    }
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-vn_GetPhysicalDeviceCalibrateableTimeDomainsKHR(
-   VkPhysicalDevice physicalDevice,
-   uint32_t *pTimeDomainCount,
-   VkTimeDomainKHR *pTimeDomains)
-{
-   struct vn_physical_device *physical_dev =
-      vn_physical_device_from_handle(physicalDevice);
-   struct vn_ring *ring = physical_dev->instance->ring.ring;
-
-   return vn_call_vkGetPhysicalDeviceCalibrateableTimeDomainsKHR(
-      ring, physicalDevice, pTimeDomainCount, pTimeDomains);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL

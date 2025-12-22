@@ -6238,7 +6238,7 @@ bifrost_preprocess_nir(nir_shader *nir, unsigned gpu_id)
                               : glsl_get_natural_size_align_bytes;
    /* Lower large arrays to scratch and small arrays to bcsel */
    NIR_PASS(_, nir, nir_lower_scratch_to_var);
-   NIR_PASS(_, nir, nir_lower_vars_to_scratch, nir_var_function_temp, 256,
+   NIR_PASS(_, nir, nir_lower_vars_to_scratch, 256,
             vars_to_scratch_size_align_func, vars_to_scratch_size_align_func);
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             nir_var_function_temp, ~0);
@@ -7063,6 +7063,9 @@ bi_find_loop_blocks(const bi_context *ctx, bi_block *header, BITSET_WORD *out)
     * is in the loop of that header.
     */
    __bitset_and(out, out, dominators, BITSET_WORDS(ctx->num_blocks));
+
+   /* The header is not a predecessor of itself, so add it separately. */
+   BITSET_SET(out, header->index);
 
    ralloc_free(dominators);
 }
