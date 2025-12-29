@@ -92,6 +92,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_maintenance9 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
+      .KHR_pipeline_binary = true,
       .KHR_pipeline_executable_properties = true,
       .KHR_pipeline_library = true,
 #ifdef HK_USE_WSI_PLATFORM
@@ -199,6 +200,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_shader_stencil_export = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
+      .EXT_shader_uniform_buffer_unsized_array = true,
       .EXT_shader_viewport_index_layer = true,
       .EXT_subgroup_size_control = true,
 #ifdef HK_USE_WSI_PLATFORM
@@ -404,6 +406,9 @@ hk_get_device_features(
       /* VK_KHR_maintenance9 */
       .maintenance9 = true,
 
+      /* VK_KHR_pipeline_binary */
+      .pipelineBinaries = true,
+
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
@@ -604,6 +609,9 @@ hk_get_device_features(
 
       /* VK_KHR_shader_subgroup_uniform_control_flow */
       .shaderSubgroupUniformControlFlow = true,
+
+      /* VK_EXT_shader_uniform_buffer_unsized_array */
+      .shaderUniformBufferUnsizedArray = true,
 
       /* VK_EXT_texel_buffer_alignment */
       .texelBufferAlignment = true,
@@ -947,6 +955,13 @@ hk_get_device_properties(const struct agx_device *dev,
       /* VK_EXT_multi_draw */
       .maxMultiDrawCount = UINT16_MAX,
 
+      /* VK_KHR_pipeline_binary
+       *
+       * InternalCache properties are set by
+       * hk_physical_device_init_pipeline_cache()
+       */
+      .pipelineBinaryCompressedData = false,
+
       /* VK_EXT_pipeline_robustness */
       .defaultRobustnessStorageBuffers =
          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
@@ -1098,6 +1113,12 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+   if (pdev->vk.disk_cache != NULL) {
+      pdev->vk.properties.pipelineBinaryInternalCache = true;
+      pdev->vk.properties.pipelineBinaryInternalCacheControl = true;
+      pdev->vk.properties.pipelineBinaryPrefersInternalCache = true;
+      pdev->vk.properties.pipelineBinaryPrecompiledInternalCache = true;
+   }
 #endif
 }
 

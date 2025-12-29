@@ -76,6 +76,15 @@ radv_taskmesh_enabled(const struct radv_physical_device *pdev)
 }
 
 bool
+radv_spm_trace_enabled(const struct radv_physical_device *pdev)
+{
+   const struct radv_instance *instance = radv_physical_device_instance(pdev);
+
+   return (instance->vk.trace_mode & RADV_TRACE_MODE_RGP) &&
+          debug_get_bool_option("RADV_THREAD_TRACE_CACHE_COUNTERS", pdev->info.gfx_level >= GFX10);
+}
+
+bool
 radv_sparse_enabled(const struct radv_physical_device *pdev)
 {
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -92,6 +101,9 @@ radv_transfer_queue_enabled(const struct radv_physical_device *pdev)
    /* Check if the GPU has SDMA support and transfer queues are allowed. */
    if (pdev->info.sdma_ip_version == SDMA_UNKNOWN || !pdev->info.ip[AMD_IP_SDMA].num_queues ||
        !(instance->perftest_flags & RADV_PERFTEST_TRANSFER_QUEUE))
+      return false;
+
+   if (!pdev->info.has_gang_submit || !radv_compute_queue_enabled(pdev))
       return false;
 
    return pdev->info.gfx_level >= GFX9;

@@ -1459,10 +1459,30 @@ radv_gang_barrier(struct radv_cmd_buffer *cmd_buffer, VkPipelineStageFlags2 src_
         VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT))
       dst_stage_mask |= cmd_buffer->state.dma_is_busy ? VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT : 0;
 
-   /* Increment the GFX/ACE semaphore when task shaders are blocked. */
-   if (dst_stage_mask & (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
-                         RADV_TASK_SHADER_SENSITIVE_STAGES))
+   /* Increment the leader to follower semaphore when the leader wants to block the follower:
+    * - graphics command buffer: task shader execution needs to wait for something
+    * - transfer command buffer: a transfer operation on ACE needs to wait for a previous operation on SDMA
+    */
+   const VkPipelineStageFlags2 gang_leader_flags =
+      cmd_buffer->qf == RADV_QUEUE_TRANSFER
+         ? (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+         : (VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+            RADV_TASK_SHADER_SENSITIVE_STAGES);
+   if (dst_stage_mask & gang_leader_flags)
       cmd_buffer->gang.sem.leader_value++;
+
+   /* Increment the follower to leader semaphore when the follower wants to block the leader:
+    * - graphics command buffer: not necessary yet
+    * - transfer command buffer: a transfer operation on SDMA needs to wait for a previous operation on ACE
+    */
+   const VkPipelineStageFlags2 gang_follower_flags =
+      cmd_buffer->qf == RADV_QUEUE_TRANSFER
+         ? (VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+         : 0;
+   if (src_stage_mask & gang_follower_flags)
+      cmd_buffer->gang.sem.follower_value++;
 }
 
 void
@@ -1485,8 +1505,14 @@ radv_gang_sem_init(struct radv_cmd_buffer *cmd_buffer)
    if (cmd_buffer->gang.sem.va)
       return true;
 
-   /* DWORD 0: GFX->ACE semaphore (GFX blocks ACE, ie. ACE waits for GFX)
-    * DWORD 1: ACE->GFX semaphore
+   /* DWORD 0:
+    *   leader->follower semaphore: used when leader does something that the follower has to wait for
+    *   - for transfer queues: when SDMA is working on a transfer that ACE needs to wait for
+    *   - for task/mesh: when GFX is doing something that ACE needs to wait for
+    * DWORD 1:
+    *   follower->leader semaphore: used when follower does something that the leader has to wait for
+    *   - for transfer queues: when ACE is working on a transfer that SDMA needs to wait for
+    *   - for task/mesh: no needed yet
     */
    uint64_t sem_init = 0;
    uint32_t va_off = 0;
@@ -1523,15 +1549,18 @@ radv_flush_gang_semaphore(struct radv_cmd_buffer *cmd_buffer, struct radv_cmd_st
 
    ASSERTED unsigned cdw_max = radeon_check_space(device->ws, cs->b, 12);
 
-   radv_cs_emit_write_event_eop(cs, pdev->info.gfx_level, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM,
-                                EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT,
-                                cmd_buffer->gang.sem.va + va_off, value, cmd_buffer->gfx9_eop_bug_va);
+   if (cmd_buffer->cs->hw_ip == AMD_IP_SDMA)
+      ac_emit_sdma_fence(cs->b, cmd_buffer->gang.sem.va + va_off, value);
+   else
+      radv_cs_emit_write_event_eop(cs, pdev->info.gfx_level, V_028A90_BOTTOM_OF_PIPE_TS, 0, EOP_DST_SEL_MEM,
+                                   EOP_INT_SEL_SEND_DATA_AFTER_WR_CONFIRM, EOP_DATA_SEL_VALUE_32BIT,
+                                   cmd_buffer->gang.sem.va + va_off, value, cmd_buffer->gfx9_eop_bug_va);
 
    assert(cs->b->cdw <= cdw_max);
    return true;
 }
 
-ALWAYS_INLINE static bool
+bool
 radv_flush_gang_leader_semaphore(struct radv_cmd_buffer *cmd_buffer)
 {
    if (!radv_gang_leader_sem_dirty(cmd_buffer))
@@ -1542,7 +1571,7 @@ radv_flush_gang_leader_semaphore(struct radv_cmd_buffer *cmd_buffer)
    return radv_flush_gang_semaphore(cmd_buffer, cmd_buffer->cs, 0, cmd_buffer->gang.sem.leader_value);
 }
 
-ALWAYS_INLINE static bool
+bool
 radv_flush_gang_follower_semaphore(struct radv_cmd_buffer *cmd_buffer)
 {
    if (!radv_gang_follower_sem_dirty(cmd_buffer))
@@ -1564,14 +1593,14 @@ radv_wait_gang_semaphore(struct radv_cmd_buffer *cmd_buffer, struct radv_cmd_str
    radv_cp_wait_mem(cs, WAIT_REG_MEM_GREATER_OR_EQUAL, cmd_buffer->gang.sem.va + va_off, value, 0xffffffff);
 }
 
-ALWAYS_INLINE static void
+void
 radv_wait_gang_leader(struct radv_cmd_buffer *cmd_buffer)
 {
    /* Follower waits for the semaphore which the gang leader wrote. */
    radv_wait_gang_semaphore(cmd_buffer, cmd_buffer->gang.cs, 0, cmd_buffer->gang.sem.leader_value);
 }
 
-ALWAYS_INLINE static void
+void
 radv_wait_gang_follower(struct radv_cmd_buffer *cmd_buffer)
 {
    /* Gang leader waits for the semaphore which the follower wrote. */
@@ -7830,6 +7859,21 @@ radv_BeginCommandBuffer(VkCommandBuffer commandBuffer, const VkCommandBufferBegi
 
    if (radv_device_fault_detection_enabled(device))
       radv_cmd_buffer_trace_emit(cmd_buffer);
+
+   if (radv_spm_trace_enabled(pdev) && (cmd_buffer->qf == RADV_QUEUE_GENERAL || cmd_buffer->qf == RADV_QUEUE_COMPUTE)) {
+      /* Force-enable windowed performance counters because the SQTT preamble is based on the queue
+       * family. That means that if it's presenting on compute, it won't enable windowed performance
+       * counters on graphics.
+       *
+       * On GFX12, this is required because this state seems cleared between command buffers and SPM
+       * counter values might be lost otherwise.
+       */
+      struct radv_cmd_stream *cs = cmd_buffer->cs;
+
+      radeon_check_space(device->ws, cmd_buffer->cs->b, 5);
+
+      ac_emit_cp_update_windowed_counters(cs->b, &pdev->info, cs->hw_ip, true);
+   }
 
    radv_describe_begin_cmd_buffer(cmd_buffer);
 

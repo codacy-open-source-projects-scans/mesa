@@ -92,9 +92,17 @@ enum ac_pc_gpu_block {
    NUM_GPU_BLOCK,
 };
 
+enum ac_pc_distribution {
+   AC_PC_UNAVAILABLE = 0,
+   AC_PC_GLOBAL_BLOCK,
+   AC_PC_PER_SHADER_ENGINE,
+   AC_PC_PER_SHADER_ARRAY,
+};
+
 struct ac_pc_block_base {
    enum ac_pc_gpu_block gpu_block;
    const char *name;
+   enum ac_pc_distribution distribution;
    unsigned num_counters;
    unsigned flags;
 
@@ -189,5 +197,8 @@ bool ac_init_perfcounters(const struct radeon_info *info,
                           bool separate_instance,
                           struct ac_perfcounters *pc);
 void ac_destroy_perfcounters(struct ac_perfcounters *pc);
+
+const struct ac_pc_block_gfxdescr *
+ac_gfx12_get_perfcounters(uint32_t *num_blocks);
 
 #endif

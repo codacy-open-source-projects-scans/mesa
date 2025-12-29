@@ -969,22 +969,6 @@ static struct ac_pc_block_base gfx11_SQ_WGP = {
    .spm_block_select = AC_SPM_SE_BLOCK_SQC,
 };
 
-/* gfx12_GRBMSE */
-static unsigned gfx12_GRBMSE_select0[] = {
-   R_0363E0_GRBMH_PERFCOUNTER0_SELECT,
-   R_0363E4_GRBMH_PERFCOUNTER1_SELECT,
-};
-
-static struct ac_pc_block_base gfx12_GRBMSE = {
-   .gpu_block = GRBMSE,
-   .name = "GRBMSE",
-   .num_counters = 2,
-   .flags = AC_PC_BLOCK_SE | AC_PC_BLOCK_SHADER,
-
-   .select0 = gfx12_GRBMSE_select0,
-   .counter0_lo = R_0343E8_GRBMH_PERFCOUNTER0_LO,
-};
-
 /* Both the number of instances and selectors varies between chips of the same
  * class. We only differentiate by class here and simply expose the maximum
  * number over all chips in a class.
@@ -1117,35 +1101,6 @@ static struct ac_pc_block_gfxdescr groups_gfx11[] = {
    {&gfx10_UTCL1, 65},
    {&gfx11_SQ_WGP, 511, 4},
    {&gfx10_GCEA, 86},
-};
-
-static struct ac_pc_block_gfxdescr groups_gfx12[] = {
-   {&cik_CB, 315},
-   {&gfx10_CHA, 25},
-   {&gfx10_CHC, 94},
-   {&cik_CPC, 55},
-   {&cik_CPF, 43},
-   {&cik_CPG, 95},
-   {&gfx10_DB, 441},
-   {&gfx10_GCR, 151},
-   {&gfx10_GE, 54},
-   {&gfx10_GL1A, 21},
-   {&gfx10_GL1C, 121, 4},
-   {&gfx10_GL2A, 114},
-   {&gfx10_GL2C, 249},
-   {&cik_GRBM, 51},
-   {&gfx12_GRBMSE, 20},
-   {&cik_PA_SC, 821},
-   {&gfx10_PA_SU, 828},
-   {&gfx10_RLC, 6},
-   {&cik_SPI, 318},
-   {&gfx10_SQ, 45},
-   {&cik_SX, 81},
-   {&cik_TA, 254},
-   {&gfx10_TCP, 99},
-   {&cik_TD, 271},
-   {&gfx10_UTCL1, 71},
-   {&gfx11_SQ_WGP, 511, 4},
 };
 
 struct ac_pc_block *ac_lookup_counter(const struct ac_perfcounters *pc,
@@ -1306,8 +1261,7 @@ bool ac_init_perfcounters(const struct radeon_info *info,
       num_blocks = ARRAY_SIZE(groups_gfx11);
       break;
    case GFX12:
-      blocks = groups_gfx12;
-      num_blocks = ARRAY_SIZE(groups_gfx12);
+      blocks = ac_gfx12_get_perfcounters(&num_blocks);
       break;
    case GFX6:
    default:
@@ -1328,36 +1282,73 @@ bool ac_init_perfcounters(const struct radeon_info *info,
       block->b = &blocks[i];
       block->num_instances = MAX2(1, block->b->instances);
 
-      if (!strcmp(block->b->b->name, "CB") ||
-          !strcmp(block->b->b->name, "DB") ||
-          !strcmp(block->b->b->name, "RMI"))
-         block->num_instances = info->max_se;
-      else if (!strcmp(block->b->b->name, "TCC"))
-         block->num_instances = info->max_tcc_blocks;
-      else if (!strcmp(block->b->b->name, "IA"))
-         block->num_instances = MAX2(1, info->max_se / 2);
-      else if (!strcmp(block->b->b->name, "TA") ||
-               !strcmp(block->b->b->name, "TCP") ||
-               !strcmp(block->b->b->name, "TD")) {
-         block->num_instances = MAX2(1, info->max_good_cu_per_sa);
-      }
+      if (info->gfx_level >= GFX12) {
+         /* TODO: Generalize this to older generations. */
+         const uint32_t num_rb_per_se = info->num_rb / info->num_se;
+         const uint32_t rb_per_sa = num_rb_per_se / info->max_sa_per_se;
 
-      if (info->gfx_level >= GFX10) {
-         if (!strcmp(block->b->b->name, "TCP")) {
-            block->num_global_instances = MAX2(1, info->num_cu_per_sh) * info->num_se * info->max_sa_per_se;
-         } else if (!strcmp(block->b->b->name, "SQ")) {
-            block->num_global_instances = block->num_instances * info->num_se;
-         } else if (!strcmp(block->b->b->name, "GL1C") ||
-                    !strcmp(block->b->b->name, "SQ_WGP")) {
+         switch (block->b->b->gpu_block) {
+         case CB:
+         case DB:
+            block->num_instances = rb_per_sa;
+            break;
+         case GL2C:
+            block->num_instances = info->num_tcc_blocks;
+            break;
+         case TA:
+         case TD:
+         case TCP:
+            block->num_instances = MAX2(1, info->max_good_cu_per_sa);
+            break;
+         default:
+            break;
+         }
+
+         switch (block->b->b->distribution) {
+         case AC_PC_PER_SHADER_ARRAY:
             block->num_global_instances = block->num_instances * info->num_se * info->max_sa_per_se;
-         } else if (!strcmp(block->b->b->name, "GL2C") ||
-                    !strcmp(block->b->b->name, "GCEA")) {
-            block->num_instances = block->num_global_instances = info->num_tcc_blocks;
-         } else if (!strcmp(block->b->b->name, "CPF")) {
-            block->num_instances = block->num_global_instances = 1;
-         } else if (!strcmp(block->b->b->name, "TA") ||
-                    !strcmp(block->b->b->name, "TD")) {
+            break;
+         case AC_PC_PER_SHADER_ENGINE:
+            block->num_global_instances = block->num_instances * info->num_se;
+            break;
+         case AC_PC_GLOBAL_BLOCK:
             block->num_global_instances = block->num_instances;
+            break;
+         default:
+            UNREACHABLE("Invalid perf block distribution mode.");
+         }
+      } else {
+         if (!strcmp(block->b->b->name, "CB") ||
+             !strcmp(block->b->b->name, "DB") ||
+             !strcmp(block->b->b->name, "RMI"))
+            block->num_instances = info->max_se;
+         else if (!strcmp(block->b->b->name, "TCC"))
+            block->num_instances = info->max_tcc_blocks;
+         else if (!strcmp(block->b->b->name, "IA"))
+            block->num_instances = MAX2(1, info->max_se / 2);
+         else if (!strcmp(block->b->b->name, "TA") ||
+                  !strcmp(block->b->b->name, "TCP") ||
+                  !strcmp(block->b->b->name, "TD")) {
+            block->num_instances = MAX2(1, info->max_good_cu_per_sa);
+         }
+
+         if (info->gfx_level >= GFX10) {
+            if (!strcmp(block->b->b->name, "TCP")) {
+               block->num_global_instances = MAX2(1, info->num_cu_per_sh) * info->num_se * info->max_sa_per_se;
+            } else if (!strcmp(block->b->b->name, "SQ")) {
+               block->num_global_instances = block->num_instances * info->num_se;
+            } else if (!strcmp(block->b->b->name, "GL1C") ||
+                       !strcmp(block->b->b->name, "SQ_WGP")) {
+               block->num_global_instances = block->num_instances * info->num_se * info->max_sa_per_se;
+            } else if (!strcmp(block->b->b->name, "GL2C") ||
+                       !strcmp(block->b->b->name, "GCEA")) {
+               block->num_instances = block->num_global_instances = info->num_tcc_blocks;
+            } else if (!strcmp(block->b->b->name, "CPF")) {
+               block->num_instances = block->num_global_instances = 1;
+            } else if (!strcmp(block->b->b->name, "TA") ||
+                       !strcmp(block->b->b->name, "TD")) {
+               block->num_global_instances = block->num_instances;
+            }
          }
       }
 

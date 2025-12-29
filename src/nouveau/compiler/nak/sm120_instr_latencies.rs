@@ -112,7 +112,7 @@ fn op_reg_latency(op: &Op, reader: bool, op_reg_idx: usize) -> RegLatencySM100 {
             }
         }
         Op::CS2R(cs2r) => {
-            if cs2r.dst.as_reg().unwrap().comps() == 2 {
+            if cs2r.dst.comps() == 2 {
                 Disp64
             } else {
                 Dualalu
@@ -410,10 +410,8 @@ impl SM120Latency {
         read: Option<&Op>,
         src_idx: usize,
     ) -> u32 {
-        let dst_file = match &write.dsts_as_slice()[dst_idx] {
-            Dst::None => return 0,
-            Dst::SSA(vec) => vec.file(),
-            Dst::Reg(reg) => reg.file(),
+        let Some(dst_file) = write.dsts_as_slice()[dst_idx].file() else {
+            return 0;
         };
 
         match dst_file {
@@ -467,10 +465,8 @@ impl SM120Latency {
     }
 
     pub fn war(read: &Op, src_idx: usize, write: &Op, dst_idx: usize) -> u32 {
-        let dst_file = match &write.dsts_as_slice()[dst_idx] {
-            Dst::None => return 0,
-            Dst::SSA(vec) => vec.file(),
-            Dst::Reg(reg) => reg.file(),
+        let Some(dst_file) = write.dsts_as_slice()[dst_idx].file() else {
+            return 0;
         };
 
         match dst_file {
@@ -512,10 +508,8 @@ impl SM120Latency {
         b_dst_idx: usize,
         a_op_pred: bool,
     ) -> u32 {
-        let dst_file = match &a.dsts_as_slice()[a_dst_idx] {
-            Dst::None => return 0,
-            Dst::SSA(vec) => vec.file(),
-            Dst::Reg(reg) => reg.file(),
+        let Some(dst_file) = a.dsts_as_slice()[a_dst_idx].file() else {
+            return 0;
         };
 
         match dst_file {
