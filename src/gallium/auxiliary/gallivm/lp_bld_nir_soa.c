@@ -3683,32 +3683,20 @@ visit_alu(struct lp_build_nir_soa_context *bld,
    struct lp_type scalar_double_type = bld->scalar_dbl_bld.type;
 
    /* Set the per-intruction float controls. */
-   bld->half_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-   bld->scalar_half_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-   bld->half_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
-   bld->scalar_half_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
+   bld->half_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->scalar_half_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->half_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
+   bld->scalar_half_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
 
-   bld->base.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-   bld->scalar_base.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-   bld->base.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
-   bld->scalar_base.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
+   bld->base.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->scalar_base.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->base.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
+   bld->scalar_base.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
 
-   bld->dbl_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-   bld->scalar_dbl_bld.type.signed_zero_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-   bld->dbl_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
-   bld->scalar_dbl_bld.type.nan_preserve |=
-      !!(instr->fp_fast_math & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
+   bld->dbl_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->scalar_dbl_bld.type.signed_zero_preserve |= nir_alu_instr_is_signed_zero_preserve(instr);
+   bld->dbl_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
+   bld->scalar_dbl_bld.type.nan_preserve |= nir_alu_instr_is_nan_preserve(instr);
 
    for (unsigned i = 0; i < nir_op_infos[instr->op].num_inputs; i++) {
       /**
@@ -5877,30 +5865,18 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    lp_build_context_init(&bld.int_bld, gallivm, lp_int_type(type));
    {
       struct lp_type float_type = type;
-      float_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-      float_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
       lp_build_context_init(&bld.base, gallivm, float_type);
    }
    {
       struct lp_type dbl_type;
       dbl_type = type;
       dbl_type.width *= 2;
-      dbl_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-      dbl_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
       lp_build_context_init(&bld.dbl_bld, gallivm, dbl_type);
    }
    {
       struct lp_type half_type;
       half_type = type;
       half_type.width /= 2;
-      half_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-      half_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
       lp_build_context_init(&bld.half_bld, gallivm, half_type);
    }
    {
@@ -5952,30 +5928,18 @@ void lp_build_nir_soa_func(struct gallivm_state *gallivm,
    lp_build_context_init(&bld.scalar_int_bld, gallivm, lp_int_type(elem_type));
    {
       struct lp_type float_type = elem_type;
-      float_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP32);
-      float_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP32);
       lp_build_context_init(&bld.scalar_base, gallivm, float_type);
    }
    {
       struct lp_type dbl_type;
       dbl_type = elem_type;
       dbl_type.width *= 2;
-      dbl_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP64);
-      dbl_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP64);
       lp_build_context_init(&bld.scalar_dbl_bld, gallivm, dbl_type);
    }
    {
       struct lp_type half_type;
       half_type = elem_type;
       half_type.width /= 2;
-      half_type.signed_zero_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_SIGNED_ZERO_PRESERVE_FP16);
-      half_type.nan_preserve =
-         !!(shader->info.float_controls_execution_mode & FLOAT_CONTROLS_NAN_PRESERVE_FP16);
       lp_build_context_init(&bld.scalar_half_bld, gallivm, half_type);
    }
    {
