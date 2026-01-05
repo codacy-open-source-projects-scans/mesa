@@ -138,7 +138,7 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
 
    bool fixed_func_face_culling_needed = !NGG || !si_shader_culling_enabled(new_vs);
    bool fixed_func_face_culling_has_effect = (!HAS_TESS && !HAS_GS && !HAS_MS) ||
-                                             new_vs->selector->rast_prim == MESA_PRIM_TRIANGLES;
+                                             new_vs->selector->info.rast_prim == MESA_PRIM_TRIANGLES;
 
    if (sctx->fixed_func_face_culling_needed != fixed_func_face_culling_needed ||
        sctx->fixed_func_face_culling_has_effect != fixed_func_face_culling_has_effect) {
@@ -424,8 +424,8 @@ static bool si_update_shaders(struct si_context *sctx)
    }
 
    struct si_shader *api_vs = si_get_api_vs_inline(sctx, GFX_VERSION, HAS_TESS, HAS_GS);
-   sctx->vs_uses_base_instance = api_vs->info.uses_base_instance;
-   sctx->vs_uses_draw_id = api_vs->info.uses_draw_id;
+   sctx->vs_uses_base_instance = api_vs->info.uses_sysval_base_instance;
+   sctx->vs_uses_draw_id = api_vs->info.uses_sysval_draw_id;
    sctx->vs_uses_vs_state_indexed = api_vs->info.uses_vs_state_indexed;
 
    struct si_shader *hw_vs = si_get_vs_inline(sctx, HAS_TESS, HAS_GS)->current;
@@ -2396,12 +2396,12 @@ static void si_draw(struct pipe_context *ctx,
           (old_ngg_culling ||
            /* If tess or GS is enabled, the shader just has to allow culling. */
            /* If tess and GS are disabled, the draw has to pass the total_direct_count check. */
-           (HAS_TESS || HAS_GS ? hw_vs->ngg_cull_vert_threshold == 0
-                               : total_direct_count > hw_vs->ngg_cull_vert_threshold))) {
+           (HAS_TESS || HAS_GS ? hw_vs->info.ngg_cull_vert_threshold == 0
+                               : total_direct_count > hw_vs->info.ngg_cull_vert_threshold))) {
          struct si_state_rasterizer *rs = sctx->queued.named.rasterizer;
 
          /* Check that the current shader allows culling. */
-         assert(hw_vs->ngg_cull_vert_threshold != UINT_MAX);
+         assert(hw_vs->info.ngg_cull_vert_threshold != UINT_MAX);
 
          uint16_t ngg_culling;
 

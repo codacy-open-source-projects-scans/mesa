@@ -36,59 +36,13 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
    assert(thread_index < ARRAY_SIZE(sscreen->compiler));
    compiler = &sscreen->compiler[thread_index];
 
-   si_nir_scan_shader(sscreen, sel->nir, &sel->info, false);
+   si_nir_gather_info(sscreen, sel->nir, &sel->info, false);
 
    if (!sel->nir->info.use_aco_amd && !*compiler)
       *compiler = si_create_llvm_compiler(sscreen);
 
-   si_get_active_slot_masks(sscreen, &sel->info, &sel->active_const_and_shader_buffers,
-                            &sel->active_samplers_and_images);
-
    program->shader.is_monolithic = true;
    program->shader.wave_size = si_determine_wave_size(sscreen, &program->shader);
-
-   /* Variable block sizes need 10 bits (1 + log2(SI_MAX_VARIABLE_THREADS_PER_BLOCK)) per dim.
-    * We pack them into a single user SGPR.
-    */
-   unsigned user_sgprs = SI_NUM_RESOURCE_SGPRS + (sel->info.uses_grid_size ? 3 : 0) +
-                         (sel->info.uses_variable_block_size ? 1 : 0) +
-                         sel->nir->info.cs.user_data_components_amd;
-
-   if (sel->stage != MESA_SHADER_TASK) {
-      /* Fast path for compute shaders - some descriptors passed via user SGPRs. */
-      /* Shader buffers in user SGPRs. */
-      for (unsigned i = 0; i < MIN2(3, sel->nir->info.num_ssbos) && user_sgprs <= 12; i++) {
-         user_sgprs = align(user_sgprs, 4);
-         if (i == 0)
-            sel->cs_shaderbufs_sgpr_index = user_sgprs;
-         user_sgprs += 4;
-         sel->cs_num_shaderbufs_in_user_sgprs++;
-      }
-
-      /* Images in user SGPRs. */
-      unsigned non_fmask_images = BITFIELD_MASK(sel->nir->info.num_images);
-
-      /* Remove images with FMASK from the bitmask.  We only care about the first
-       * 3 anyway, so we can take msaa_images[0] and ignore the rest.
-       */
-      if (sscreen->info.gfx_level < GFX11)
-         non_fmask_images &= ~sel->nir->info.msaa_images[0];
-
-      for (unsigned i = 0; i < 3 && non_fmask_images & (1 << i); i++) {
-         unsigned num_sgprs = BITSET_TEST(sel->nir->info.image_buffers, i) ? 4 : 8;
-
-         if (align(user_sgprs, num_sgprs) + num_sgprs > 16)
-            break;
-
-         user_sgprs = align(user_sgprs, num_sgprs);
-         if (i == 0)
-            sel->cs_images_sgpr_index = user_sgprs;
-         user_sgprs += num_sgprs;
-         sel->cs_num_images_in_user_sgprs++;
-      }
-      sel->cs_images_num_sgprs = user_sgprs - sel->cs_images_sgpr_index;
-   }
-   assert(user_sgprs <= 16);
 
    unsigned char ir_sha1_cache_key[20];
    si_get_ir_cache_key(sel, false, false, shader->wave_size, ir_sha1_cache_key);
@@ -114,12 +68,6 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
          return;
       }
 
-      /* task ring entry and draw id
-       * note uses_draw_id is only available after shader variant creation
-       */
-      if (sel->stage == MESA_SHADER_TASK)
-         user_sgprs += shader->info.uses_draw_id ? 3 : 2;
-
       shader->config.rsrc1 = S_00B848_VGPRS(si_shader_encode_vgprs(shader)) |
                              S_00B848_SGPRS(si_shader_encode_sgprs(shader)) |
                              S_00B848_DX10_CLAMP(sscreen->info.gfx_level < GFX12) |
@@ -128,15 +76,15 @@ static void si_create_compute_state_async(void *job, void *gdata, int thread_ind
                              /* This is needed for CWSR, but it causes halts to work differently. */
                              S_00B848_PRIV(sscreen->info.gfx_level == GFX11);
 
-      shader->config.rsrc2 = S_00B84C_USER_SGPR(user_sgprs) |
+      shader->config.rsrc2 = S_00B84C_USER_SGPR(shader->info.cs_num_user_sgprs) |
                              S_00B84C_SCRATCH_EN(shader->config.scratch_bytes_per_wave > 0) |
-                             S_00B84C_TGID_X_EN(sel->info.uses_block_id[0]) |
-                             S_00B84C_TGID_Y_EN(sel->info.uses_block_id[1]) |
-                             S_00B84C_TGID_Z_EN(sel->info.uses_block_id[2]) |
-                             S_00B84C_TG_SIZE_EN(sel->info.uses_tg_size) |
-                             S_00B84C_TIDIG_COMP_CNT(sel->info.uses_thread_id[2]
+                             S_00B84C_TGID_X_EN(shader->info.uses_sysval_workgroup_id_x) |
+                             S_00B84C_TGID_Y_EN(shader->info.uses_sysval_workgroup_id_y) |
+                             S_00B84C_TGID_Z_EN(shader->info.uses_sysval_workgroup_id_z) |
+                             S_00B84C_TG_SIZE_EN(shader->info.uses_sgpr_tg_size) |
+                             S_00B84C_TIDIG_COMP_CNT(shader->info.uses_sysval_local_invocation_id_z
                                                         ? 2
-                                                        : sel->info.uses_thread_id[1] ? 1 : 0) |
+                                                        : shader->info.uses_sysval_local_invocation_id_y ? 1 : 0) |
                              S_00B84C_LDS_SIZE(ac_shader_encode_lds_size(shader->config.lds_size, sscreen->info.gfx_level, sel->stage));
 
       /* COMPUTE_PGM_RSRC3 is only present on GFX10+ and GFX940+. */
@@ -168,10 +116,6 @@ void *si_create_compute_state_for_nir(struct pipe_context *ctx, nir_shader *nir,
    sel->stage = stage;
    sel->screen = sscreen;
    simple_mtx_init(&sel->mutex, mtx_plain);
-   sel->const_and_shader_buf_descriptors_index =
-      si_const_and_shader_buffer_descriptors_idx(stage);
-   sel->sampler_and_images_descriptors_index =
-      si_sampler_and_image_descriptors_idx(stage);
    program->shader.selector = &program->sel;
 
    sel->nir = nir;
@@ -485,10 +429,10 @@ static void si_setup_nir_user_data(struct si_context *sctx, const struct pipe_gr
    unsigned grid_size_reg = R_00B900_COMPUTE_USER_DATA_0 + 4 * SI_NUM_RESOURCE_SGPRS;
    unsigned block_size_reg = grid_size_reg +
                              /* 12 bytes = 3 dwords. */
-                             12 * sel->info.uses_grid_size;
-   unsigned cs_user_data_reg = block_size_reg + 4 * program->sel.info.uses_variable_block_size;
+                             12 * program->shader.info.uses_sysval_num_workgroups;
+   unsigned cs_user_data_reg = block_size_reg + 4 * program->shader.info.uses_sysval_workgroup_size;
 
-   if (sel->info.uses_grid_size && info->indirect) {
+   if (program->shader.info.uses_sysval_num_workgroups && info->indirect) {
       for (unsigned i = 0; i < 3; ++i) {
          si_cp_copy_data(sctx, &sctx->gfx_cs, COPY_DATA_REG, NULL, (grid_size_reg >> 2) + i,
                          COPY_DATA_SRC_MEM, si_resource(info->indirect),
@@ -497,13 +441,13 @@ static void si_setup_nir_user_data(struct si_context *sctx, const struct pipe_gr
    }
 
    if (sctx->gfx_level >= GFX12) {
-      if (sel->info.uses_grid_size && !info->indirect) {
+      if (program->shader.info.uses_sysval_num_workgroups && !info->indirect) {
          gfx12_push_compute_sh_reg(grid_size_reg, info->grid[0]);
          gfx12_push_compute_sh_reg(grid_size_reg + 4, info->grid[1]);
          gfx12_push_compute_sh_reg(grid_size_reg + 8, info->grid[2]);
       }
 
-      if (sel->info.uses_variable_block_size) {
+      if (program->shader.info.uses_sysval_workgroup_size) {
          uint32_t value = info->block[0] | (info->block[1] << 10) | (info->block[2] << 20);
          gfx12_push_compute_sh_reg(block_size_reg, value);
       }
@@ -514,13 +458,13 @@ static void si_setup_nir_user_data(struct si_context *sctx, const struct pipe_gr
             gfx12_push_compute_sh_reg(cs_user_data_reg + i * 4, sctx->cs_user_data[i]);
       }
    } else if (sctx->screen->info.has_set_sh_pairs_packed) {
-      if (sel->info.uses_grid_size && !info->indirect) {
+      if (program->shader.info.uses_sysval_num_workgroups && !info->indirect) {
          gfx11_push_compute_sh_reg(grid_size_reg, info->grid[0]);
          gfx11_push_compute_sh_reg(grid_size_reg + 4, info->grid[1]);
          gfx11_push_compute_sh_reg(grid_size_reg + 8, info->grid[2]);
       }
 
-      if (sel->info.uses_variable_block_size) {
+      if (program->shader.info.uses_sysval_workgroup_size) {
          uint32_t value = info->block[0] | (info->block[1] << 10) | (info->block[2] << 20);
          gfx11_push_compute_sh_reg(block_size_reg, value);
       }
@@ -533,14 +477,14 @@ static void si_setup_nir_user_data(struct si_context *sctx, const struct pipe_gr
    } else {
       radeon_begin(cs);
 
-      if (sel->info.uses_grid_size && !info->indirect) {
+      if (program->shader.info.uses_sysval_num_workgroups && !info->indirect) {
          radeon_set_sh_reg_seq(grid_size_reg, 3);
          radeon_emit(info->grid[0]);
          radeon_emit(info->grid[1]);
          radeon_emit(info->grid[2]);
       }
 
-      if (sel->info.uses_variable_block_size) {
+      if (program->shader.info.uses_sysval_workgroup_size) {
          uint32_t value = info->block[0] | (info->block[1] << 10) | (info->block[2] << 20);
          radeon_set_sh_reg(block_size_reg, value);
       }

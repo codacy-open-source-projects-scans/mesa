@@ -1342,29 +1342,8 @@ radv_link_shaders(const struct radv_device *device, struct radv_shader_stage *pr
    if (gfx_state->enable_remove_point_size)
       radv_remove_point_size(gfx_state, producer, consumer);
 
-   if (nir_link_opt_varyings(producer, consumer)) {
-      nir_validate_shader(producer, "after nir_link_opt_varyings");
-      nir_validate_shader(consumer, "after nir_link_opt_varyings");
-
-      NIR_PASS(_, consumer, nir_opt_constant_folding);
-      NIR_PASS(_, consumer, nir_opt_algebraic);
-      NIR_PASS(_, consumer, nir_opt_dce);
-   }
-
    NIR_PASS(_, producer, nir_remove_dead_variables, nir_var_shader_out, NULL);
    NIR_PASS(_, consumer, nir_remove_dead_variables, nir_var_shader_in, NULL);
-
-   nir_remove_unused_varyings(producer, consumer);
-
-   nir_compact_varyings(producer, consumer, true);
-
-   nir_validate_shader(producer, "after nir_compact_varyings");
-   nir_validate_shader(consumer, "after nir_compact_varyings");
-
-   if (producer->info.stage == MESA_SHADER_MESH) {
-      /* nir_compact_varyings can change the location of per-vertex and per-primitive outputs */
-      nir_shader_gather_info(producer, nir_shader_get_entrypoint(producer));
-   }
 
    const bool has_geom_or_tess =
       consumer->info.stage == MESA_SHADER_GEOMETRY || consumer->info.stage == MESA_SHADER_TESS_CTRL;
@@ -1374,11 +1353,6 @@ radv_link_shaders(const struct radv_device *device, struct radv_shader_stage *pr
        (producer->info.stage == MESA_SHADER_VERTEX && has_geom_or_tess) ||
        (producer->info.stage == MESA_SHADER_TESS_EVAL && merged_gs)) {
       NIR_PASS(_, producer, nir_opt_vectorize_io_vars, nir_var_shader_out);
-
-      if (producer->info.stage == MESA_SHADER_TESS_CTRL)
-         NIR_PASS(_, producer, nir_lower_tess_level_array_vars_to_vec);
-
-      NIR_PASS(_, producer, nir_opt_combine_stores, nir_var_shader_out);
    }
 
    if (consumer->info.stage == MESA_SHADER_GEOMETRY || consumer->info.stage == MESA_SHADER_TESS_CTRL ||
@@ -1531,37 +1505,6 @@ radv_pipeline_needs_noop_fs(struct radv_graphics_pipeline *pipeline, const struc
 }
 
 static void
-radv_remove_varyings(nir_shader *nir)
-{
-   /* We can't demote mesh outputs to nir_var_shader_temp yet, because
-    * they don't support array derefs of vectors.
-    */
-   if (nir->info.stage == MESA_SHADER_MESH)
-      return;
-
-   bool fixup_derefs = false;
-
-   nir_foreach_shader_out_variable (var, nir) {
-      if (var->data.always_active_io)
-         continue;
-
-      if (var->data.location < VARYING_SLOT_VAR0)
-         continue;
-
-      nir->info.outputs_written &= ~BITFIELD64_BIT(var->data.location);
-      var->data.location = 0;
-      var->data.mode = nir_var_shader_temp;
-      fixup_derefs = true;
-   }
-
-   if (fixup_derefs) {
-      NIR_PASS(_, nir, nir_fixup_deref_modes);
-      NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_shader_temp, NULL);
-      NIR_PASS(_, nir, nir_opt_dce);
-   }
-}
-
-static void
 radv_graphics_shaders_link(const struct radv_device *device, const struct radv_graphics_state_key *gfx_state,
                            struct radv_shader_stage *stages)
 {
@@ -1703,29 +1646,33 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
    /* Prepare shaders before running nir_opt_varyings. */
    for (int i = 0; i < ARRAY_SIZE(graphics_shader_order); ++i) {
       const mesa_shader_stage s = graphics_shader_order[i];
-      const mesa_shader_stage next = stages[s].info.next_stage;
-      if (!stages[s].nir || next == MESA_SHADER_NONE || !stages[next].nir)
+      if (!stages[s].nir)
          continue;
 
-      if (stages[s].key.optimisations_disabled || stages[next].key.optimisations_disabled)
+      if (stages[s].key.optimisations_disabled)
          continue;
 
-      nir_shader *producer = stages[s].nir;
-      nir_shader *consumer = stages[next].nir;
+      nir_shader *shader = stages[s].nir;
 
       /* It is expected by nir_opt_varyings that no undefined stores are present in the shader. */
-      NIR_PASS(_, producer, nir_opt_undef);
+      NIR_PASS(_, shader, nir_opt_undef);
 
       /* Update load/store alignments because inter-stage code motion may move instructions used to deduce this info. */
-      NIR_PASS(_, consumer, nir_opt_load_store_update_alignments);
+      NIR_PASS(_, shader, nir_opt_load_store_update_alignments);
 
       /* Scalarize all I/O, because nir_opt_varyings and nir_opt_vectorize_io expect all I/O to be scalarized. */
-      NIR_PASS(_, producer, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
-      NIR_PASS(_, consumer, nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
+      nir_variable_mode sca_mode = nir_var_shader_in;
+      bool sca_progress;
+      if (s != MESA_SHADER_FRAGMENT)
+         sca_mode |= nir_var_shader_out;
 
-      /* Eliminate useless vec->mov copies resulting from scalarization. */
-      NIR_PASS(_, producer, nir_opt_copy_prop);
-      NIR_PASS(_, producer, nir_opt_constant_folding);
+      NIR_PASS(sca_progress, shader, nir_lower_io_to_scalar, sca_mode, NULL, NULL);
+
+      if (sca_progress) {
+         /* Eliminate useless vec->mov copies resulting from scalarization. */
+         NIR_PASS(_, shader, nir_opt_copy_prop);
+         NIR_PASS(_, shader, nir_opt_constant_folding);
+      }
    }
 
    int highest_changed_producer = -1;
@@ -1787,36 +1734,56 @@ radv_graphics_shaders_link_varyings(struct radv_shader_stage *stages, enum amd_g
    /* Run optimizations and fixups after linking. */
    for (int i = 0; i < ARRAY_SIZE(graphics_shader_order); ++i) {
       const mesa_shader_stage s = graphics_shader_order[i];
-      const mesa_shader_stage next = stages[s].info.next_stage;
       if (!stages[s].nir)
          continue;
 
-      nir_shader *producer = stages[s].nir;
+      nir_shader *shader = stages[s].nir;
 
-      /* Re-vectorize I/O for stages that output to memory (LDS or VRAM).
-       * Don't vectorize FS inputs, doing so just regresses shader stats without any benefit.
-       * There is also no benefit from re-vectorizing the outputs of the last pre-rasterization
-       * stage here, because ac_nir_lower_ngg/legacy already takes care of that.
+      /* Re-vectorize I/O for stages that use memory for I/O (LDS or VRAM).
+       * Don't vectorize FS I/O, doing so just regresses shader stats without any benefit.
        */
-      if (next != MESA_SHADER_NONE && stages[next].nir && next != MESA_SHADER_FRAGMENT &&
-          !stages[s].key.optimisations_disabled && !stages[next].key.optimisations_disabled) {
-         nir_shader *consumer = stages[next].nir;
-         NIR_PASS(_, producer, nir_opt_vectorize_io, nir_var_shader_out, false);
-         NIR_PASS(_, consumer, nir_opt_vectorize_io, nir_var_shader_in, false);
+      if (s != MESA_SHADER_FRAGMENT && !stages[s].key.optimisations_disabled) {
+         /* Delete dead instructions to prevent them from being vectorized. */
+         NIR_PASS(_, shader, nir_opt_dce);
+
+         /* Vectorize inputs. Non-FS inputs are always read from memory. */
+         nir_variable_mode vec_mode = nir_var_shader_in;
+
+         /* There is also no benefit from re-vectorizing the outputs of the last pre-rasterization
+          * stage here, because ac_nir_lower_ngg/legacy already takes care of that.
+          */
+         if (!radv_is_last_vgt_stage(&stages[s]))
+            vec_mode |= nir_var_shader_out;
+
+         /* Scalarize and revectorize VS inputs to make sure every VS input is loaded by a
+          * single *_load_format_* instruction. Those instructions can't skip loading unused
+          * components before the last used component, so loading X, Y, Z, W separately
+          * actually loads X, XY, XYZ, XYZW, which unnecessarily increases VMEM return data
+          * transfers between the VMEM cache and the SIMDs, which wastes SIMD<->VMEM cache bandwidth.
+          * By allowing holes during VS input vectorization, VS input loads loading different
+          * components are always merged, so that no used or unused component is ever loaded twice.
+          */
+         if (s == MESA_SHADER_VERTEX) {
+            NIR_PASS(_, shader, nir_opt_vectorize_io, nir_var_shader_in, true);
+            vec_mode &= ~nir_var_shader_in;
+         }
+
+         if (vec_mode)
+            NIR_PASS(_, shader, nir_opt_vectorize_io, vec_mode, false);
       }
 
       /* Gather shader info; at least the I/O info likely changed
        * and changes to only the I/O info are not reflected in nir_opt_varyings_progress.
        */
-      nir_shader_gather_info(producer, nir_shader_get_entrypoint(producer));
+      nir_shader_gather_info(shader, nir_shader_get_entrypoint(shader));
 
       /* Recompute intrinsic bases of PS inputs in order to remove gaps. */
       if (s == MESA_SHADER_FRAGMENT)
-         radv_recompute_fs_input_bases(producer);
+         radv_recompute_fs_input_bases(shader);
 
       /* Recreate XFB info from intrinsics (nir_opt_varyings may have changed it). */
-      if (producer->xfb_info) {
-         nir_gather_xfb_info_from_intrinsics(producer);
+      if (shader->xfb_info) {
+         nir_gather_xfb_info_from_intrinsics(shader);
       }
    }
 
@@ -2855,16 +2822,6 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
       NIR_PASS(_, stages[MESA_SHADER_GEOMETRY].nir, nir_lower_vars_to_ssa);
    }
 
-   /* Remove all varyings when the fragment shader is a noop. */
-   if (noop_fs) {
-      radv_foreach_stage (i, active_nir_stages) {
-         if (radv_is_last_vgt_stage(&stages[i])) {
-            radv_remove_varyings(stages[i].nir);
-            break;
-         }
-      }
-   }
-
    radv_graphics_shaders_link(device, gfx_state, stages);
 
    if (stages[MESA_SHADER_FRAGMENT].nir) {
@@ -2928,6 +2885,30 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
       if (update_info)
          nir_shader_gather_info(stages[MESA_SHADER_FRAGMENT].nir,
                                 nir_shader_get_entrypoint(stages[MESA_SHADER_FRAGMENT].nir));
+   }
+
+   /* Remove all varyings when the fragment shader is a noop. */
+   if (noop_fs) {
+      radv_foreach_stage (i, active_nir_stages) {
+         if (!radv_is_last_vgt_stage(&stages[i]))
+            continue;
+
+         bool progress = false;
+
+         /* Remove all output varyings. */
+         NIR_PASS(progress, stages[i].nir, nir_remove_outputs, MESA_SHADER_FRAGMENT, ~0ull, 0);
+
+         if (progress) {
+            /* Remove dead code resulting from removed output varyings. */
+            do {
+               progress = false;
+               NIR_PASS(progress, stages[i].nir, nir_opt_dce);
+               NIR_PASS(progress, stages[i].nir, nir_opt_dead_cf);
+            } while (progress);
+         }
+
+         break;
+      }
    }
 
    /* Optimize varyings on lowered shader I/O (more efficient than optimizing I/O derefs). */

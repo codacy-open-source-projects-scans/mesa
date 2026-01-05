@@ -673,6 +673,10 @@
    DRI_CONF_OPT_B(hk_image_view_min_lod, def, \
                   "Emulate VK_EXT_image_view_min_lod (conformant but slower)")
 
+#define DRI_CONF_HK_ENABLE_VERTEX_PIPELINE_STORES_ATOMICS(def) \
+   DRI_CONF_OPT_B(hk_enable_vertex_pipeline_stores_atomics, def, \
+                  "Enable vertexPipelineStoresAndAtomics")
+
 /**
  * \brief venus specific configuration options
  */
@@ -784,6 +788,10 @@
 #define DRI_CONF_RADV_NO_IMPLICIT_VARYING_SUBGROUP_SIZE(def) \
    DRI_CONF_OPT_B(radv_no_implicit_varying_subgroup_size, def, \
                   "Do not assume VK_PIPELINE_SHADER_STAGE_CREATE_ALLOW_VARYING_SUBGROUP_SIZE for SPIR-V 1.6.")
+
+#define DRI_CONF_RADV_PREFER_2D_SWIZZLE_FOR_3D_STORAGE(def) \
+   DRI_CONF_OPT_B(radv_prefer_2d_swizzle_for_3d_storage, def, \
+                  "Prefer 2D swizzle mode for 3D storage images.")
 
 /**
  * Overrides for forcing re-compilation of pipelines when RADV_BUILD_ID_OVERRIDE is enabled.

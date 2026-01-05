@@ -20,6 +20,7 @@ from collections import defaultdict, Counter
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from itertools import chain
+from os import getenv
 from subprocess import check_output, CalledProcessError
 from typing import Callable, Dict, TYPE_CHECKING, Iterable, Literal, Optional, Tuple, cast
 
@@ -56,7 +57,10 @@ STATUS_COLORS = defaultdict(lambda: "", {
 COMPLETED_STATUSES = frozenset({"success", "failed"})
 RUNNING_STATUSES = frozenset({"created", "pending", "running"})
 
-console = Console(highlight=False)
+if getenv("CI_JOB_ID"):
+    console = Console(highlight=False, no_color=False, color_system="truecolor", width=120)
+else:
+    console = Console(highlight=False)
 print = console.print
 
 
@@ -141,6 +145,8 @@ def monitor_pipeline(
     job_filter: callable,
     dependencies: set[str],
     stress: int,
+    inhibit_single_target_trace: int = False,
+    polling_period: int = REFRESH_WAIT_JOBS,
 ) -> tuple[Optional[int], Optional[int], Dict[str, Dict[int, Tuple[float, str, str]]]]:
     """Monitors pipeline and delegate canceling jobs"""
     statuses: dict[str, str] = defaultdict(str)
@@ -234,17 +240,18 @@ def monitor_pipeline(
                     enough = False
 
             if not enough:
-                pretty_wait(REFRESH_WAIT_JOBS)
+                pretty_wait(polling_period)
                 continue
 
         if jobs_waiting:
             print(f"[yellow]Waiting for jobs to update status:")
             print_formatted_list(jobs_waiting, indentation=8, color="[yellow]")
-            pretty_wait(REFRESH_WAIT_JOBS)
+            pretty_wait(polling_period)
             continue
 
         if (
-            stress in [0, 1]
+            not inhibit_single_target_trace
+            and stress in [0, 1]
             and len(target_statuses) == 1
             and RUNNING_STATUSES.intersection(target_statuses.values())
         ):
@@ -268,7 +275,7 @@ def monitor_pipeline(
         if skip_follow_statuses.issuperset(target_statuses.values()):
             return None, 0, execution_times
 
-        pretty_wait(REFRESH_WAIT_JOBS)
+        pretty_wait(polling_period)
 
 
 def enable_job(
@@ -405,7 +412,7 @@ def print_log(
         # GitLab's REST API doesn't offer pagination for logs, so we have to refetch it all
         lines = job.trace().decode().splitlines()
         for line in lines[printed_lines:]:
-            print(line)
+            print(line, markup=False)
         printed_lines = len(lines)
 
         if job.status in COMPLETED_STATUSES:
@@ -503,6 +510,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Exit after printing target jobs and dependencies",
     )
+    parser.add_argument(
+        "--no-job-log",
+        action="store_true",
+        help="When there is only one target job, inhibit the job trace output in the console.",
+    )
+    parser.add_argument(
+        "--polling-period",
+        type=int,
+        default=REFRESH_WAIT_JOBS,
+        help=f"Specify the waiting seconds between monitor loops. (Default: {REFRESH_WAIT_JOBS})",
+     )
+
 
     mutex_group1 = parser.add_mutually_exclusive_group()
     mutex_group1.add_argument(
@@ -637,7 +656,10 @@ def __job_duration_record(dict_item: tuple) -> str:
 def link2print(url: str, text: str, text_pad: int = 0) -> str:
     text = str(text)
     text_pad = len(text) if text_pad < 1 else text_pad
-    return f"[link={url}]{text:{text_pad}}[/link]"
+    if console.is_terminal:
+        return f"[link={url}]{text:{text_pad}}[/link]"
+    else:
+        return f"{text:{text_pad}}"
 
 
 def main() -> None:
@@ -764,7 +786,9 @@ def main() -> None:
             pipe,
             job_filter,
             deps,
-            args.stress
+            args.stress,
+            args.no_job_log,
+            args.polling_period,
         )
 
         if target_job_id:

@@ -210,6 +210,8 @@ struct fd_dev_info {
 
       bool has_sampler_minmax;
 
+      bool has_astc_hdr;
+
       bool broken_ds_ubwc_quirk;
 
       /* See ir3_compiler::has_scalar_alu. */
@@ -405,6 +407,9 @@ struct fd_dev_info {
        * driver.
        */
       bool has_hw_bin_scaling;
+
+      /* Whether the (eolm) and (eogm) nop flags are supported. */
+      bool has_eolm_eogm;
    } props;
 };
 

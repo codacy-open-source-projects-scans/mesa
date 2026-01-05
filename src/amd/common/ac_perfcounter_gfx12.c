@@ -566,40 +566,32 @@ static struct ac_pc_block_base gfx12_RLC = {
 
    .select0 = gfx12_RLC_select0,
    .counter0_lo = R_035200_RLC_PERFCOUNTER0_LO,
-   .num_spm_counters = 0,
 };
 
 /* SQ */
 static unsigned gfx12_SQ_select0[] = {
-   R_036700_SQ_PERFCOUNTER0_SELECT,
-   R_036704_SQ_PERFCOUNTER1_SELECT,
-   R_036708_SQ_PERFCOUNTER2_SELECT,
-   R_03670C_SQ_PERFCOUNTER3_SELECT,
-   R_036710_SQ_PERFCOUNTER4_SELECT,
-   R_036714_SQ_PERFCOUNTER5_SELECT,
-   R_036718_SQ_PERFCOUNTER6_SELECT,
-   R_03671C_SQ_PERFCOUNTER7_SELECT,
-   R_036720_SQ_PERFCOUNTER8_SELECT,
-   R_036724_SQ_PERFCOUNTER9_SELECT,
-   R_036728_SQ_PERFCOUNTER10_SELECT,
-   R_03672C_SQ_PERFCOUNTER11_SELECT,
-   R_036730_SQ_PERFCOUNTER12_SELECT,
-   R_036734_SQ_PERFCOUNTER13_SELECT,
-   R_036738_SQ_PERFCOUNTER14_SELECT,
-   R_03673C_SQ_PERFCOUNTER15_SELECT,
+   R_036740_SQG_PERFCOUNTER0_SELECT,
+   R_036744_SQG_PERFCOUNTER1_SELECT,
+   R_036748_SQG_PERFCOUNTER2_SELECT,
+   R_03674C_SQG_PERFCOUNTER3_SELECT,
+   R_036750_SQG_PERFCOUNTER4_SELECT,
+   R_036754_SQG_PERFCOUNTER5_SELECT,
+   R_036758_SQG_PERFCOUNTER6_SELECT,
+   R_03675C_SQG_PERFCOUNTER7_SELECT,
 };
 static struct ac_pc_block_base gfx12_SQ = {
    .gpu_block = SQ,
    .name = "SQ",
    .distribution = AC_PC_PER_SHADER_ENGINE,
-   .num_counters = 16,
+   .num_counters = 8,
    .flags = AC_PC_BLOCK_SE | AC_PC_BLOCK_SHADER,
 
    .select0 = gfx12_SQ_select0,
    .select_or = S_036700_SQC_BANK_MASK(15),
-   .counter0_lo = R_034700_SQ_PERFCOUNTER0_LO,
+   .counter0_lo = R_034790_SQG_PERFCOUNTER0_LO,
 
-   .num_spm_wires = 16,
+   .num_spm_counters = 8,
+   .num_spm_wires = 8,
    .spm_block_select = AC_SPM_SE_BLOCK_SQG,
 };
 
@@ -646,11 +638,27 @@ static struct ac_pc_block_base gfx12_UTCL1 = {
 
    .select0 = gfx12_UTCL1_select0,
    .counter0_lo = R_035680_UTCL1_PERFCOUNTER0_LO,
-
-   .num_spm_counters = 0,
 };
 
 /* SQ_WQP */
+static unsigned gfx12_SQ_WGP_select0[] = {
+   R_036700_SQ_PERFCOUNTER0_SELECT,
+   R_036704_SQ_PERFCOUNTER1_SELECT,
+   R_036708_SQ_PERFCOUNTER2_SELECT,
+   R_03670C_SQ_PERFCOUNTER3_SELECT,
+   R_036710_SQ_PERFCOUNTER4_SELECT,
+   R_036714_SQ_PERFCOUNTER5_SELECT,
+   R_036718_SQ_PERFCOUNTER6_SELECT,
+   R_03671C_SQ_PERFCOUNTER7_SELECT,
+   R_036720_SQ_PERFCOUNTER8_SELECT,
+   R_036724_SQ_PERFCOUNTER9_SELECT,
+   R_036728_SQ_PERFCOUNTER10_SELECT,
+   R_03672C_SQ_PERFCOUNTER11_SELECT,
+   R_036730_SQ_PERFCOUNTER12_SELECT,
+   R_036734_SQ_PERFCOUNTER13_SELECT,
+   R_036738_SQ_PERFCOUNTER14_SELECT,
+   R_03673C_SQ_PERFCOUNTER15_SELECT,
+};
 static struct ac_pc_block_base gfx12_SQ_WGP = {
    .gpu_block = SQ_WGP,
    .name = "SQ_WGP",
@@ -658,7 +666,7 @@ static struct ac_pc_block_base gfx12_SQ_WGP = {
    .num_counters = 16,
    .flags = AC_PC_BLOCK_SE | AC_PC_BLOCK_SHADER,
 
-   .select0 = gfx12_SQ_select0,
+   .select0 = gfx12_SQ_WGP_select0,
    .counter0_lo = R_034700_SQ_PERFCOUNTER0_LO,
 
    .num_spm_counters = 8,
@@ -681,6 +689,52 @@ static struct ac_pc_block_base gfx12_GRBMSE = {
 
    .select0 = gfx12_GRBMSE_select0,
    .counter0_lo = R_0343E8_GRBMH_PERFCOUNTER0_LO,
+};
+
+/* GCEA_CPWD */
+static unsigned gfx12_GCEA_CPWD_select0[] = {
+   R_036800_GC_EA_CPWD_PERFCOUNTER0_SELECT,
+   R_036808_GC_EA_CPWD_PERFCOUNTER1_SELECT,
+};
+static unsigned gfx12_GCEA_CPWD_select1[] = {
+   R_036804_GC_EA_CPWD_PERFCOUNTER0_SELECT1,
+};
+static struct ac_pc_block_base gfx12_GCEA_CPWD = {
+   .gpu_block = GCEA_CPWD,
+   .name = "GCEA_CPWD",
+   .distribution = AC_PC_GLOBAL_BLOCK,
+   .num_counters = 2,
+
+   .select0 = gfx12_GCEA_CPWD_select0,
+   .select1 = gfx12_GCEA_CPWD_select1,
+   .counter0_lo = R_034980_GC_EA_CPWD_PERFCOUNTER0_LO,
+
+   .num_spm_counters = 1,
+   .num_spm_wires = 2,
+   .spm_block_select = AC_SPM_GLOBAL_BLOCK_GCEA_CPWD,
+};
+
+/* GCEA_SE */
+static unsigned gfx12_GCEA_SE_select0[] = {
+   R_036880_GC_EA_SE_PERFCOUNTER0_SELECT,
+   R_036888_GC_EA_SE_PERFCOUNTER1_SELECT,
+};
+static unsigned gfx12_GCEA_SE_select1[] = {
+   R_036884_GC_EA_SE_PERFCOUNTER0_SELECT1,
+};
+static struct ac_pc_block_base gfx12_GCEA_SE = {
+   .gpu_block = GCEA_SE,
+   .name = "GCEA_SE",
+   .distribution = AC_PC_GLOBAL_BLOCK,
+   .num_counters = 2,
+
+   .select0 = gfx12_GCEA_SE_select0,
+   .select1 = gfx12_GCEA_SE_select1,
+   .counter0_lo = R_0349C0_GC_EA_SE_PERFCOUNTER0_LO,
+
+   .num_spm_counters = 1,
+   .num_spm_wires = 2,
+   .spm_block_select = AC_SPM_GLOBAL_BLOCK_GCEA_SE,
 };
 
 static struct ac_pc_block_gfxdescr groups_gfx12[] = {
@@ -710,6 +764,8 @@ static struct ac_pc_block_gfxdescr groups_gfx12[] = {
    {&gfx12_TD, 271},
    {&gfx12_UTCL1, 71, 2},
    {&gfx12_SQ_WGP, 511, 4},
+   {&gfx12_GCEA_CPWD, 32},
+   {&gfx12_GCEA_SE, 32},
 };
 
 const struct ac_pc_block_gfxdescr *

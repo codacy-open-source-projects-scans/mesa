@@ -625,18 +625,117 @@ bool si_should_clear_lds(struct si_screen *sscreen, const struct nir_shader *sha
       shader->info.shared_size > 0 && sscreen->options.clear_lds;
 }
 
-/* Run passes that eliminate code and affect shader_info. These should be run before linking
- * and shader_info gathering. Lowering passes can be run here too, but only if they lead to
- * better code or lower undesirable representations (like derefs). Lowering passes that prevent
- * linking optimizations or destroy shader_info shouldn't be run here.
+/* Run passes that eliminate code and affect si_shader_variant_info. These should be run before
+ * linking and shader variant info gathering. Lowering passes can be run here too, but only if
+ * they lead to better code or lower undesirable representations (like derefs). Lowering passes
+ * that prevent linking optimizations or destroy shader info shouldn't be run here.
+ *
+ * Changes done here aren't reflected in si_shader_info because that's only gathered when we
+ * first receive the shader.
  */
-static void run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
+static void si_preprocess_nir(struct si_nir_shader_ctx *ctx)
 {
    struct si_shader *shader = ctx->shader;
    struct si_shader_selector *sel = shader->selector;
    const union si_shader_key *key = &shader->key;
    nir_shader *nir = ctx->nir;
    bool progress = false;
+
+   const struct nir_lower_tex_options lower_tex_options = {
+      .lower_txp = ~0u,
+      .lower_txf_offset = true,
+      .lower_txs_cube_array = true,
+      .lower_invalid_implicit_lod = true,
+      .lower_tg4_offsets = true,
+      .lower_to_fragment_fetch_amd = sel->screen->info.gfx_level < GFX11,
+      .lower_1d = sel->screen->info.gfx_level == GFX9,
+      .optimize_txd = true,
+   };
+   NIR_PASS(progress, nir, nir_lower_tex, &lower_tex_options);
+
+   const struct nir_lower_image_options lower_image_options = {
+      .lower_cube_size = true,
+      .lower_to_fragment_mask_load_amd = sel->screen->info.gfx_level < GFX11 &&
+                                         !(sel->screen->debug_flags & DBG(NO_FMASK)),
+   };
+   NIR_PASS(progress, nir, nir_lower_image, &lower_image_options);
+
+   NIR_PASS(progress, nir, ac_nir_lower_sin_cos);
+   NIR_PASS(progress, nir, si_nir_lower_intrinsics_early);
+
+   if (nir->info.stage == MESA_SHADER_TASK) {
+      NIR_PASS(progress, nir, ac_nir_lower_task_outputs_to_mem, false);
+   } else if (nir->info.stage == MESA_SHADER_MESH) {
+      NIR_PASS(progress, nir, ac_nir_lower_mesh_inputs_to_mem);
+   }
+
+   if (mesa_shader_stage_is_compute(nir->info.stage)) {
+      /* gl_LocalInvocationIndex must be derived from gl_LocalInvocationID.xyz to make it correct
+       * with quad derivatives. Using gl_SubgroupID for that (which is what we do by default) is
+       * incorrect with a non-linear thread order.
+       *
+       * On Gfx12, we always use a non-linear thread order if the workgroup X and Y size is
+       * divisible by 2.
+       */
+      NIR_PASS(progress, nir, nir_lower_compute_system_values,
+               &(nir_lower_compute_system_values_options){
+                  .lower_local_invocation_index =
+                     nir->info.derivative_group == DERIVATIVE_GROUP_QUADS ||
+                     (sel->screen->info.gfx_level >= GFX12 &&
+                      nir->info.derivative_group == DERIVATIVE_GROUP_NONE &&
+                      (nir->info.workgroup_size_variable ||
+                       (nir->info.workgroup_size[0] % 2 == 0 && nir->info.workgroup_size[1] % 2 == 0)))
+               });
+
+      /* Gfx12 supports this in hw. */
+      if (sel->screen->info.gfx_level < GFX12 &&
+          nir->info.derivative_group == DERIVATIVE_GROUP_QUADS) {
+         NIR_PASS(progress, nir, nir_opt_cse); /* CSE load_local_invocation_id */
+         NIR_PASS(progress, nir, nir_lower_compute_system_values,
+                  &(nir_lower_compute_system_values_options){
+                     .shuffle_local_ids_for_quad_derivatives = true,
+                  });
+      }
+   }
+
+   if (nir->info.stage == MESA_SHADER_MESH && !sel->screen->info.mesh_fast_launch_2) {
+      NIR_PASS(progress, nir, nir_lower_compute_system_values,
+               &(nir_lower_compute_system_values_options){
+                  /* Mesh shaders run as NGG which can implement local_invocation_index from
+                   * the wave ID in merged_wave_info, but they don't have local_invocation_ids
+                   * in FAST_LAUNCH=1 mode (the default on GFX10.3, deprecated on GFX11).
+                   */
+                  .lower_cs_local_id_to_index = true,
+                  /* Mesh shaders only have a 1D "vertex index" which we use
+                   * as "workgroup index" to emulate the 3D workgroup ID.
+                   */
+                  .lower_workgroup_id_to_index = true,
+                  .shortcut_1d_workgroup_id = true,
+               });
+   }
+
+   if (nir->info.stage == MESA_SHADER_GEOMETRY) {
+      NIR_PASS(progress, nir, nir_lower_gs_intrinsics,
+               nir_lower_gs_intrinsics_per_stream |
+               (shader->key.ge.as_ngg ?
+                   nir_lower_gs_intrinsics_count_primitives |
+                   nir_lower_gs_intrinsics_count_vertices_per_primitive |
+                   nir_lower_gs_intrinsics_overwrite_incomplete : 0));
+      NIR_PASS(progress, nir, nir_lower_vars_to_ssa);
+   }
+
+   /* nir_opt_clip_cull_const, si_nir_kill_outputs, and ac_nir_optimize_outputs require outputs
+    * to be scalar.
+    */
+   if (nir->info.stage == MESA_SHADER_VERTEX ||
+       nir->info.stage == MESA_SHADER_TESS_EVAL ||
+       nir->info.stage == MESA_SHADER_GEOMETRY ||
+       nir->info.stage == MESA_SHADER_MESH)
+      NIR_PASS(progress, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
+
+   /* IO must be scalar when this is called. */
+   if (nir->info.stage <= MESA_SHADER_GEOMETRY && nir->info.stage != MESA_SHADER_TESS_CTRL)
+      NIR_PASS(_, nir, nir_opt_clip_cull_const);
 
    /* Kill outputs according to the shader key. */
    if (nir->info.stage <= MESA_SHADER_GEOMETRY || nir->info.stage == MESA_SHADER_MESH)
@@ -694,11 +793,9 @@ static void run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       /* This uses the prolog/epilog keys, so only monolithic shaders can call this. */
       if (shader->is_monolithic) {
-         /* This lowers load_color intrinsics to COLn/BFCn input loads and two-side color
-          * selection.
-          */
+         /* This applies the flatshade and color two-side PS prolog options. */
          if (sel->info.colors_read)
-            NIR_PASS(progress, nir, si_nir_lower_ps_color_inputs, &shader->key, &sel->info);
+            NIR_PASS(progress, nir, si_nir_lower_color_flatshade_twoside, shader);
 
          /* This adds discard and barycentrics. */
          if (key->ps.mono.point_smoothing)
@@ -754,6 +851,7 @@ static void run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
          ac_nir_lower_ps_early_options early_options = {
             .optimize_frag_coord = true,
             .frag_coord_is_center = true,
+            .lower_color_inputs_to_load_color01 = true,
             .alpha_func = COMPARE_FUNC_ALWAYS,
             .spi_shader_col_format_hint = ~0,
          };
@@ -799,16 +897,19 @@ static void run_pre_link_optimization_passes(struct si_nir_shader_ctx *ctx)
    /* Lower all other indirect indexing to if-else ladders or scratch. */
    progress |= ac_nir_lower_indirect_derefs(nir, sel->screen->info.gfx_level);
 
+   NIR_PASS(_, nir, si_nir_mark_divergent_texture_non_uniform);
+   NIR_PASS(progress, nir, nir_lower_explicit_io, nir_var_mem_shared, nir_address_format_32bit_offset);
+
    if (progress)
       si_nir_opts(shader->selector->screen, nir, false);
 }
 
 /* Late optimization passes and lowering passes. The majority of lowering passes are here.
- * These passes should have no impact on linking optimizations and shouldn't affect shader_info
- * (those should be run before this) because any changes in shader_info won't be reflected
- * in hw registers from now on.
+ * These passes should have no impact on linking optimizations and shouldn't affect
+ * si_shader_variant_info except info gathered by si_get_late_shader_variant_info
+ * because any other changes in shader info aren't be reflected in hw registers.
  */
-static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *ctx)
+static void si_postprocess_nir(struct si_nir_shader_ctx *ctx)
 {
    struct si_shader *shader = ctx->shader;
    struct si_shader_selector *sel = shader->selector;
@@ -1016,6 +1117,7 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
    /* Global access lowering must be called after lowering ABI which emits regular load_global intrinsics. */
    NIR_PASS(progress, nir, ac_nir_lower_global_access);
    NIR_PASS(progress, nir, nir_lower_int64);
+   NIR_PASS(progress, nir, nir_lower_fp16_casts, nir_lower_fp16_split_fp64);
 
    NIR_PASS(progress, nir, ac_nir_lower_intrinsics_to_args, sel->screen->info.gfx_level,
             sel->screen->info.has_ls_vgpr_init_bug,
@@ -1047,16 +1149,73 @@ static void run_late_optimization_and_lowering_passes(struct si_nir_shader_ctx *
 
    si_nir_late_opts(nir);
 
-   NIR_PASS(progress, nir, nir_opt_sink,
+   /* Only do this for GPUs supporting 16-bit packed math. */
+   if (sel->screen->info.cu_info.has_packed_math_16bit) {
+      /* Optimize types of image_sample sources and destinations.
+       *
+       * The image_sample sources bit sizes are:
+       *   nir_tex_src_coord:       a16 ? 16 : 32
+       *   nir_tex_src_comparator:  32
+       *   nir_tex_src_offset:      32
+       *   nir_tex_src_bias:        a16 ? 16 : 32
+       *   nir_tex_src_lod:         a16 ? 16 : 32
+       *   nir_tex_src_min_lod:     a16 ? 16 : 32
+       *   nir_tex_src_ms_index:    a16 ? 16 : 32
+       *   nir_tex_src_ddx:         has_g16 ? (g16 ? 16 : 32) : (a16 ? 16 : 32)
+       *   nir_tex_src_ddy:         has_g16 ? (g16 ? 16 : 32) : (a16 ? 16 : 32)
+       *
+       * We only use a16/g16 if all of the affected sources are 16bit.
+       */
+      bool separate_g16 = sel->screen->info.gfx_level >= GFX10;
+      struct nir_opt_tex_srcs_options opt_srcs_options[] = {
+         {
+            .sampler_dims =
+               ~(BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE) | BITFIELD_BIT(GLSL_SAMPLER_DIM_BUF)),
+            .src_types = (1 << nir_tex_src_coord) | (1 << nir_tex_src_lod) |
+                         (1 << nir_tex_src_bias) | (1 << nir_tex_src_min_lod) |
+                         (1 << nir_tex_src_ms_index) |
+                         (separate_g16 ? 0 : (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy)),
+         },
+         {
+            .sampler_dims = ~BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE),
+            .src_types = (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy),
+         },
+      };
+      struct nir_opt_16bit_tex_image_options opt_16bit_options = {
+         .rounding_mode = nir_rounding_mode_undef,
+         .opt_tex_dest_types = nir_type_float | nir_type_int | nir_type_uint,
+         .opt_image_dest_types = nir_type_float | nir_type_int | nir_type_uint,
+         .integer_dest_saturates = true,
+         .opt_image_store_data = true,
+         .opt_image_srcs = true,
+         .opt_srcs_options_count = separate_g16 ? 2 : 1,
+         .opt_srcs_options = opt_srcs_options,
+      };
+      bool run_copy_prop = false;
+      NIR_PASS(run_copy_prop, nir, nir_opt_16bit_tex_image, &opt_16bit_options);
+
+      /* Optimizing 16bit texture/image dests leaves scalar moves that stops
+       * nir_opt_vectorize from vectorzing the alu uses of them.
+       */
+      if (run_copy_prop) {
+         NIR_PASS(_, nir, nir_opt_copy_prop);
+         NIR_PASS(_, nir, nir_opt_dce);
+      }
+
+      NIR_PASS(_, nir, nir_opt_vectorize, ac_nir_opt_vectorize_cb, &sel->screen->info.gfx_level);
+   }
+
+   NIR_PASS(_, nir, nir_lower_alu_width, ac_nir_opt_vectorize_cb, &sel->screen->info.gfx_level);
+   NIR_PASS(_, nir, nir_opt_sink,
             nir_move_const_undef | nir_move_copies | nir_move_alu | nir_move_comparisons |
             nir_move_load_ubo | nir_move_load_ssbo);
-   NIR_PASS(progress, nir, nir_opt_move,
+   NIR_PASS(_, nir, nir_opt_move,
             nir_move_const_undef | nir_move_copies | nir_move_alu | nir_move_comparisons |
             nir_move_load_ubo);
    /* Run nir_opt_move again to make sure that comparisons are as close as possible to the first
     * use to prevent SCC spilling.
     */
-   NIR_PASS(progress, nir, nir_opt_move, nir_move_comparisons);
+   NIR_PASS(_, nir, nir_opt_move, nir_move_comparisons);
 
    /* This must be done after si_nir_late_opts() because it may generate vec const. */
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
@@ -1132,7 +1291,7 @@ static void get_nir_shaders(struct si_shader *shader, struct si_linked_shaders *
 
    for (unsigned i = 0; i < SI_NUM_LINKED_SHADERS; i++) {
       if (linked->shader[i].nir)
-         run_pre_link_optimization_passes(&linked->shader[i]);
+         si_preprocess_nir(&linked->shader[i]);
    }
 
    /* TODO: run linking optimizations here if we have LS+HS or ES+GS */
@@ -1146,7 +1305,7 @@ static void get_nir_shaders(struct si_shader *shader, struct si_linked_shaders *
    for (unsigned i = 0; i < SI_NUM_LINKED_SHADERS; i++) {
       if (linked->shader[i].nir) {
          si_get_shader_variant_info(shader, &linked->shader[i].temp_info, linked->shader[i].nir);
-         run_late_optimization_and_lowering_passes(&linked->shader[i]);
+         si_postprocess_nir(&linked->shader[i]);
          si_get_late_shader_variant_info(shader, &linked->shader[i].args, linked->shader[i].nir);
       }
    }
@@ -1890,9 +2049,9 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
 
          shader->info.uses_vmem_load_other |= shader->previous_stage->info.uses_vmem_load_other;
          shader->info.uses_vmem_sampler_or_bvh |= shader->previous_stage->info.uses_vmem_sampler_or_bvh;
-         shader->info.uses_instance_id |= shader->previous_stage->info.uses_instance_id;
-         shader->info.uses_base_instance |= shader->previous_stage->info.uses_base_instance;
-         shader->info.uses_draw_id |= shader->previous_stage->info.uses_draw_id;
+         shader->info.uses_sysval_instance_id |= shader->previous_stage->info.uses_sysval_instance_id;
+         shader->info.uses_sysval_base_instance |= shader->previous_stage->info.uses_sysval_base_instance;
+         shader->info.uses_sysval_draw_id |= shader->previous_stage->info.uses_sysval_draw_id;
          shader->info.uses_vs_state_indexed |= shader->previous_stage->info.uses_vs_state_indexed;
          shader->info.uses_gs_state_provoking_vtx_first |= shader->previous_stage->info.uses_gs_state_provoking_vtx_first;
          shader->info.uses_gs_state_outprim |= shader->previous_stage->info.uses_gs_state_outprim;
@@ -1921,7 +2080,7 @@ bool si_create_shader_variant(struct si_screen *sscreen, struct ac_llvm_compiler
                                         input_prim, gs_vertices_out, gs_invocations,
                                         max_workgroup_size, max_workgroup_size, shader->wave_size,
                                         es_sel->info.esgs_vertex_stride, shader->info.ngg_lds_vertex_size,
-                                        shader->info.ngg_lds_scratch_size, gs_sel->tess_turns_off_ngg,
+                                        shader->info.ngg_lds_scratch_size, gs_sel->info.tess_turns_off_ngg,
                                         gs_sel->stage == MESA_SHADER_GEOMETRY ? 255 : 0, &shader->ngg.info)) {
          mesa_loge("Failed to compute subgroup info");
          return false;

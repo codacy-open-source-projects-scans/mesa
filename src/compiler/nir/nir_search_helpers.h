@@ -130,24 +130,6 @@ is_nan(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
 }
 
 static inline bool
-is_negative_zero(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
-       unsigned src, unsigned num_components, const uint8_t *swizzle)
-{
-   /* only constant srcs: */
-   if (!nir_src_is_const(instr->src[src].src))
-      return false;
-
-   for (unsigned i = 0; i < num_components; i++) {
-      union di tmp;
-      tmp.d = nir_src_comp_as_float(instr->src[src].src, swizzle[i]);
-      if (tmp.ui != 0x8000000000000000ull)
-         return false;
-   }
-
-   return true;
-}
-
-static inline bool
 is_any_comp_nan(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
                 unsigned src, unsigned num_components, const uint8_t *swizzle)
 {
@@ -1016,6 +998,42 @@ is_a_number(const nir_search_state *state, const nir_alu_instr *instr, unsigned 
 {
    const struct ssa_result_range v = nir_analyze_range(state->range_ht, instr, src);
    return v.is_a_number;
+}
+
+static inline bool
+compare_component(const nir_alu_instr *instr, unsigned src, unsigned component,
+                  float f)
+{
+   nir_scalar comp = nir_scalar_resolved(instr->src[src].src.ssa, component);
+   return nir_scalar_is_const(comp) && nir_scalar_as_float(comp) == f;
+}
+
+static inline bool
+x_is_zero(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
+          UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
+{
+   return compare_component(instr, src, swizzle[0], 0.0);
+}
+
+static inline bool
+y_is_zero(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
+          UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
+{
+   return compare_component(instr, src, swizzle[1], 0.0);
+}
+
+static inline bool
+z_is_zero(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
+          UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
+{
+   return compare_component(instr, src, swizzle[2], 0.0);
+}
+
+static inline bool
+w_is_zero(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
+          UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
+{
+   return compare_component(instr, src, swizzle[3], 0.0);
 }
 
 #endif /* _NIR_SEARCH_ */

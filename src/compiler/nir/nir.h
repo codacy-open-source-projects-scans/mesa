@@ -5117,6 +5117,8 @@ bool nir_split_struct_vars(nir_shader *shader, nir_variable_mode modes);
 bool nir_lower_returns_impl(nir_function_impl *impl);
 bool nir_lower_returns(nir_shader *shader);
 
+bool nir_lower_workgroup_size(nir_shader *shader, const uint32_t target_wg_size);
+
 nir_def *nir_inline_function_impl(nir_builder *b,
                                   const nir_function_impl *impl,
                                   nir_def **params,
@@ -5341,6 +5343,8 @@ bool nir_lower_io(nir_shader *shader,
 void nir_lower_io_passes(nir_shader *nir, bool renumber_vs_inputs);
 bool nir_io_add_intrinsic_xfb_info(nir_shader *nir);
 bool nir_lower_io_indirect_loads(nir_shader *nir, nir_variable_mode modes);
+bool nir_remove_outputs(nir_shader *shader, mesa_shader_stage next_stage,
+                        uint64_t remove_varying, uint64_t remove_sysval);
 
 bool
 nir_lower_vars_to_explicit_types(nir_shader *shader,
