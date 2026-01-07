@@ -400,19 +400,17 @@ anv_device_upload_kernel(struct anv_device *device,
    return container_of(cached, struct anv_shader_internal, base);
 }
 
-#define SHA1_KEY_SIZE 20
-
 struct nir_shader *
 anv_device_search_for_nir(struct anv_device *device,
                           struct vk_pipeline_cache *cache,
                           const nir_shader_compiler_options *nir_options,
-                          unsigned char sha1_key[SHA1_KEY_SIZE],
+                          unsigned char sha1_key[SHA1_DIGEST_LENGTH],
                           void *mem_ctx)
 {
    if (cache == NULL)
       cache = device->vk.mem_cache;
 
-   return vk_pipeline_cache_lookup_nir(cache, sha1_key, SHA1_KEY_SIZE,
+   return vk_pipeline_cache_lookup_nir(cache, sha1_key, SHA1_DIGEST_LENGTH,
                                        nir_options, NULL, mem_ctx);
 }
 
@@ -420,12 +418,12 @@ void
 anv_device_upload_nir(struct anv_device *device,
                       struct vk_pipeline_cache *cache,
                       const struct nir_shader *nir,
-                      unsigned char sha1_key[SHA1_KEY_SIZE])
+                      unsigned char sha1_key[SHA1_DIGEST_LENGTH])
 {
    if (cache == NULL)
       cache = device->vk.mem_cache;
 
-   vk_pipeline_cache_add_nir(cache, sha1_key, SHA1_KEY_SIZE, nir);
+   vk_pipeline_cache_add_nir(cache, sha1_key, SHA1_DIGEST_LENGTH, nir);
 }
 
 void
@@ -436,7 +434,7 @@ anv_load_fp64_shader(struct anv_device *device)
 
    const char* shader_name = "float64_spv_lib";
    struct mesa_sha1 sha1_ctx;
-   uint8_t sha1[20];
+   uint8_t sha1[SHA1_DIGEST_LENGTH];
    _mesa_sha1_init(&sha1_ctx);
    _mesa_sha1_update(&sha1_ctx, shader_name, strlen(shader_name));
    _mesa_sha1_final(&sha1_ctx, sha1);

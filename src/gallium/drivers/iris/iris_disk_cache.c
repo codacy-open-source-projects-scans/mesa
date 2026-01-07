@@ -102,7 +102,7 @@ iris_disk_cache_store(struct disk_cache *cache,
    iris_disk_cache_compute_key(cache, ish, prog_key, prog_key_size, cache_key);
 
    if (debug) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] storing %s\n", sha1);
    }
@@ -203,7 +203,7 @@ iris_disk_cache_retrieve(struct iris_screen *screen,
    iris_disk_cache_compute_key(cache, ish, prog_key, key_size, cache_key);
 
    if (debug) {
-      char sha1[41];
+      char sha1[SHA1_DIGEST_STRING_LENGTH];
       _mesa_sha1_format(sha1, cache_key);
       fprintf(stderr, "[mesa disk cache] retrieving %s: ", sha1);
    }
@@ -361,7 +361,7 @@ iris_disk_cache_init(struct iris_screen *screen)
    char renderer[5 + 40 + 1] = {0};
 
    if (screen->brw) {
-      char device_info_sha[41];
+      char device_info_sha[SHA1_DIGEST_STRING_LENGTH];
       brw_device_sha1(device_info_sha, screen->devinfo);
       memcpy(renderer, "iris_", 5);
       memcpy(renderer + 5, device_info_sha, 40);
@@ -374,12 +374,12 @@ iris_disk_cache_init(struct iris_screen *screen)
 
    const struct build_id_note *note =
       build_id_find_nhdr_for_addr(iris_disk_cache_init);
-   assert(note && build_id_length(note) == 20); /* sha1 */
+   assert(note && build_id_length(note) == BUILD_ID_EXPECTED_HASH_LENGTH); /* sha1 */
 
    const uint8_t *id_sha1 = build_id_data(note);
    assert(id_sha1);
 
-   char timestamp[41];
+   char timestamp[SHA1_DIGEST_STRING_LENGTH];
    _mesa_sha1_format(timestamp, id_sha1);
 
    const uint64_t driver_flags =

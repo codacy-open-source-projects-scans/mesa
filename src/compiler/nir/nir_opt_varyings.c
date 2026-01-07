@@ -446,7 +446,7 @@
  *
  * When we decide not to interpolate a varying, we need to convert Infs to
  * NaNs manually. Infs can be converted to NaNs like this: x*0 + x
- * (suggested by Ian Romanick, the multiplication must be "exact")
+ * (suggested by Ian Romanick, the multiplication must preserve nans/infs")
  *
  * Changes to optimizations:
  * - When we propagate a uniform expression and NaNs must be preserved,
@@ -1038,7 +1038,7 @@ build_convert_inf_to_nan(nir_builder *b, nir_def *x)
 {
    /* Do x*0 + x. The multiplication by 0 can't be optimized out. */
    nir_def *fma = nir_ffma_imm1(b, x, 0, x);
-   nir_def_as_alu(fma)->exact = true;
+   nir_def_as_alu(fma)->fp_math_ctrl = nir_fp_preserve_nan | nir_fp_preserve_inf | nir_fp_exact;
    return fma;
 }
 
@@ -2257,13 +2257,15 @@ clone_ssa_impl(struct linkage_info *linkage, nir_builder *b, nir_def *ssa)
                 NIR_MAX_VEC_COMPONENTS);
       }
 
-      alu_clone->exact = alu->exact;
-      alu_clone->no_signed_wrap = alu->no_signed_wrap;
-      alu_clone->no_unsigned_wrap = alu->no_unsigned_wrap;
       alu_clone->def.num_components = alu->def.num_components;
       alu_clone->def.bit_size = alu->def.bit_size;
 
       clone = nir_builder_alu_instr_finish_and_insert(b, alu_clone);
+
+      /* nir_builder_alu_instr_finish_and_insert overwrites fp_math_ctrl. */
+      alu_clone->fp_math_ctrl = alu->fp_math_ctrl;
+      alu_clone->no_signed_wrap = alu->no_signed_wrap;
+      alu_clone->no_unsigned_wrap = alu->no_unsigned_wrap;
       break;
    }
 
@@ -2919,7 +2921,8 @@ find_tes_triangle_interp_3fmul_2fadd(struct linkage_info *linkage, unsigned i)
       /* Only maximum of 3 loads expected. Also reject exact ops because we
        * are going to do an inexact transformation with it.
        */
-      if (!fmul || fmul->op != nir_op_fmul || fmul->exact || num_fmuls == 3 ||
+      if (!fmul || fmul->op != nir_op_fmul || nir_alu_instr_is_exact(fmul) ||
+          num_fmuls == 3 ||
           !gather_fmul_tess_coord(iter->instr, fmul, vertex_index,
                                   &tess_coord_swizzle, &tess_coord_used,
                                   &load_tess_coord))
@@ -2930,7 +2933,7 @@ find_tes_triangle_interp_3fmul_2fadd(struct linkage_info *linkage, unsigned i)
       /* The multiplication must only be used by fadd. Also reject exact ops.
        */
       nir_alu_instr *fadd = get_single_use_as_alu(&fmul->def);
-      if (!fadd || fadd->op != nir_op_fadd || fadd->exact)
+      if (!fadd || fadd->op != nir_op_fadd || nir_alu_instr_is_exact(fadd))
          return false;
 
       /* The 3 fmuls must only be used by 2 fadds. */
@@ -3011,7 +3014,7 @@ find_tes_triangle_interp_1fmul_2ffma(struct linkage_info *linkage, unsigned i)
        * with it.
        */
       if (!alu || (alu->op != nir_op_fmul && alu->op != nir_op_ffma) ||
-          alu->exact ||
+          nir_alu_instr_is_exact(alu) ||
           !gather_fmul_tess_coord(iter->instr, alu, vertex_index,
                                   &tess_coord_swizzle, &tess_coord_used,
                                   &load_tess_coord))
@@ -3115,7 +3118,7 @@ static bool
 can_move_alu_across_interp(struct linkage_info *linkage, nir_alu_instr *alu)
 {
    /* Exact ALUs can't be moved across interpolation. */
-   if (alu->exact)
+   if (nir_alu_instr_is_exact(alu))
       return false;
 
    /* Interpolation converts Infs to NaNs. If we turn a result of an ALU

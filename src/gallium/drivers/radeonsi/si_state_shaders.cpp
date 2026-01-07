@@ -130,7 +130,7 @@ static bool si_shader_uses_bindless_images(struct si_shader_selector *selector)
  * Return the IR key for the shader cache.
  */
 void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
-                         unsigned wave_size, unsigned char ir_sha1_cache_key[20])
+                         unsigned wave_size, unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH])
 {
    struct blob blob = {};
    unsigned ir_size;
@@ -344,7 +344,7 @@ static bool si_load_shader_binary(struct si_shader *shader, void *binary)
  * Insert a shader into the cache. It's assumed the shader is not in the cache.
  * Use si_shader_cache_load_shader before calling this.
  */
-void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[20],
+void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH],
                                    struct si_shader *shader, bool insert_into_disk_cache)
 {
    uint32_t *hw_binary;
@@ -408,7 +408,7 @@ void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_s
       FREE(hw_binary);
 }
 
-bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[20],
+bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH],
                                  struct si_shader *shader)
 {
    struct hash_entry *entry = _mesa_hash_table_search(sscreen->shader_cache, ir_sha1_cache_key);
@@ -2087,8 +2087,12 @@ static void si_shader_ps(struct si_screen *sscreen, struct si_shader *shader)
    assert(!shader->key.ps.part.prolog.force_linear_center_interp || num_required_vgpr_inputs == 1 ||
           (!G_0286CC_LINEAR_SAMPLE_ENA(input_ena) && !G_0286CC_LINEAR_CENTROID_ENA(input_ena)));
    assert(!shader->key.ps.part.prolog.force_persp_sample_interp || num_required_vgpr_inputs == 1 ||
+          (num_required_vgpr_inputs >= 2 &&
+           (info->uses_interp_at_offset || info->uses_interp_at_sample)) ||
           (!G_0286CC_PERSP_CENTER_ENA(input_ena) && !G_0286CC_PERSP_CENTROID_ENA(input_ena)));
    assert(!shader->key.ps.part.prolog.force_linear_sample_interp || num_required_vgpr_inputs == 1 ||
+          (num_required_vgpr_inputs >= 2 &&
+           (info->uses_interp_at_offset || info->uses_interp_at_sample)) ||
           (!G_0286CC_LINEAR_CENTER_ENA(input_ena) && !G_0286CC_LINEAR_CENTROID_ENA(input_ena)));
 
    /* color_two_side always enables FRONT_FACE. Since st/mesa disables two-side colors if the back
@@ -2498,7 +2502,7 @@ void si_vs_ps_key_update_rast_prim_smooth_stipple(struct si_context *sctx)
    int old_force_front_face_input = ps_key->ps.opt.force_front_face_input;
 
    if (sctx->current_rast_prim == MESA_PRIM_POINTS) {
-      vs_key->ge.opt.kill_pointsize = 0;
+      vs_key->ge.opt.kill_pointsize = hw_vs->cso->info.writes_psize && !rs->point_size_per_vertex;
       ps_key->ps.part.prolog.color_two_side = 0;
       ps_key->ps.part.prolog.poly_stipple = 0;
       ps_key->ps.mono.poly_line_smoothing = 0;
@@ -2514,7 +2518,7 @@ void si_vs_ps_key_update_rast_prim_smooth_stipple(struct si_context *sctx)
    } else {
       /* Triangles. */
       vs_key->ge.opt.kill_pointsize = hw_vs->cso->info.writes_psize &&
-                                      !rs->polygon_mode_is_points;
+                                      (!rs->point_size_per_vertex || !rs->polygon_mode_is_points);
       ps_key->ps.part.prolog.color_two_side = rs->two_side && ps->info.colors_read;
       ps_key->ps.part.prolog.poly_stipple = rs->poly_stipple_enable;
       ps_key->ps.mono.poly_line_smoothing = rs->poly_smooth && sctx->framebuffer.nr_samples <= 1;
@@ -2845,8 +2849,8 @@ void si_ps_key_update_framebuffer_rasterizer_sample_shading(struct si_context *s
    bool uses_persp_sample = sel->info.uses_sysval_persp_sample ||
                             (!rs->flatshade && sel->info.uses_persp_sample_color);
 
-   if (!sel->info.base.fs.uses_sample_shading && rs->multisample_enable &&
-       sctx->framebuffer.nr_samples > 1 && sctx->ps_iter_samples > 1) {
+   if (rs->multisample_enable && sctx->framebuffer.nr_samples > 1 &&
+       (sel->info.base.fs.uses_sample_shading || sctx->ps_iter_samples > 1)) {
       key->ps.part.prolog.force_persp_sample_interp =
          uses_persp_center || uses_persp_centroid;
 
@@ -2865,9 +2869,6 @@ void si_ps_key_update_framebuffer_rasterizer_sample_shading(struct si_context *s
       key->ps.mono.force_mono = sel->info.uses_interp_at_offset || sel->info.uses_interp_at_sample;
       key->ps.mono.interpolate_at_sample_force_center = 0;
    } else if (rs->multisample_enable && sctx->framebuffer.nr_samples > 1) {
-      /* Note that sample shading is possible here. If it's enabled, all barycentrics are
-       * already set to "sample" except at_offset/at_sample.
-       */
       key->ps.part.prolog.force_persp_sample_interp = 0;
       key->ps.part.prolog.force_linear_sample_interp = 0;
       key->ps.part.prolog.force_persp_center_interp = 0;
@@ -3441,7 +3442,7 @@ static void si_init_shader_selector_async(void *job, void *gdata, int thread_ind
     */
    if (!sscreen->use_monolithic_shaders) {
       struct si_shader *shader = CALLOC_STRUCT(si_shader);
-      unsigned char ir_sha1_cache_key[20];
+      unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH];
 
       if (!shader) {
          mesa_loge("can't allocate a main shader part");

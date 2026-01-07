@@ -236,7 +236,7 @@ OpenCL.
 unop("isign", tint, "(src0 == 0) ? 0 : ((src0 > 0) ? 1 : -1)")
 unop("iabs", tint, "(src0 < 0) ? -src0 : src0")
 unop("fabs", tfloat, "fabs(src0)")
-unop("fsat", tfloat, ("fmin(fmax(src0, 0.0), 1.0)"))
+unop("fsat", tfloat, ("util_min_num(util_max_num(src0, 0.0), 1.0)"))
 unop("frcp", tfloat, "bit_size == 64 ? 1.0 / src0 : 1.0f / src0")
 unop("frsq", tfloat, "bit_size == 64 ? 1.0 / sqrt(src0) : 1.0f / sqrtf(src0)")
 unop("fsqrt", tfloat, "bit_size == 64 ? sqrt(src0) : sqrtf(src0)")
@@ -781,7 +781,7 @@ binop("umul_32x16", tuint32, "", "src0 * (uint16_t) src1",
       description = "Multiply 32-bits with low 16-bits, with zero extension")
 
 binop("fdiv", tfloat, "", "src0 / src1")
-binop("idiv", tint, "", "src1 == 0 ? 0 : (src0 / src1)")
+binop("idiv", tint, "", "(src1 == 0 || (src0 == u_intN_min(bit_size) && src1 == -1)) ? 0 : (src0 / src1)")
 binop("udiv", tuint, "", "src1 == 0 ? 0 : (src0 / src1)")
 
 binop_convert("uadd_carry", tuint, tuint, _2src_commutative,
@@ -832,10 +832,10 @@ binop("umod", tuint, "", "src1 == 0 ? 0 : src0 % src1")
 #
 # http://mathforum.org/library/drmath/view/52343.html
 
-binop("irem", tint, "", "src1 == 0 ? 0 : src0 % src1")
-binop("imod", tint, "",
-      "src1 == 0 ? 0 : ((src0 % src1 == 0 || (src0 >= 0) == (src1 >= 0)) ?"
-      "                 src0 % src1 : src0 % src1 + src1)")
+binop("irem", tint, "", "(src1 == 0 || (src0 == u_intN_min(bit_size) && src1 == -1)) ? 0 : src0 % src1")
+binop("imod", tint, "", "(src1 == 0 || (src0 == u_intN_min(bit_size) && src1 == -1)) ?"
+                        " 0 : ((src0 % src1 == 0 || (src0 >= 0) == (src1 >= 0)) ?"
+                        " src0 % src1 : src0 % src1 + src1)")
 binop("fmod", tfloat, "", "src0 - src1 * floorf(src0 / src1)")
 binop("frem", tfloat, "", "src0 - src1 * truncf(src0 / src1)")
 
@@ -956,25 +956,10 @@ opcode("fdph_replicated", 0, tfloat, [3, 4], [tfloat, tfloat], False, "",
        "src0.x * src1.x + src0.y * src1.y + src0.z * src1.z + src1.w")
 
 # The C fmin/fmax functions have implementation-defined behaviour for signed
-# zeroes. However, SPIR-V requires:
-#
-#   fmin(-0, +0) = -0
-#   fmax(+0, -0) = +0
-#
-# The NIR opcodes match SPIR-V. Furthermore, the NIR opcodes are commutative, so
-# we must also ensure:
-#
-#   fmin(+0, -0) = -0
-#   fmax(-0, +0) = +0
-#
-# To implement the constant folding, when the sources are equal, we use the
-# min/max of the bit patterns which will order the signed zeroes while
-# preserving all other values.
-for op, macro in [("fmin", "MIN2"), ("fmax", "MAX2")]:
-    binop(op, tfloat, _2src_commutative + associative,
-          "bit_size == 64 ? " +
-          f"(src0 == src1 ? uid({macro}((int64_t)dui(src0), (int64_t)dui(src1))) : {op}(src0, src1)) :"
-          f"(src0 == src1 ? uif({macro}((int32_t)fui(src0), (int32_t)fui(src1))) : {op}f(src0, src1))")
+# zeroes. However, SPIR-V requires IEEE 754-2019 minimumNumber/maximumNumber:
+# -0 compares less than +0.
+binop("fmin", tfloat, _2src_commutative + associative, ("util_min_num(src0, src1)"))
+binop("fmax", tfloat, _2src_commutative + associative, ("util_max_num(src0, src1)"))
 
 binop("imin", tint, _2src_commutative + associative, "MIN2(src0, src1)")
 binop("umin", tuint, _2src_commutative + associative, "MIN2(src0, src1)")
@@ -1517,7 +1502,7 @@ if (!isnormal(dst))
 binop("usadd_4x8_vc4", tint32, _2src_commutative + associative, """
 dst = 0;
 for (int i = 0; i < 32; i += 8) {
-   dst |= MIN2(((src0 >> i) & 0xff) + ((src1 >> i) & 0xff), 0xff) << i;
+   dst |= (uint32_t)MIN2(((src0 >> i) & 0xff) + ((src1 >> i) & 0xff), 0xff) << i;
 }
 """)
 

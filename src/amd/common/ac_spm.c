@@ -290,10 +290,10 @@ ac_spm_get_block_select(struct ac_spm *spm, const struct ac_pc_block *block)
 
    new_block_sel->b = block;
    new_block_sel->instances =
-      calloc(block->num_global_instances, sizeof(*new_block_sel->instances));
+      calloc(block->num_instances, sizeof(*new_block_sel->instances));
    if (!new_block_sel->instances)
       return NULL;
-   new_block_sel->num_instances = block->num_global_instances;
+   new_block_sel->num_instances = block->num_instances;
 
    for (unsigned i = 0; i < new_block_sel->num_instances; i++)
       new_block_sel->instances[i].num_counters = block->b->b->num_spm_counters;
@@ -315,35 +315,33 @@ ac_spm_init_instance_mapping(const struct radeon_info *info,
 {
    uint32_t instance_index = 0, se_index = 0, sa_index = 0;
 
-   if (block->b->b->flags & AC_PC_BLOCK_SE) {
-      if (block->b->b->gpu_block == SQ) {
-         /* Per-SE blocks. */
-         se_index = counter->instance / block->num_instances;
-         instance_index = counter->instance % block->num_instances;
-      } else {
-         /* Per-SA blocks. */
-         assert(block->b->b->gpu_block == GL1C ||
-                block->b->b->gpu_block == TCP ||
-                block->b->b->gpu_block == SQ_WGP ||
-                block->b->b->gpu_block == TA ||
-                block->b->b->gpu_block == TD);
-         se_index = (counter->instance / block->num_instances) / info->max_sa_per_se;
-         sa_index = (counter->instance / block->num_instances) % info->max_sa_per_se;
-         instance_index = counter->instance % block->num_instances;
-      }
-   } else {
-      /* Global blocks. */
-      assert(block->b->b->gpu_block == GL2C ||
-             block->b->b->gpu_block == CPF ||
-             block->b->b->gpu_block == GCEA ||
-             block->b->b->gpu_block == GCEA_CPWD ||
-             block->b->b->gpu_block == GCEA_SE);
+   switch (block->b->b->distribution) {
+   case AC_PC_GLOBAL_BLOCK:
+      /* Global blocks have a one-to-one instance mapping. */
       instance_index = counter->instance;
+      break;
+   case AC_PC_PER_SHADER_ENGINE:
+      /* We want the SE index to be the outer index and the local instance to
+       * be the inner index.
+       */
+      se_index = counter->instance / block->num_scoped_instances;
+      instance_index = counter->instance % block->num_scoped_instances;
+      break;
+   case AC_PC_PER_SHADER_ARRAY:
+      /* From the outermost to the innermost, the internal indices are in the
+       * order: SE, SA, local instance.
+       */
+      se_index = (counter->instance / block->num_scoped_instances) / info->max_sa_per_se;
+      sa_index = (counter->instance / block->num_scoped_instances) % info->max_sa_per_se;
+      instance_index = counter->instance % block->num_scoped_instances;
+      break;
+   default:
+      UNREACHABLE("Invalid perf block distribution mode.");
    }
 
    if (se_index >= info->num_se ||
        sa_index >= info->max_sa_per_se ||
-       instance_index >= block->num_instances)
+       instance_index >= block->num_scoped_instances)
       return false;
 
    mapping->se_index = se_index;
@@ -386,28 +384,20 @@ ac_spm_init_grbm_gfx_index(const struct ac_pc_block *block,
    grbm_gfx_index |= S_030800_SE_INDEX(mapping->se_index) |
                      S_030800_SH_INDEX(mapping->sa_index);
 
-   switch (block->b->b->gpu_block) {
-   case GL2C:
-   case CPF:
-   case GCEA:
-   case GCEA_CPWD:
-   case GCEA_SE:
-      /* Global blocks. */
+   switch (block->b->b->distribution) {
+   case AC_PC_GLOBAL_BLOCK:
+      /* Global block writes should broadcast to SEs and SAs. */
       grbm_gfx_index |= S_030800_SE_BROADCAST_WRITES(1);
       FALLTHROUGH;
-   case SQ:
-      /* Per-SE blocks. */
+   case AC_PC_PER_SHADER_ENGINE:
+      /* Per-SE block writes should broadcast to SAs. */
       grbm_gfx_index |= S_030800_SH_BROADCAST_WRITES(1);
       break;
-   case TA:
-   case TD:
-   case TCP:
-   case SQ_WGP:
-   case GL1C:
+   case AC_PC_PER_SHADER_ARRAY:
       /* Other blocks shouldn't broadcast. */
       break;
    default:
-      UNREACHABLE("Invalid SPM block.");
+      UNREACHABLE("Invalid perf block distribution mode.");
    }
 
    if (block->b->b->gpu_block == SQ_WGP) {
@@ -568,7 +558,7 @@ ac_spm_add_counter(const struct radeon_info *info,
    }
 
    /* Check if the number of instances is valid. */
-   if (counter_info->instance > block->num_global_instances - 1) {
+   if (counter_info->instance > block->num_instances - 1) {
       fprintf(stderr, "ac/spm: Invalid instance ID.\n");
       return false;
    }
@@ -709,7 +699,7 @@ bool ac_init_spm(const struct radeon_info *info,
          return false;
       }
 
-      num_counters += block->num_global_instances;
+      num_counters += block->num_instances;
    }
 
    spm->counters = CALLOC(num_counters, sizeof(*spm->counters));
@@ -720,9 +710,9 @@ bool ac_init_spm(const struct radeon_info *info,
       const struct ac_pc_block *block = ac_pc_get_block(pc, create_info[i].b->gpu_block);
       struct ac_spm_counter_create_info counter = create_info[i];
 
-      assert(block->num_global_instances > 0);
+      assert(block->num_instances > 0);
 
-      for (unsigned j = 0; j < block->num_global_instances; j++) {
+      for (unsigned j = 0; j < block->num_instances; j++) {
          counter.instance = j;
 
          if (!ac_spm_add_counter(info, pc, spm, &counter)) {

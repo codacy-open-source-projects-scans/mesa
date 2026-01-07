@@ -134,14 +134,35 @@ validate_ir(Program* program)
    for (Block& block : program->blocks) {
       for (aco_ptr<Instruction>& instr : block.instructions) {
 
-         if (program->progress < CompilationProgress::after_lower_to_hw) {
-            for (const Operand& op : instr->operands)
+         /* Check that register assignment and register class are consistent. */
+         for (const Operand& op : instr->operands) {
+            if (program->progress < CompilationProgress::after_lower_to_hw)
                check(!op.isTemp() || op.regClass() == program->temp_rc[op.tempId()],
                      "Operand RC not consistent.", instr.get());
 
-            for (const Definition& def : instr->definitions)
+            if (program->progress >= CompilationProgress::after_ra)
+               check(op.isFixed(), "Operand without register assignment.", instr.get());
+
+            check(!op.hasRegClass() || op.isUndefined() || !op.isFixed() ||
+                     (op.physReg().reg() >= 256
+                         ? op.isOfType(RegType::vgpr)
+                         : (op.isOfType(RegType::sgpr) && op.physReg().byte() == 0)),
+                  "Operand RC and assignment not consistent.", instr.get());
+         }
+
+         for (const Definition& def : instr->definitions) {
+            if (program->progress < CompilationProgress::after_lower_to_hw)
                check(!def.isTemp() || def.regClass() == program->temp_rc[def.tempId()],
                      "Definition RC not consistent.", instr.get());
+
+            if (program->progress >= CompilationProgress::after_ra)
+               check(def.isFixed(), "Definition without register assignment.", instr.get());
+
+            check(!def.isFixed() ||
+                     (def.physReg().reg() >= 256
+                         ? def.regClass().type() == RegType::vgpr
+                         : (def.regClass().type() == RegType::sgpr && def.physReg().byte() == 0)),
+                  "Definition RC and assignment not consistent.", instr.get());
          }
 
          const aco_alu_opcode_info& opcode_info = instr_info.alu_opcode_infos[(int)instr->opcode];
@@ -511,7 +532,7 @@ validate_ir(Program* program)
                }
 
                unsigned num_sgprs = 0;
-               unsigned sgpr[] = {0, 0};
+               Operand sgpr_ops[] = {Operand(), Operand()};
                for (unsigned i = 0; i < instr->operands.size(); i++) {
                   Operand op = instr->operands[i];
                   if (instr->opcode == aco_opcode::v_readfirstlane_b32 ||
@@ -545,9 +566,16 @@ validate_ir(Program* program)
                      check(scalar_mask & (1 << i), "Wrong source position for SGPR argument",
                            instr.get());
 
-                     if (op.tempId() != sgpr[0] && op.tempId() != sgpr[1]) {
+                     /* Ignore flags and SSA when register was assigned. */
+                     Operand current_sgpr =
+                        op.isFixed() ? Operand(op.physReg(), op.regClass()) : Operand(op.getTemp());
+                     bool same = false;
+                     for (unsigned j = 0; j < MIN2(2, num_sgprs); j++)
+                        same |= current_sgpr == sgpr_ops[j];
+                     if (!same) {
                         if (num_sgprs < 2)
-                           sgpr[num_sgprs++] = op.tempId();
+                           sgpr_ops[num_sgprs] = current_sgpr;
+                        num_sgprs++;
                      }
                   }
 

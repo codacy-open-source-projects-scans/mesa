@@ -103,6 +103,7 @@ struct si_state_rasterizer {
    unsigned polygon_mode_is_points : 1;
    unsigned perpendicular_end_caps : 1;
    unsigned bottom_edge_rule : 1;
+   bool point_size_per_vertex : 1;
    int force_front_face_input : 2;
 };
 
@@ -474,10 +475,10 @@ void si_emit_dpbb_state(struct si_context *sctx, unsigned index);
 
 /* si_state_shaders.cpp */
 void si_get_ir_cache_key(struct si_shader_selector *sel, bool ngg, bool es,
-                         unsigned wave_size, unsigned char ir_sha1_cache_key[20]);
-bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[20],
+                         unsigned wave_size, unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH]);
+bool si_shader_cache_load_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH],
                                  struct si_shader *shader);
-void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[20],
+void si_shader_cache_insert_shader(struct si_screen *sscreen, unsigned char ir_sha1_cache_key[SHA1_DIGEST_LENGTH],
                                    struct si_shader *shader, bool insert_into_disk_cache);
 bool si_shader_mem_ordered(struct si_shader *shader);
 void si_init_screen_live_shader_cache(struct si_screen *sscreen);

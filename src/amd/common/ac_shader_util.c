@@ -918,8 +918,9 @@ static unsigned get_tcs_wg_output_mem_size(uint32_t num_tcs_output_cp, uint32_t 
     * in wave64 will cover 4 channels (1024B). If an output was only aligned to 128B, wave64 could
     * cover 5 channels (128B .. 1.125K) instead of 4, which could increase VMEM latency.
     */
-   unsigned mem_one_pervertex_output = align(16 * num_tcs_output_cp * num_patches, 256);
-   unsigned mem_one_perpatch_output = align(16 * num_patches, 256);
+   unsigned mem_one_pervertex_output = align(16 * num_tcs_output_cp * num_patches,
+                                             AMD_MEMCHANNEL_INTERLEAVE_BYTES);
+   unsigned mem_one_perpatch_output = align(16 * num_patches, AMD_MEMCHANNEL_INTERLEAVE_BYTES);
 
    return mem_one_pervertex_output * num_mem_tcs_outputs +
           mem_one_perpatch_output * num_mem_tcs_patch_outputs;
@@ -1043,6 +1044,8 @@ ac_compute_scratch_wavesize(const struct radeon_info *info, uint32_t bytes_per_w
    /* Add 1 scratch item to make the number of items odd. This should improve
     * scratch performance by more randomly distributing scratch waves among
     * memory channels.
+    *
+    * On GFX11+, this is exactly "|= AMD_MEMCHANNEL_INTERLEAVE_BYTES".
     */
    if (bytes_per_wave)
       bytes_per_wave |= info->scratch_wavesize_granularity;
