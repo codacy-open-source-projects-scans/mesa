@@ -114,7 +114,8 @@ void ac_nir_set_options(struct radeon_info *info, bool use_llvm,
                          nir_io_vectorizer_ignores_types |
                          nir_io_compaction_rotates_color_channels |
                          nir_io_assign_color_input_bases_after_all_other_inputs |
-                         nir_io_use_frag_result_dual_src_blend;
+                         nir_io_use_frag_result_dual_src_blend  |
+                         nir_io_compact_to_higher_16;
    options->lower_layer_fs_input_to_sysval = true;
    options->scalarize_ddx = true;
    options->coarse_ddx = true;
@@ -917,18 +918,9 @@ ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_)
 bool
 ac_nir_allow_offset_wrap_cb(nir_intrinsic_instr *instr, const void *data)
 {
+   /* GFX6 uses a 16-bit adder and can't handle unsigned wrap. */
    enum amd_gfx_level gfx_level = *(enum amd_gfx_level *)data;
-   switch (instr->intrinsic) {
-   case nir_intrinsic_load_shared:
-   case nir_intrinsic_store_shared:
-   case nir_intrinsic_shared_atomic:
-   case nir_intrinsic_shared_atomic_swap:
-   case nir_intrinsic_load_shared2_amd:
-   case nir_intrinsic_store_shared2_amd:
-      /* GFX6 uses a 16-bit adder and can't handle unsigned wrap. */
-      return gfx_level >= GFX7;
-   default: return false;
-   }
+   return nir_is_shared_access(instr) && gfx_level >= GFX7;
 }
 
 /* This only applies to ACO, not LLVM, but it's not part of ACO because it's used by this shared

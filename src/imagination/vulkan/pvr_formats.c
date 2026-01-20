@@ -231,9 +231,10 @@ void pvr_get_hw_clear_color(
 static inline const struct pvr_format *
 pvr_get_format(struct pvr_physical_device *pdevice, VkFormat vk_format)
 {
-   if (vk_format < pdevice->num_formats &&
-       pdevice->formats[vk_format].bind != 0) {
-      return &pdevice->formats[vk_format];
+   enum pipe_format format = vk_format_to_pipe_format(vk_format);
+   if (format < pdevice->formats.count &&
+       pdevice->formats.formats[format].bind != 0) {
+      return &pdevice->formats.formats[format];
    }
 
    mesa_logd("Format %s(%d) not supported\n",
@@ -725,7 +726,7 @@ VkResult pvr_GetPhysicalDeviceImageFormatProperties2(
          break;
       case VK_STRUCTURE_TYPE_IMAGE_STENCIL_USAGE_CREATE_INFO:
          /* Nothing to do here, it's handled in
-          * PVR_PER_ARCH(get_image_format_properties)
+          * pvr_get_image_format_properties)
           */
          break;
       default:

@@ -895,15 +895,12 @@ static void si_update_hw_pipeline_stats(struct si_context *sctx, unsigned type, 
       sctx->num_hw_pipestat_streamout_queries += diff;
 
       /* Enable/disable pipeline stats if we have any queries. */
-      if (diff == 1 && sctx->num_hw_pipestat_streamout_queries == 1) {
-         sctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_STOP;
-         sctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
-      } else if (diff == -1 && sctx->num_hw_pipestat_streamout_queries == 0) {
-         sctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_START;
-         sctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
-      }
+      if (diff == 1 && sctx->num_hw_pipestat_streamout_queries == 1)
+         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_STOP,
+                                        SI_BARRIER_EVENT_PIPELINESTAT_START);
+      else if (diff == -1 && sctx->num_hw_pipestat_streamout_queries == 0)
+         si_clear_and_set_barrier_flags(sctx, SI_BARRIER_EVENT_PIPELINESTAT_START,
+                                        SI_BARRIER_EVENT_PIPELINESTAT_STOP);
    }
 }
 
@@ -1610,9 +1607,8 @@ static void si_query_hw_get_result_resource(struct si_context *sctx, struct si_q
       break;
    }
 
-   sctx->barrier_flags |= SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM |
-                          (sctx->gfx_level <= GFX8 ? SI_BARRIER_INV_L2 : 0);
-   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+   si_set_barrier_flags(sctx, SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM |
+                                 (sctx->gfx_level <= GFX8 ? SI_BARRIER_INV_L2 : 0));
 
    for (qbuf = &query->buffer; qbuf; qbuf = qbuf_prev) {
       if (query->b.type != PIPE_QUERY_TIMESTAMP) {
@@ -1708,10 +1704,8 @@ static void si_render_condition(struct pipe_context *ctx, struct pipe_query *que
 
          /* Settings this in the render cond atom is too late,
           * so set it here. */
-         if (sctx->gfx_level <= GFX8 || sctx->screen->info.cp_sdma_ge_use_system_memory_scope) {
-            sctx->barrier_flags |= SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME;
-            si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
-         }
+         if (sctx->gfx_level <= GFX8 || sctx->screen->info.cp_sdma_ge_use_system_memory_scope)
+            si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
 
          sctx->render_cond_enabled = old_render_cond_enabled;
       }

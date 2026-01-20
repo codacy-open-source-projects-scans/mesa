@@ -572,7 +572,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_KHR_ray_tracing_maintenance1                       DONE (anv/gfx12.5+, lvp, radv/gfx10.3+, tu/a740+, vn)
   VK_KHR_ray_tracing_pipeline                           DONE (anv/gfx12.5+, lvp, radv/gfx10.3+, vn)
   VK_KHR_ray_tracing_position_fetch                     DONE (anv, lvp, radv/gfx10.3+, vn)
-  VK_KHR_robustness2                                    DONE (anv, pvr, radv, vn)
+  VK_KHR_robustness2                                    DONE (anv, hasvk, hk, lvp, nvk, panvk/v10+, pvr, radv, tu, vn)
   VK_KHR_shader_bfloat16                                DONE (anv/gfx12.5+, radv/gfx12+, vn)
   VK_KHR_shader_clock                                   DONE (anv, hasvk, lvp, nvk, panvk, radv, tu, vn)
   VK_KHR_shader_maximal_reconvergence                   DONE (anv, hk, kk, lvp, nvk, panvk/v10+, radv, vn)
@@ -820,7 +820,7 @@ Rusticl Optional OpenCL 2.x Features:
   Device and host timer synchronization                 DONE (freedreno, iris, llvmpipe, radeonsi, zink)
   OpenCL C 2.0                                          in progress
   - Memory Consistency Model (atomics)                  not started
-  - Sub-groups                                          DONE (iris, llvmpipe, radeonsi, asahi)
+  - Sub-groups                                          DONE (asahi, iris, llvmpipe, radeonsi, zink)
   - Work-group Collective Functions                     not started
   - Generic Address Space                               in progress
   cl_khr_il_program                                     DONE
@@ -883,8 +883,8 @@ Rusticl extensions:
   cl_khr_subgroup_non_uniform_arithmetic                not started
   cl_khr_subgroup_non_uniform_vote                      not started
   cl_khr_subgroup_rotate                                not started
-  cl_khr_subgroup_shuffle                               DONE (iris, llvmpipe, radeonsi, asahi)
-  cl_khr_subgroup_shuffle_relative                      DONE (iris, llvmpipe, radeonsi, asahi)
+  cl_khr_subgroup_shuffle                               DONE (asahi, iris, llvmpipe, radeonsi, zink)
+  cl_khr_subgroup_shuffle_relative                      DONE (asahi, iris, llvmpipe, radeonsi, zink)
   cl_khr_subgroups                                      in progress
   cl_khr_suggested_local_work_size                      DONE
   cl_khr_terminate_context                              not started

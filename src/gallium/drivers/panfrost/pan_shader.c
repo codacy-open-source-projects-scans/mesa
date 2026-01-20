@@ -143,7 +143,6 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
    struct pan_compile_inputs inputs = {
       .gpu_id = panfrost_device_gpu_id(dev),
       .gpu_variant = dev->kmod.dev->props.gpu_variant,
-      .get_conv_desc = screen->vtbl.get_conv_desc,
    };
 
    /* Lower this early so the backends don't have to worry about it */
@@ -194,6 +193,9 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
 
       NIR_PASS(_, s, nir_shader_intrinsics_pass,
                lower_sample_mask_writes, nir_metadata_control_flow, NULL);
+
+      if (s->info.fs.accesses_pixel_local_storage)
+         NIR_PASS(_, s, panfrost_nir_lower_pls, screen);
    }
 
    if (dev->arch <= 5 && s->info.stage == MESA_SHADER_FRAGMENT) {
@@ -234,14 +236,17 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
 
    screen->vtbl.compile_shader(s, &inputs, &out->binary, &out->info);
 
-   if (s->info.stage == MESA_SHADER_VERTEX && out->info.vs.idvs) {
-      pan_stats_util_debug(dbg, "MESA_SHADER_POSITION",
-                           &out->info.stats);
-      pan_stats_util_debug(dbg, "MESA_SHADER_VERTEX",
-                           &out->info.stats_idvs_varying);
-   } else {
-      pan_stats_util_debug(dbg, mesa_shader_stage_name(s->info.stage),
-                           &out->info.stats);
+   /* Report stats only if we really got the shader compiled */
+   if (out->binary.size > 0) {
+      if (s->info.stage == MESA_SHADER_VERTEX && out->info.vs.idvs) {
+         pan_stats_util_debug(dbg, "MESA_SHADER_POSITION",
+                              &out->info.stats);
+         pan_stats_util_debug(dbg, "MESA_SHADER_VERTEX",
+                              &out->info.stats_idvs_varying);
+      } else {
+         pan_stats_util_debug(dbg, mesa_shader_stage_name(s->info.stage),
+                              &out->info.stats);
+      }
    }
 
    assert(req_local_mem >= out->info.wls_size);
@@ -559,13 +564,20 @@ panfrost_create_shader_state(struct pipe_context *pctx,
       so->noperspective_varyings =
          pan_nir_collect_noperspective_varyings_fs(nir);
 
-   /* Vertex shaders get passed images through the vertex attribute descriptor
-    * array. We need to add an offset to all image intrinsics so they point
-    * to the right attribute.
-    */
+   unsigned attrib_offset = 0;
    if (nir->info.stage == MESA_SHADER_VERTEX && dev->arch <= 7) {
-      NIR_PASS(_, nir, pan_nir_lower_image_index,
-               util_bitcount64(nir->info.inputs_read));
+      /* Vertex shaders get passed images through the vertex attribute
+       * descriptor array. We need to add an offset to all image intrinsics so
+       * they point to the right attribute.
+       */
+      attrib_offset += util_bitcount64(nir->info.inputs_read);
+      NIR_PASS(_, nir, pan_nir_lower_image_index, attrib_offset);
+   }
+   if (dev->arch >= 6 && dev->arch <= 7) {
+      /* Bifrost needs to use attributes to access texel buffers. We place these
+       * after images, which are also accessed using attributes. */
+      attrib_offset += BITSET_LAST_BIT(nir->info.images_used);
+      NIR_PASS(_, nir, pan_nir_lower_texel_buffer_fetch_index, attrib_offset);
    }
 
    /* If this shader uses transform feedback, compile the transform

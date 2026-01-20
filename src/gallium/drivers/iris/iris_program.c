@@ -165,9 +165,8 @@ iris_apply_brw_cs_prog_data(struct iris_compiled_shader *shader,
    iris->uses_sampler      = brw->uses_sampler;
    iris->prog_mask         = brw->prog_mask;
 
-   iris->first_param_is_builtin_subgroup_id =
-      brw->base.nr_params > 0 &&
-      brw->base.param[0] == BRW_PARAM_BUILTIN_SUBGROUP_ID;
+   /* The pushed constants only contain the subgroup_id */
+   iris->first_param_is_builtin_subgroup_id = brw->base.push_sizes[0] > 0;
 }
 
 static void
@@ -249,16 +248,20 @@ iris_apply_brw_gs_prog_data(struct iris_compiled_shader *shader,
 
 void
 iris_apply_brw_prog_data(struct iris_compiled_shader *shader,
-                         struct brw_stage_prog_data *brw)
+                         struct brw_stage_prog_data *brw,
+                         struct brw_ubo_range *ubo_ranges)
 {
-   STATIC_ASSERT(ARRAY_SIZE(brw->ubo_ranges) == ARRAY_SIZE(shader->ubo_ranges));
-   for (int i = 0; i < ARRAY_SIZE(shader->ubo_ranges); i++) {
-      shader->ubo_ranges[i].block  = brw->ubo_ranges[i].block;
-      shader->ubo_ranges[i].start  = brw->ubo_ranges[i].start;
-      shader->ubo_ranges[i].length = brw->ubo_ranges[i].length;
+   if (ubo_ranges != NULL) {
+      for (int i = 0; i < ARRAY_SIZE(shader->ubo_ranges); i++) {
+         shader->ubo_ranges[i].block  = ubo_ranges[i].block;
+         shader->ubo_ranges[i].start  = ubo_ranges[i].start;
+         shader->ubo_ranges[i].length = ubo_ranges[i].length;
+      }
    }
 
-   shader->nr_params              = brw->nr_params;
+   for (int i = 0; i < ARRAY_SIZE(shader->push_sizes); i++)
+      shader->push_sizes[i] = brw->push_sizes[i];
+
    shader->total_scratch          = brw->total_scratch;
    shader->total_shared           = brw->total_shared;
    shader->program_size           = brw->program_size;
@@ -294,7 +297,6 @@ iris_apply_brw_prog_data(struct iris_compiled_shader *shader,
 
    ralloc_steal(shader, shader->brw_prog_data);
    ralloc_steal(shader->brw_prog_data, (void *)brw->relocs);
-   ralloc_steal(shader->brw_prog_data, brw->param);
 }
 
 #ifdef INTEL_USE_ELK
@@ -580,10 +582,7 @@ iris_to_brw_fs_key(const struct iris_screen *screen,
       .persample_interp = key->persample_interp ? INTEL_ALWAYS : INTEL_NEVER,
       .multisample_fbo = key->multisample_fbo ? INTEL_ALWAYS : INTEL_NEVER,
       .force_dual_color_blend = key->force_dual_color_blend,
-      .color_outputs_valid = key->color_outputs_valid,
       .ignore_sample_mask_out = !key->multisample_fbo,
-      .null_push_constant_tbimr_workaround =
-         screen->devinfo->needs_null_push_constant_tbimr_workaround,
    };
 }
 
@@ -1213,12 +1212,16 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
    assert(num_cbufs < PIPE_MAX_CONSTANT_BUFFERS);
    nir_validate_shader(nir, "after remap");
 
+#ifdef INTEL_USE_ELK
    /* We don't use params[] but gallium leaves num_uniforms set.  We use this
     * to detect when cbuf0 exists but we don't need it anymore when we get
     * here.  Instead, zero it out so that the back-end doesn't get confused
     * when nr_params * 4 != num_uniforms != nr_params * 4.
+    *
+    * Elk still depends on this behavior.
     */
    nir->num_uniforms = 0;
+#endif
 
    *out_system_values = system_values;
    *out_num_system_values = num_system_values;
@@ -1883,6 +1886,29 @@ iris_debug_archiver_open(void *tmp_ctx, struct iris_screen *screen,
    return debug_archiver;
 }
 
+static void
+brw_apply_ubo_ranges(struct brw_compiler *compiler,
+                     nir_shader *nir,
+                     struct brw_ubo_range ubo_ranges[4],
+                     struct brw_stage_prog_data *prog_data)
+{
+   brw_nir_analyze_ubo_ranges(compiler, nir, ubo_ranges);
+   NIR_PASS(_, nir, brw_nir_lower_ubo_ranges, ubo_ranges);
+
+   if (ubo_ranges[0].length == 0 &&
+       nir->info.stage == MESA_SHADER_FRAGMENT &&
+       compiler->devinfo->needs_null_push_constant_tbimr_workaround) {
+      ubo_ranges[0] = (struct brw_ubo_range) {
+         .block = IRIS_SURFACE_NULL_PUSH_TBIMR_WA,
+         .start = 0,
+         .length = 1,
+      };
+   }
+
+   for (uint32_t i = 0; i < 4; i++)
+      prog_data->push_sizes[i] = ubo_ranges[i].length * 32;
+}
+
 /**
  * Compile a vertex shader, and upload the assembly.
  */
@@ -1932,7 +1958,8 @@ iris_compile_vs(struct iris_screen *screen,
 
       brw_prog_data->base.base.use_alt_mode = nir->info.use_legacy_math_rules;
 
-      brw_nir_analyze_ubo_ranges(screen->brw, nir, brw_prog_data->base.base.ubo_ranges);
+      struct brw_ubo_range ubo_ranges[4] = {};
+      brw_apply_ubo_ranges(screen->brw, nir, ubo_ranges, &brw_prog_data->base.base);
 
       struct brw_vs_prog_key brw_key = iris_to_brw_vs_key(screen, key);
 
@@ -1951,7 +1978,7 @@ iris_compile_vs(struct iris_screen *screen,
       program = brw_compile_vs(screen->brw, &params);
       error = params.base.error_str;
       if (program) {
-         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base);
+         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base, ubo_ranges);
          iris_debug_recompile_brw(screen, dbg, ish, &brw_key.base);
       }
    } else {
@@ -2174,7 +2201,9 @@ iris_compile_tcs(struct iris_screen *screen,
    if (screen->brw) {
       struct brw_tcs_prog_data *brw_prog_data =
          rzalloc(mem_ctx, struct brw_tcs_prog_data);
-      brw_nir_analyze_ubo_ranges(screen->brw, nir, brw_prog_data->base.base.ubo_ranges);
+
+      struct brw_ubo_range ubo_ranges[4] = {};
+      brw_apply_ubo_ranges(screen->brw, nir, ubo_ranges, &brw_prog_data->base.base);
 
       struct brw_compile_tcs_params params = {
          .base = {
@@ -2192,7 +2221,7 @@ iris_compile_tcs(struct iris_screen *screen,
       error = params.base.error_str;
 
       if (program) {
-         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base);
+         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base, ubo_ranges);
          iris_debug_recompile_brw(screen, dbg, ish, &brw_key.base);
       }
    } else {
@@ -2377,7 +2406,8 @@ iris_compile_tes(struct iris_screen *screen,
       struct brw_tes_prog_data *brw_prog_data =
          rzalloc(mem_ctx, struct brw_tes_prog_data);
 
-      brw_nir_analyze_ubo_ranges(screen->brw, nir, brw_prog_data->base.base.ubo_ranges);
+      struct brw_ubo_range ubo_ranges[4] = {};
+      brw_apply_ubo_ranges(screen->brw, nir, ubo_ranges, &brw_prog_data->base.base);
 
       struct intel_vue_map input_vue_map;
       brw_compute_tess_vue_map(&input_vue_map, key->inputs_read,
@@ -2403,7 +2433,7 @@ iris_compile_tes(struct iris_screen *screen,
 
       if (program) {
          iris_debug_recompile_brw(screen, dbg, ish, &brw_key.base);
-         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base);
+         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base, ubo_ranges);
       }
    } else {
 #ifdef INTEL_USE_ELK
@@ -2571,7 +2601,8 @@ iris_compile_gs(struct iris_screen *screen,
       struct brw_gs_prog_data *brw_prog_data =
          rzalloc(mem_ctx, struct brw_gs_prog_data);
 
-      brw_nir_analyze_ubo_ranges(screen->brw, nir, brw_prog_data->base.base.ubo_ranges);
+      struct brw_ubo_range ubo_ranges[4] = {};
+      brw_apply_ubo_ranges(screen->brw, nir, ubo_ranges, &brw_prog_data->base.base);
 
       brw_compute_vue_map(devinfo,
                           &brw_prog_data->base.vue_map, nir->info.outputs_written,
@@ -2595,7 +2626,7 @@ iris_compile_gs(struct iris_screen *screen,
       error = params.base.error_str;
       if (program) {
          iris_debug_recompile_brw(screen, dbg, ish, &brw_key.base);
-         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base);
+         iris_apply_brw_prog_data(shader, &brw_prog_data->base.base, ubo_ranges);
       }
    } else {
 #ifdef INTEL_USE_ELK
@@ -2764,7 +2795,8 @@ iris_compile_fs(struct iris_screen *screen,
 
       brw_prog_data->base.use_alt_mode = nir->info.use_legacy_math_rules;
 
-      brw_nir_analyze_ubo_ranges(screen->brw, nir, brw_prog_data->base.ubo_ranges);
+      struct brw_ubo_range ubo_ranges[4] = {};
+      brw_apply_ubo_ranges(screen->brw, nir, ubo_ranges, &brw_prog_data->base);
 
       struct brw_wm_prog_key brw_key = iris_to_brw_fs_key(screen, key);
 
@@ -2788,7 +2820,7 @@ iris_compile_fs(struct iris_screen *screen,
       error = params.base.error_str;
       if (program) {
          iris_debug_recompile_brw(screen, dbg, ish, &brw_key.base);
-         iris_apply_brw_prog_data(shader, &brw_prog_data->base);
+         iris_apply_brw_prog_data(shader, &brw_prog_data->base, ubo_ranges);
       }
    } else {
 #ifdef INTEL_USE_ELK
@@ -3111,6 +3143,15 @@ iris_compile_cs(struct iris_screen *screen,
       struct brw_cs_prog_data *brw_prog_data =
          rzalloc(mem_ctx, struct brw_cs_prog_data);
 
+      bool subgroup_id_lowered = false;
+      NIR_PASS(subgroup_id_lowered, nir, brw_nir_lower_cs_subgroup_id, devinfo, 0);
+      if (subgroup_id_lowered) {
+         brw_prog_data->base.push_sizes[0] = 4;
+         brw_cs_fill_push_const_info(devinfo, brw_prog_data, 0);
+      } else {
+         brw_cs_fill_push_const_info(devinfo, brw_prog_data, -1);
+      }
+
       struct brw_compile_cs_params params = {
          .base = {
             .mem_ctx = mem_ctx,
@@ -3127,7 +3168,7 @@ iris_compile_cs(struct iris_screen *screen,
       error = params.base.error_str;
       if (program) {
          iris_debug_recompile_brw(screen, dbg, ish, &brw_key.base);
-         iris_apply_brw_prog_data(shader, &brw_prog_data->base);
+         iris_apply_brw_prog_data(shader, &brw_prog_data->base, NULL);
       }
    } else {
 #ifdef INTEL_USE_ELK

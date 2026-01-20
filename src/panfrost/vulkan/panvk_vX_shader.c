@@ -146,6 +146,12 @@ panvk_lower_sysvals(nir_builder *b, nir_instr *instr, void *data)
       val = load_sysval(b, common, bit_size, printf_buffer_address);
       break;
 
+   case nir_intrinsic_load_blend_descriptor_pan: {
+      uint32_t loc = nir_intrinsic_base(intr);
+      val = load_sysval(b, graphics, bit_size, fs.blend_descs[loc]);
+      break;
+   }
+
    case nir_intrinsic_load_input_attachment_target_pan: {
       const struct vk_input_attachment_location_state *ial =
          ctx->state ? ctx->state->ial : NULL;
@@ -894,7 +900,6 @@ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
    struct pan_compile_inputs input = *compile_input;
 
    pan_postprocess_nir(nir, input.gpu_id);
-   pan_nir_lower_texture_late(nir, input.gpu_id);
 
    if (nir->info.stage == MESA_SHADER_VERTEX)
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, panvk_lower_load_vs_input,
@@ -906,8 +911,11 @@ panvk_compile_nir(struct panvk_device *dev, nir_shader *nir,
    /* since valhall, panvk_per_arch(nir_lower_descriptors) separates the
     * driver set and the user sets, and does not need pan_nir_lower_image_index
     */
-   if (PAN_ARCH < 9 && nir->info.stage == MESA_SHADER_VERTEX)
+   if (PAN_ARCH < 9 && nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_, nir, pan_nir_lower_image_index, MAX_VS_ATTRIBS);
+      NIR_PASS(_, nir, pan_nir_lower_texel_buffer_fetch_index, MAX_VS_ATTRIBS);
+   }
+   pan_nir_lower_texture_late(nir, input.gpu_id);
 
    if (noperspective_varyings && nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_, nir, nir_inline_sysval,
@@ -1398,6 +1406,13 @@ panvk_compile_shader(struct panvk_device *dev,
       nir_assign_io_var_locations(nir, nir_var_shader_out);
       panvk_lower_nir_io(nir);
 
+      /* Lower FS outputs now so that we can lower load_blend_descriptor_pan
+       * to a driver-provided FAU instead of using the blend descriptors
+       * uploaded by the hardware.  See panvk_vX_blend.c for details.
+       */
+      NIR_PASS(_, nir, nir_opt_constant_folding);
+      NIR_PASS(_, nir, pan_nir_lower_fs_outputs, false);
+
       variant->own_bin = true;
 
       result = panvk_compile_nir(dev, nir, info->flags, &inputs, state,
@@ -1488,12 +1503,12 @@ panvk_per_arch(create_shader_from_binary)(struct panvk_device *dev,
 }
 
 static VkResult
-panvk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
-                      struct vk_shader_compile_info *infos,
-                      const struct vk_graphics_pipeline_state *state,
-                      const struct vk_features *enabled_features,
-                      const VkAllocationCallbacks *pAllocator,
-                      struct vk_shader **shaders_out)
+compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
+                struct vk_shader_compile_info *infos,
+                const struct vk_graphics_pipeline_state *state,
+                const struct vk_features *enabled_features,
+                const VkAllocationCallbacks *pAllocator,
+                struct vk_shader **shaders_out)
 {
    struct panvk_device *dev = to_panvk_device(vk_dev);
    bool use_static_noperspective = false;
@@ -1546,6 +1561,41 @@ err_cleanup:
 
    /* Memset the output array */
    memset(shaders_out, 0, shader_count * sizeof(*shaders_out));
+
+   return result;
+}
+
+static simple_mtx_t compiler_mutex = SIMPLE_MTX_INITIALIZER;
+
+void
+panvk_per_arch(compiler_lock)(void)
+{
+   if (pan_will_dump_shaders(PAN_ARCH) || PANVK_DEBUG(NIR))
+      simple_mtx_lock(&compiler_mutex);
+}
+
+void
+panvk_per_arch(compiler_unlock)(void)
+{
+   if (pan_will_dump_shaders(PAN_ARCH) || PANVK_DEBUG(NIR))
+      simple_mtx_unlock(&compiler_mutex);
+}
+
+static VkResult
+panvk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
+                      struct vk_shader_compile_info *infos,
+                      const struct vk_graphics_pipeline_state *state,
+                      const struct vk_features *enabled_features,
+                      const VkAllocationCallbacks *pAllocator,
+                      struct vk_shader **shaders_out)
+{
+   panvk_per_arch(compiler_lock)();
+
+   VkResult result = compile_shaders(vk_dev, shader_count, infos, state,
+                                     enabled_features, pAllocator,
+                                     shaders_out);
+
+   panvk_per_arch(compiler_unlock)();
 
    return result;
 }
@@ -2320,8 +2370,12 @@ panvk_per_arch(create_internal_shader)(
    VkResult result;
    struct util_dynarray binary;
 
+   panvk_per_arch(compiler_lock)();
+
    util_dynarray_init(&binary, nir);
    pan_shader_compile(nir, compiler_inputs, &binary, &shader->info);
+
+   panvk_per_arch(compiler_unlock)();
 
    unsigned bin_size = util_dynarray_num_elements(&binary, uint8_t);
    if (bin_size) {

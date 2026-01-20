@@ -411,7 +411,7 @@ struct si_texture {
    bool can_sample_z : 1;
    bool can_sample_s : 1;
    bool need_flush_after_depth_decompression: 1;
-   bool force_disable_hiz_his : 1;
+   bool gfx12_force_disable_hiz : 1;
 
    /* We need to track DCC dirtiness, because st/dri usually calls
     * flush_resource twice per frame (not a bug) and we don't wanna
@@ -443,23 +443,7 @@ struct si_auxiliary_texture {
    uint32_t stride;
 };
 
-struct si_surface {
-   struct pipe_surface base;
-
-   /* These can vary with block-compressed textures. */
-   unsigned width0;
-   unsigned height0;
-
-   bool color_initialized : 1;
-   bool depth_initialized : 1;
-
-   /* Misc. color flags. */
-   bool color_is_int8 : 1;
-   bool color_is_int10 : 1;
-   bool dcc_incompatible : 1;
-   uint8_t db_format_index : 3;
-
-   /* Color registers. */
+struct si_cb_surface_info {
    struct ac_cb_surface cb;
 
    unsigned spi_shader_col_format : 8;             /* no blending, no alpha-to-coverage. */
@@ -467,8 +451,14 @@ struct si_surface {
    unsigned spi_shader_col_format_blend : 8;       /* blending without alpha. */
    unsigned spi_shader_col_format_blend_alpha : 8; /* blending with alpha. */
 
-   /* DB registers. */
+   bool color_is_int8 : 1;
+   bool color_is_int10 : 1;
+};
+
+struct si_zs_surface_info {
    struct ac_ds_surface ds;
+
+   uint8_t db_format_index : 3;
 };
 
 struct si_mmio_counter {
@@ -755,7 +745,8 @@ struct si_images {
 
 struct si_framebuffer {
    struct pipe_framebuffer_state state;
-   PIPE_FB_SURFACES; //STOP USING THIS
+   struct si_cb_surface_info cb[8];
+   struct si_zs_surface_info zs;
    unsigned colorbuf_enabled_4bit;
    unsigned spi_shader_col_format;
    unsigned spi_shader_col_format_alpha;
@@ -778,7 +769,7 @@ struct si_framebuffer {
    bool has_dcc_msaa;
    bool disable_vrs_flat_shading;
    bool has_stencil;
-   bool has_hiz_his;
+   bool gfx12_has_hiz;
 };
 
 enum si_quant_mode
@@ -1380,6 +1371,19 @@ struct si_context {
 #define SI_FB_BARRIER_SYNC_CB      BITFIELD_BIT(0)
 #define SI_FB_BARRIER_SYNC_DB      BITFIELD_BIT(1)
 #define SI_FB_BARRIER_SYNC_ALL     BITFIELD_RANGE(0, 2)
+
+static void si_mark_atom_dirty(struct si_context *sctx, struct si_atom *atom);
+static inline void si_set_barrier_flags(struct si_context *sctx, unsigned flags)
+{
+   sctx->barrier_flags |= flags;
+   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+}
+static inline void si_clear_and_set_barrier_flags(struct si_context *sctx, unsigned clear, unsigned set)
+{
+   sctx->barrier_flags &= ~clear;
+   sctx->barrier_flags |= set;
+   si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+}
 
 void si_barrier_before_internal_op(struct si_context *sctx, unsigned flags,
                                    unsigned num_buffers,
@@ -2265,19 +2269,24 @@ si_set_rasterized_prim(struct si_context *sctx, enum mesa_prim rast_prim,
    }
 }
 
-/* There are 3 ways to flush caches and all of them are correct.
+/* There are 5 ways to flush caches and all of them are correct.
  *
- * 1) sctx->flags |= ...;
+ * 1) si_set_barrier_flags(sctx, ...); // deferred
+ *
+ * 2) si_clear_and_set_barrier_flags(sctx, ..., ...); // deferred
+ *
+ * 3) sctx->barrier_flags |= ...; // multiple times
  *    si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier); // deferred
  *
- * 2) sctx->flags |= ...;
- *    si_emit_barrier_direct(sctx); // immediate
+ * 4) sctx->barrier_flags |= ...;
+ *    si_emit_barrier_direct(sctx, ...); // immediate
  *
- * 3) sctx->flags |= ...;
+ * 5) sctx->barrier_flags |= ...;
  *    sctx->emit_barrier(sctx, cs); // immediate (2 is better though)
  */
-static inline void si_emit_barrier_direct(struct si_context *sctx)
+static inline void si_emit_barrier_direct(struct si_context *sctx, unsigned flags)
 {
+   sctx->barrier_flags |= flags;
    if (sctx->barrier_flags) {
       sctx->emit_barrier(sctx, &sctx->gfx_cs);
       sctx->dirty_atoms &= ~SI_ATOM_BIT(barrier);
@@ -2324,6 +2333,8 @@ si_emit_all_states(struct si_context *sctx, uint64_t skip_atom_mask)
             sctx->atoms.array[i].emit(sctx, i);
          }
       }
+      /* We don't want any emit function to mark atoms dirty. */
+      assert(!(sctx->dirty_atoms & ~skip_atom_mask));
    }
 }
 

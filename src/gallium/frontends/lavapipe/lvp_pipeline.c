@@ -38,10 +38,6 @@
 
 #include "gallivm/lp_bld_debug.h"
 
-#define SPIR_V_MAGIC_NUMBER 0x07230203
-
-#define MAX_DYNAMIC_STATES 72
-
 typedef void (*cso_destroy_func)(struct pipe_context*, void*);
 
 static void
@@ -258,6 +254,8 @@ void
 lvp_shader_optimize(nir_shader *nir)
 {
    optimize(nir);
+   NIR_PASS(_, nir, nir_opt_algebraic_late);
+   NIR_PASS(_, nir, nir_opt_dce);
    NIR_PASS(_, nir, nir_lower_var_copies);
    NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
    NIR_PASS(_, nir, nir_opt_dce);
@@ -350,6 +348,8 @@ lvp_shader_lower(struct lvp_device *pdevice, nir_shader *nir, struct lvp_pipelin
       lvp_lower_input_attachments(nir, false);
    NIR_PASS(_, nir, nir_lower_system_values);
    NIR_PASS(_, nir, nir_lower_is_helper_invocation);
+
+   NIR_PASS(_, nir, lvp_nir_lower_cooperative_matrix);
 
    const struct nir_lower_compute_system_values_options compute_system_values = {0};
    NIR_PASS(_, nir, nir_lower_compute_system_values, &compute_system_values);

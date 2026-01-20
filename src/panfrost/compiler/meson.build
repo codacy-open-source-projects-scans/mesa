@@ -7,14 +7,15 @@ libpanfrost_compiler_files = files(
   'pan_nir_collect_varyings.c',
   'pan_nir_lower_frag_coord_zw.c',
   'pan_nir_lower_framebuffer.c',
+  'pan_nir_lower_fs_outputs.c',
   'pan_nir_lower_helper_invocation.c',
   'pan_nir_lower_image_index.c',
   'pan_nir_lower_image_ms.c',
   'pan_nir_lower_noperspective.c',
   'pan_nir_lower_sample_position.c',
   'pan_nir_lower_store_component.c',
+  'pan_nir_lower_texel_buffer_index.c',
   'pan_nir_lower_vertex_id.c',
-  'pan_nir_lower_writeout.c',
   'pan_nir_lower_xfb.c',
 )
 

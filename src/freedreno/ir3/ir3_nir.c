@@ -861,19 +861,22 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
                nir_lower_io_use_interpolated_input_intrinsics);
 
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
-      /* NOTE: lower load_barycentric_at_sample first, since it
+      /* NOTE: nir_opt_barycentric comes first, since it
        * produces load_barycentric_at_offset:
        */
-      NIR_PASS(_, s, ir3_nir_lower_load_barycentric_at_sample);
+      NIR_PASS(_, s, nir_opt_barycentric, true);
+      NIR_PASS(_, s, ir3_nir_lower_load_sample_pos);
       NIR_PASS(_, s, ir3_nir_lower_load_barycentric_at_offset);
       NIR_PASS(_, s, ir3_nir_move_varying_inputs);
       NIR_PASS(_, s, nir_lower_fb_read);
       NIR_PASS(_, s, ir3_nir_lower_layer_id);
-      NIR_PASS(_, s, ir3_nir_lower_frag_shading_rate);
+      if (!compiler->shading_rate_matches_vk)
+         NIR_PASS(_, s, ir3_nir_lower_frag_shading_rate);
    }
 
    if (s->info.stage == MESA_SHADER_VERTEX || s->info.stage == MESA_SHADER_GEOMETRY) {
-      NIR_PASS(_, s, ir3_nir_lower_primitive_shading_rate);
+      if (!compiler->shading_rate_matches_vk)
+         NIR_PASS(_, s, ir3_nir_lower_primitive_shading_rate);
    }
 
    if (compiler->gen >= 6 && s->info.stage == MESA_SHADER_FRAGMENT &&
@@ -1501,7 +1504,7 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
    if (so->compiler->gen >= 6)
       progress |= OPT(s, nir_lower_ubo_vec4);
 
-   progress |= OPT(s, ir3_nir_lower_io_offsets);
+   progress |= OPT(s, ir3_nir_lower_io_offsets, so->compiler);
 
    if (!so->binning_pass) {
       ir3_const_alloc_all_reserved_space(&ir3_const_state_mut(so)->allocs);

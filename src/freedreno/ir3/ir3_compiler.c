@@ -255,6 +255,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->has_predication = true;
       compiler->predtf_nop_quirk = dev_info->props.predtf_nop_quirk;
       compiler->prede_nop_quirk = dev_info->props.prede_nop_quirk;
+      compiler->has_salu_int_narrowing_quirk = dev_info->props.has_salu_int_narrowing_quirk;
       compiler->has_scalar_alu = dev_info->props.has_scalar_alu;
       compiler->has_scalar_predicates = dev_info->props.has_scalar_predicates;
       compiler->has_isam_v = dev_info->props.has_isam_v;
@@ -265,6 +266,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->has_shfl = true;
       compiler->reading_shading_rate_requires_smask_quirk =
          dev_info->props.reading_shading_rate_requires_smask_quirk;
+      compiler->shading_rate_matches_vk = dev_info->props.shading_rate_matches_vk;
       compiler->has_alias_rt = dev_info->props.has_alias_rt;
       compiler->mergedregs = true;
       compiler->has_sel_b_fneg = dev_info->props.has_sel_b_fneg;

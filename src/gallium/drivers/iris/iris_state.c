@@ -6067,19 +6067,25 @@ iris_restore_render_saved_bos(struct iris_context *ice,
          if (range->length == 0)
             continue;
 
-         /* Range block is a binding table index, map back to UBO index. */
-         unsigned block_index = iris_bti_to_group_index(
-            &shader->bt, IRIS_SURFACE_GROUP_UBO, range->block);
-         assert(block_index != IRIS_SURFACE_NOT_USED);
+         struct iris_bo *bo;
+         if (range->block == IRIS_SURFACE_NULL_PUSH_TBIMR_WA) {
+            bo = batch->screen->workaround_bo;
+         } else {
+            /* Range block is a binding table index, map back to UBO index. */
+            unsigned block_index = iris_bti_to_group_index(
+               &shader->bt, IRIS_SURFACE_GROUP_UBO, range->block);
+            assert(block_index != IRIS_SURFACE_NOT_USED);
 
-         struct pipe_shader_buffer *cbuf = &shs->constbuf[block_index];
-         struct iris_resource *res = (void *) cbuf->buffer;
+            struct pipe_shader_buffer *cbuf = &shs->constbuf[block_index];
+            struct iris_resource *res = (void *) cbuf->buffer;
 
-         if (res)
-            iris_use_pinned_bo(batch, res->bo, false, IRIS_DOMAIN_OTHER_READ);
-         else
-            iris_use_pinned_bo(batch, batch->screen->workaround_bo, false,
-                               IRIS_DOMAIN_OTHER_READ);
+            if (res)
+               bo = res->bo;
+            else
+               bo = batch->screen->workaround_bo;
+         }
+
+         iris_use_pinned_bo(batch, bo, false, IRIS_DOMAIN_OTHER_READ);
       }
    }
 
@@ -6489,23 +6495,42 @@ setup_constant_buffers(struct iris_context *ice,
       if (range->length > push_bos->max_length)
          push_bos->max_length = range->length;
 
-      /* Range block is a binding table index, map back to UBO index. */
-      unsigned block_index = iris_bti_to_group_index(
-         &shader->bt, IRIS_SURFACE_GROUP_UBO, range->block);
-      assert(block_index != IRIS_SURFACE_NOT_USED);
 
-      struct pipe_shader_buffer *cbuf = &shs->constbuf[block_index];
-      struct iris_resource *res = (void *) cbuf->buffer;
+      struct iris_address push_addr;
+      if (range->block == IRIS_SURFACE_NULL_PUSH_TBIMR_WA) {
+         /* Pass a single-register push constant payload for the PS
+          * stage even if empty, since PS invocations with zero push
+          * constant cycles have been found to cause hangs with TBIMR
+          * enabled.  See HSDES #22020184996.
+          *
+          * XXX - Use workaround infrastructure and final workaround
+          *       when provided by hardware team.
+          */
+         push_addr = (struct iris_address) {
+            .bo = batch->screen->workaround_bo,
+            .offset = 1024,
+         };
+      } else {
+         /* Range block is a binding table index, map back to UBO index. */
+         unsigned block_index = iris_bti_to_group_index(
+            &shader->bt, IRIS_SURFACE_GROUP_UBO, range->block);
+         assert(block_index != IRIS_SURFACE_NOT_USED);
 
-      assert(cbuf->buffer_offset % 32 == 0);
+         struct pipe_shader_buffer *cbuf = &shs->constbuf[block_index];
+         struct iris_resource *res = (void *) cbuf->buffer;
 
-      if (res)
-         iris_emit_buffer_barrier_for(batch, res->bo, IRIS_DOMAIN_OTHER_READ);
+         assert(cbuf->buffer_offset % 32 == 0);
+
+         if (res)
+            iris_emit_buffer_barrier_for(batch, res->bo, IRIS_DOMAIN_OTHER_READ);
+
+         push_addr = res ?
+            ro_bo(res->bo, range->start * 32 + cbuf->buffer_offset) :
+            batch->screen->workaround_address;
+      }
 
       push_bos->buffers[n].length = range->length;
-      push_bos->buffers[n].addr =
-         res ? ro_bo(res->bo, range->start * 32 + cbuf->buffer_offset)
-         : batch->screen->workaround_address;
+      push_bos->buffers[n].addr = push_addr;
       n++;
    }
 
@@ -6558,42 +6583,6 @@ emit_push_constant_packets(struct iris_context *ice,
 
 #if GFX_VER >= 12
 static void
-emit_null_push_constant_tbimr_workaround(struct iris_batch *batch)
-{
-   struct isl_device *isl_dev = &batch->screen->isl_dev;
-   /* Pass a single-register push constant payload for the PS
-    * stage even if empty, since PS invocations with zero push
-    * constant cycles have been found to cause hangs with TBIMR
-    * enabled.  See HSDES #22020184996.
-    *
-    * XXX - Use workaround infrastructure and final workaround
-    *       when provided by hardware team.
-    */
-   const struct iris_address null_addr = {
-      .bo = batch->screen->workaround_bo,
-      .offset = 1024,
-   };
-   const uint32_t num_dwords = 2 + 2 * 1;
-   uint32_t const_all[num_dwords];
-   uint32_t *dw = &const_all[0];
-
-   iris_pack_command(GENX(3DSTATE_CONSTANT_ALL), dw, all) {
-      all.DWordLength = num_dwords - 2;
-      all.MOCS = isl_mocs(isl_dev, 0, false);
-      all.ShaderUpdateEnable = (1 << MESA_SHADER_FRAGMENT);
-      all.PointerBufferMask = 1;
-   }
-   dw += 2;
-
-   _iris_pack_state(batch, GENX(3DSTATE_CONSTANT_ALL_DATA), dw, data) {
-      data.PointerToConstantBuffer = null_addr;
-      data.ConstantBufferReadLength = 1;
-   }
-
-   iris_batch_emit(batch, const_all, sizeof(uint32_t) * num_dwords);
-}
-
-static void
 emit_push_constant_packet_all(struct iris_context *ice,
                               struct iris_batch *batch,
                               uint32_t shader_mask,
@@ -6602,12 +6591,6 @@ emit_push_constant_packet_all(struct iris_context *ice,
    struct isl_device *isl_dev = &batch->screen->isl_dev;
 
    if (!push_bos) {
-      if (batch->screen->devinfo->needs_null_push_constant_tbimr_workaround &&
-          (shader_mask & (1 << MESA_SHADER_FRAGMENT))) {
-         emit_null_push_constant_tbimr_workaround(batch);
-         shader_mask &= ~(1 << MESA_SHADER_FRAGMENT);
-      }
-
       if (shader_mask) {
          iris_emit_cmd(batch, GENX(3DSTATE_CONSTANT_ALL), pc) {
             pc.ShaderUpdateEnable = shader_mask;
@@ -9136,57 +9119,6 @@ static bool iris_emit_indirect_dispatch_supported(const struct intel_device_info
 
 #if GFX_VERx10 >= 125
 
-static void iris_emit_execute_indirect_dispatch(struct iris_context *ice,
-                                                struct iris_batch *batch,
-                                                const struct pipe_grid_info *grid,
-                                                const struct GENX(INTERFACE_DESCRIPTOR_DATA) idd)
-{
-   const struct iris_screen *screen = batch->screen;
-   struct iris_compiled_shader *shader =
-      ice->shaders.prog[MESA_SHADER_COMPUTE];
-   const struct iris_cs_data *cs_data = iris_cs_data(shader);
-   const struct intel_cs_dispatch_info dispatch =
-      iris_get_cs_dispatch_info(screen->devinfo, shader, grid->block);
-   struct iris_bo *indirect = iris_resource_bo(grid->indirect);
-   const int dispatch_size = dispatch.simd_size / 16;
-
-   struct GENX(COMPUTE_WALKER_BODY) body = {};
-   body.SIMDSize            = dispatch_size;
-   body.MessageSIMD         = dispatch_size;
-   body.GenerateLocalID     = cs_data->generate_local_id != 0;
-   body.EmitLocal           = cs_data->generate_local_id;
-   body.WalkOrder           = cs_data->walk_order;
-   body.TileLayout          = cs_data->walk_order == INTEL_WALK_ORDER_YXZ ?
-                              TileY32bpe : Linear;
-   body.LocalXMaximum       = grid->block[0] - 1;
-   body.LocalYMaximum       = grid->block[1] - 1;
-   body.LocalZMaximum       = grid->block[2] - 1;
-   body.ExecutionMask       = dispatch.right_mask;
-   body.PostSync.MOCS       = iris_mocs(NULL, &screen->isl_dev, 0);
-   body.InterfaceDescriptor = idd;
-   /* HSD 14016252163: Use of Morton walk order (and batching using a batch
-    * size of 4) is expected to increase sampler cache hit rates by
-    * increasing sample address locality within a subslice.
-    */
-#if GFX_VER >= 30
-   body.DispatchWalkOrder =
-      cs_data->uses_sampler ? MortonWalk : LinearWalk;
-   body.ThreadGroupBatchSize =
-      cs_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1;
-#endif
-
-   struct iris_address indirect_bo = ro_bo(indirect, grid->indirect_offset);
-   iris_emit_cmd(batch, GENX(EXECUTE_INDIRECT_DISPATCH), ind) {
-      ind.PredicateEnable            =
-         ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT;
-      ind.MaxCount                   = 1;
-      ind.body                       = body;
-      ind.ArgumentBufferStartAddress = indirect_bo;
-      ind.MOCS                       =
-         iris_mocs(indirect_bo.bo, &screen->isl_dev, 0);
-   }
-}
-
 static void
 iris_upload_compute_walker(struct iris_context *ice,
                            struct iris_batch *batch,
@@ -9282,45 +9214,58 @@ iris_upload_compute_walker(struct iris_context *ice,
    idd.RegistersPerThread = ptl_register_blocks(shader->brw_prog_data->grf_used);
 #endif
 
+struct GENX(COMPUTE_WALKER_BODY) body = {
+   .SIMDSize                       = dispatch.simd_size / 16,
+   .MessageSIMD                    = dispatch.simd_size / 16,
+   .LocalXMaximum                  = grid->block[0] - 1,
+   .LocalYMaximum                  = grid->block[1] - 1,
+   .LocalZMaximum                  = grid->block[2] - 1,
+   .ThreadGroupIDXDimension        = grid->grid[0],
+   .ThreadGroupIDYDimension        = grid->grid[1],
+   .ThreadGroupIDZDimension        = grid->grid[2],
+   .ExecutionMask                  = dispatch.right_mask,
+   .PostSync.MOCS                  = iris_mocs(NULL, &screen->isl_dev, 0),
+   .InterfaceDescriptor            = idd,
+
+#if GFX_VERx10 >= 125
+   .GenerateLocalID = cs_data->generate_local_id != 0,
+   .EmitLocal       = cs_data->generate_local_id,
+   .WalkOrder       = cs_data->walk_order,
+   .TileLayout      = cs_data->walk_order == INTEL_WALK_ORDER_YXZ ?
+                                             TileY32bpe : Linear,
+#endif
+#if GFX_VER >= 30
+   /* HSD 14016252163 */
+   .DispatchWalkOrder = cs_data->uses_sampler ? MortonWalk : LinearWalk,
+   .ThreadGroupBatchSize = cs_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1,
+#endif
+   };
+
    iris_measure_snapshot(ice, batch, INTEL_SNAPSHOT_COMPUTE, NULL, NULL, NULL);
 
    if (iris_emit_indirect_dispatch_supported(devinfo) && grid->indirect) {
-      iris_emit_execute_indirect_dispatch(ice, batch, grid, idd);
+      struct iris_bo *indirect = iris_resource_bo(grid->indirect);
+      struct iris_address indirect_bo = ro_bo(indirect, grid->indirect_offset);
+
+      body.ThreadGroupIDXDimension = 0;
+      body.ThreadGroupIDYDimension = 0;
+      body.ThreadGroupIDZDimension = 0;
+
+      iris_emit_cmd(batch, GENX(EXECUTE_INDIRECT_DISPATCH), ind) {
+         ind.PredicateEnable            =
+            ice->state.predicate == IRIS_PREDICATE_STATE_USE_BIT;
+         ind.MaxCount                   = 1;
+         ind.body                       = body;
+         ind.ArgumentBufferStartAddress = indirect_bo;
+         ind.MOCS                       =
+            iris_mocs(indirect_bo.bo, &screen->isl_dev, 0);
+      }
    } else {
       if (grid->indirect)
          iris_load_indirect_location(ice, batch, grid);
 
-      iris_measure_snapshot(ice, batch, INTEL_SNAPSHOT_COMPUTE, NULL, NULL, NULL);
-
       ice->utrace.last_compute_walker =
          iris_emit_dwords(batch, GENX(COMPUTE_WALKER_length));
-
-      struct GENX(COMPUTE_WALKER_BODY) body = {
-         .SIMDSize                       = dispatch.simd_size / 16,
-         .MessageSIMD                    = dispatch.simd_size / 16,
-         .LocalXMaximum                  = grid->block[0] - 1,
-         .LocalYMaximum                  = grid->block[1] - 1,
-         .LocalZMaximum                  = grid->block[2] - 1,
-         .ThreadGroupIDXDimension        = grid->grid[0],
-         .ThreadGroupIDYDimension        = grid->grid[1],
-         .ThreadGroupIDZDimension        = grid->grid[2],
-         .ExecutionMask                  = dispatch.right_mask,
-         .PostSync.MOCS                  = iris_mocs(NULL, &screen->isl_dev, 0),
-         .InterfaceDescriptor            = idd,
-
-#if GFX_VERx10 >= 125
-         .GenerateLocalID = cs_data->generate_local_id != 0,
-         .EmitLocal       = cs_data->generate_local_id,
-         .WalkOrder       = cs_data->walk_order,
-         .TileLayout = cs_data->walk_order == INTEL_WALK_ORDER_YXZ ?
-                       TileY32bpe : Linear,
-#endif
-#if GFX_VER >= 30
-         /* HSD 14016252163 */
-         .DispatchWalkOrder = cs_data->uses_sampler ? MortonWalk : LinearWalk,
-         .ThreadGroupBatchSize = cs_data->uses_sampler ? TG_BATCH_4 : TG_BATCH_1,
-#endif
-      };
 
       _iris_pack_command(batch, GENX(COMPUTE_WALKER),
                          ice->utrace.last_compute_walker, cw) {
@@ -9410,21 +9355,34 @@ iris_upload_gpgpu_walker(struct iris_context *ice,
    if ((stage_dirty & IRIS_STAGE_DIRTY_CS) ||
        (GFX_VER == 12 && !batch->contains_draw) ||
        cs_data->local_size[0] == 0 /* Variable local group size */) {
-      uint32_t curbe_data_offset = 0;
-      assert(cs_data->push.cross_thread.dwords == 0 &&
-             cs_data->push.per_thread.dwords == 1 &&
-             cs_data->first_param_is_builtin_subgroup_id);
-      const unsigned push_const_size =
-         iris_cs_push_const_total_size(shader, dispatch.threads);
-      uint32_t *curbe_data_map =
-         stream_state(batch, ice->state.dynamic_uploader,
-                      &ice->state.last_res.cs_thread_ids,
-                      align(push_const_size, 64), 64,
-                      &curbe_data_offset);
-      assert(curbe_data_map);
-      memset(curbe_data_map, 0x5a, align(push_const_size, 64));
-      iris_fill_cs_push_const_buffer(screen, shader, dispatch.threads,
-                                     curbe_data_map);
+      uint32_t curbe_data_offset, push_const_size;
+      uint32_t *curbe_data_map;
+      if (cs_data->push.cross_thread.dwords == 0 &&
+          cs_data->push.per_thread.dwords == 0) {
+         push_const_size = 64;
+         curbe_data_map =
+            stream_state(batch, ice->state.dynamic_uploader,
+                         &ice->state.last_res.cs_thread_ids,
+                         align(push_const_size, 64), 64,
+                         &curbe_data_offset);
+         assert(curbe_data_map);
+         memset(curbe_data_map, 0x5a, align(push_const_size, 64));
+      } else {
+         assert(cs_data->push.cross_thread.dwords == 0 &&
+                cs_data->push.per_thread.dwords == 1 &&
+                cs_data->first_param_is_builtin_subgroup_id);
+         push_const_size =
+            iris_cs_push_const_total_size(shader, dispatch.threads);
+         curbe_data_map =
+            stream_state(batch, ice->state.dynamic_uploader,
+                         &ice->state.last_res.cs_thread_ids,
+                         align(push_const_size, 64), 64,
+                         &curbe_data_offset);
+         assert(curbe_data_map);
+         memset(curbe_data_map, 0x5a, align(push_const_size, 64));
+         iris_fill_cs_push_const_buffer(screen, shader, dispatch.threads,
+                                        curbe_data_map);
+      }
 
       iris_emit_cmd(batch, GENX(MEDIA_CURBE_LOAD), curbe) {
          curbe.CURBETotalDataLength = align(push_const_size, 64);

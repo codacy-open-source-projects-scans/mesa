@@ -87,6 +87,8 @@ void bifrost_postprocess_nir(nir_shader *nir, unsigned gpu_id);
 void bifrost_lower_texture_nir(nir_shader *nir, unsigned gpu_id);
 void bifrost_lower_texture_late_nir(nir_shader *nir, unsigned gpu_id);
 
+bool bifrost_will_dump_shaders(void);
+
 void bifrost_compile_shader_nir(nir_shader *nir,
                                 const struct pan_compile_inputs *inputs,
                                 struct util_dynarray *binary,
@@ -153,6 +155,7 @@ valhal_writes_extended_fifo(uint64_t outputs_written,
       .lower_unpack_snorm_2x16 = true,                                         \
       .lower_unpack_unorm_4x8 = true,                                          \
       .lower_unpack_snorm_4x8 = true,                                          \
+      .has_pack_32_4x8 = true,                                                 \
                                                                                \
       .lower_doubles_options =                                                 \
          nir_lower_dmod, /* TODO: Don't lower supported 64-bit operations */   \

@@ -455,7 +455,10 @@ zink_clear_texture_dynamic(struct pipe_context *pctx,
    VkRenderingAttachmentInfo att = {0};
    att.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
    att.imageView = surf->image_view;
-   att.imageLayout = res->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+   if (screen->driver_workarounds.general_layout)
+      att.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+   else
+      att.imageLayout = res->aspect & VK_IMAGE_ASPECT_COLOR_BIT ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
    att.loadOp = full_clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
    att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
@@ -837,23 +840,6 @@ zink_fb_clears_apply_region(struct zink_context *ctx, struct pipe_resource *pres
 void
 zink_fb_clear_rewrite(struct zink_context *ctx, unsigned idx, enum pipe_format before, enum pipe_format after)
 {
-   /* if the values for the clear color are incompatible, they must be rewritten;
-    * this occurs if:
-    * - the formats' srgb-ness does not match
-    * - the formats' signedness does not match
-    */
-   const struct util_format_description *bdesc = util_format_description(before);
-   const struct util_format_description *adesc = util_format_description(after);
-   int bfirst_non_void_chan = util_format_get_first_non_void_channel(before);
-   int afirst_non_void_chan = util_format_get_first_non_void_channel(after);
-   bool bsigned = false, asigned = false;
-   if (bfirst_non_void_chan > 0)
-      bsigned = bdesc->channel[bfirst_non_void_chan].type == UTIL_FORMAT_TYPE_SIGNED;
-   if (afirst_non_void_chan > 0)
-      asigned = adesc->channel[afirst_non_void_chan].type == UTIL_FORMAT_TYPE_SIGNED;
-   if (util_format_is_srgb(before) == util_format_is_srgb(after) &&
-       bsigned == asigned)
-      return;
    struct zink_framebuffer_clear *fb_clear = &ctx->fb_clears[idx];
    for (int j = 0; j < zink_fb_clear_count(fb_clear); j++) {
       struct zink_framebuffer_clear_data *clear = zink_fb_clear_element(fb_clear, j);

@@ -628,7 +628,7 @@ struct anv_address {
    bool protected;
 };
 
-#define ANV_NULL_ADDRESS ((struct anv_address) { NULL, 0 })
+#define ANV_NULL_ADDRESS ((struct anv_address) { 0 })
 
 static inline struct anv_address
 anv_address_from_u64(uint64_t addr_u64)
@@ -2625,22 +2625,11 @@ struct anv_device {
 
     uint32_t                                    protected_session_id;
 
-    /** Shadow ray query BO
-     *
-     * The ray_query_bo only holds the current ray being traced. When using
-     * more than 1 ray query per thread, we cannot fit all the queries in
-     * there, so we need a another buffer to hold query data that is not
-     * currently being used by the HW for tracing, similar to a scratch space.
-     *
-     * The size of the shadow buffer depends on the number of queries per
-     * shader.
+    /** Pool of ray query buffers used to communicated with HW unit.
      *
      * We might need a buffer per queue family due to Wa_14022863161.
      */
-    struct anv_bo                              *ray_query_shadow_bos[2][16];
-    /** Ray query buffer used to communicated with HW unit.
-     */
-    struct anv_bo                              *ray_query_bo[2];
+    struct anv_bo                              *ray_query_bos[2][16];
 
     struct anv_shader_internal                 *rt_trampoline;
     struct anv_shader_internal                 *rt_trivial_return;
@@ -4247,7 +4236,20 @@ struct anv_push_constants {
     */
    uint32_t surfaces_base_offset;
 
-   /** Ray query globals (RT_DISPATCH_GLOBALS) */
+   /**
+    * Pointer to ray query stacks and their associated pairs of
+    * RT_DISPATCH_GLOBALS structures (see genX(setup_ray_query_globals))
+    *
+    * The pair of globals for each query object are stored counting up from
+    * this address in units of BRW_RT_DISPATCH_GLOBALS_ALIGN:
+    *
+    *    rq_globals = ray_query_globals + (rq * BRW_RT_DISPATCH_GLOBALS_ALIGN)
+    *
+    * The raytracing scratch area for each ray query is stored counting down
+    * from this address in units of brw_rt_ray_queries_stacks_stride(devinfo):
+    *
+    *    rq_stacks_addr = ray_query_globals - (rq * ray_queries_stacks_stride)
+    */
    uint64_t ray_query_globals;
 
    union {
@@ -4749,9 +4751,14 @@ struct anv_cmd_state {
    unsigned                                     current_hash_scale;
 
    /**
-    * A buffer used for spill/fill of ray queries.
+    * Number of ray query buffers allocated.
     */
-   struct anv_bo *                              ray_query_shadow_bo;
+   uint32_t                                     num_ray_query_globals;
+
+   /**
+    * Current array of RT_DISPATCH_GLOBALS for ray queries.
+    */
+   struct anv_address                           ray_query_globals;
 
    /** Pointer to the last emitted COMPUTE_WALKER.
     *
@@ -6823,8 +6830,6 @@ anv_add_pending_pipe_bits(struct anv_cmd_buffer* cmd_buffer,
 
 struct anv_performance_configuration_intel {
    struct vk_object_base      base;
-
-   struct intel_perf_registers *register_config;
 
    uint64_t                   config_id;
 };

@@ -431,10 +431,12 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    device->formats.all = pan_format_table(arch);
    device->formats.blendable = pan_blendable_format_table(arch);
 
-   memset(device->name, 0, sizeof(device->name));
-   sprintf(device->name, "%s", device->model->name);
+   unsigned core_id_range;
+   unsigned core_count =
+      pan_query_core_count(&device->kmod.dev->props, &core_id_range);
 
-   init_shader_caches(device, instance);
+   memset(device->name, 0, sizeof(device->name));
+   sprintf(device->name, "%s MC%u", device->model->name, core_count);
 
    result = get_core_masks(device, instance);
    if (result != VK_SUCCESS)
@@ -466,22 +468,25 @@ panvk_physical_device_init(struct panvk_physical_device *device,
    panvk_arch_dispatch(arch, get_physical_device_features, instance,
                        device, &supported_features);
 
-   struct vk_properties properties;
-   panvk_arch_dispatch(arch, get_physical_device_properties, instance,
-                       device, &properties);
-
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &panvk_physical_device_entrypoints, true);
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &wsi_physical_device_entrypoints, false);
 
-   result = vk_physical_device_init(&device->vk, &instance->vk,
-                                    &supported_extensions, &supported_features,
-                                    &properties, &dispatch_table);
+   result =
+      vk_physical_device_init(&device->vk, &instance->vk, &supported_extensions,
+                              &supported_features, NULL, &dispatch_table);
 
    if (result != VK_SUCCESS)
       goto fail;
+
+   /* initialize disk cache after vk_physical_device_init */
+   init_shader_caches(device, instance);
+
+   /* pipeline binary props rely on disk cache init state */
+   panvk_arch_dispatch(arch, get_physical_device_properties, instance, device,
+                       &device->vk.properties);
 
    device->vk.supported_sync_types = device->sync_types;
 

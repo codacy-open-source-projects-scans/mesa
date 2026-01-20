@@ -109,7 +109,7 @@ template <chip CHIP>
 static void
 tu6_emit_lrz_buffer(struct tu_cs *cs, struct tu_image *depth_image)
 {
-   tu_crb crb = cs->crb(7);
+   tu_crb crb = cs->crb(8);
 
    if (!depth_image) {
       crb.add(GRAS_LRZ_BUFFER_BASE(CHIP, 0))
@@ -119,6 +119,10 @@ tu6_emit_lrz_buffer(struct tu_cs *cs, struct tu_image *depth_image)
       if (CHIP >= A7XX) {
          crb.add(GRAS_LRZ_DEPTH_BUFFER_INFO(CHIP));
          crb.add(GRAS_LRZ_CB_CNTL(CHIP));
+      }
+
+      if (CHIP >= A8XX) {
+         crb.add(GRAS_LRZ_BUFFER_SLICE_PITCH(CHIP));
       }
 
       return;
@@ -139,8 +143,14 @@ tu6_emit_lrz_buffer(struct tu_cs *cs, struct tu_image *depth_image)
    if (CHIP >= A7XX) {
       crb.add(GRAS_LRZ_DEPTH_BUFFER_INFO(CHIP, .depth_format = tu6_pipe2depth(
                                                  depth_image->vk.format)));
-      crb.add(GRAS_LRZ_CB_CNTL(CHIP, .double_buffer_stride =
+      crb.add(GRAS_LRZ_CB_CNTL(CHIP, .double_buffer_pitch =
                                    depth_image->lrz_layout.lrz_buffer_size));
+   }
+
+   if (CHIP >= A8XX) {
+      crb.add(GRAS_LRZ_BUFFER_SLICE_PITCH(CHIP,
+         depth_image->lrz_layout.lrz_slice_pitch
+      ));
    }
 }
 
@@ -196,8 +206,8 @@ tu6_disable_lrz_via_depth_view(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
       .disable_on_wrong_dir = true,
    });
 
-   tu_emit_event_write<A6XX>(cmd, cs, FD_LRZ_CLEAR);
-   tu_emit_event_write<A6XX>(cmd, cs, FD_LRZ_FLUSH);
+   tu_emit_event_write<CHIP>(cmd, cs, FD_LRZ_CLEAR);
+   tu_emit_event_write<CHIP>(cmd, cs, FD_LRZ_FLUSH);
 }
 
 static void
@@ -345,7 +355,7 @@ tu_lrz_begin_renderpass(struct tu_cmd_buffer *cmd)
 {
    const struct tu_render_pass *pass = cmd->state.pass;
 
-   cmd->state.rp.lrz_disable_reason = "";
+   cmd->state.rp.lrz_disable_reason = NULL;
    cmd->state.rp.lrz_disabled_at_draw = 0;
    cmd->state.rp.lrz_write_disabled_at_draw = 0;
 

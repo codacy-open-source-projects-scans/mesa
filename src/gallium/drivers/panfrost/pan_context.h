@@ -206,6 +206,9 @@ struct panfrost_context {
    struct panfrost_sampler_view
       *sampler_views[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
    unsigned sampler_view_count[MESA_SHADER_STAGES];
+   struct {
+      BITSET_DECLARE(mask, PIPE_MAX_SHADER_SAMPLER_VIEWS);
+   } texture_buffer[MESA_SHADER_STAGES];
 
    struct blitter_context *blitter;
 
@@ -471,6 +474,9 @@ bool panfrost_nir_lower_sysvals(nir_shader *s, unsigned arch,
 
 bool panfrost_nir_lower_res_indices(nir_shader *shader,
                                     struct pan_compile_inputs *inputs);
+
+bool panfrost_nir_lower_pls(nir_shader *shader,
+                            struct panfrost_screen *screen);
 
 /** (Vertex buffer index, divisor) tuple that will become an Attribute Buffer
  * Descriptor at draw-time on Midgard

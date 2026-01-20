@@ -506,6 +506,7 @@ radv_get_sequence_size(const struct radv_indirect_command_layout *layout, const 
    if (device->sqtt.bo) {
       /* THREAD_TRACE_MARKER */
       *cmd_size += 2 * 4;
+      *ace_cmd_size += 2 * 4;
    }
 
    if (layout->vk.dgc_info & BITFIELD_BIT(MESA_VK_DGC_DISPATCH)) {
@@ -1268,7 +1269,7 @@ build_dgc_buffer_preamble_ace(struct dgc_cmdbuf *cs, nir_def *sequence_count)
  * Draw
  */
 static void
-dgc_gfx12_emit_hiz_his_wa(struct dgc_cmdbuf *cs)
+dgc_gfx12_emit_hiz_wa(struct dgc_cmdbuf *cs)
 {
    const struct radv_device *device = cs->dev;
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -1298,7 +1299,7 @@ dgc_emit_before_draw(struct dgc_cmdbuf *cs, nir_def *sequence_id, enum rgp_sqtt_
 static void
 dgc_emit_after_draw(struct dgc_cmdbuf *cs, enum rgp_sqtt_marker_general_api_type api_type)
 {
-   dgc_gfx12_emit_hiz_his_wa(cs);
+   dgc_gfx12_emit_hiz_wa(cs);
    dgc_emit_sqtt_thread_trace_marker(cs);
    dgc_emit_sqtt_end_api_marker(cs, api_type);
 }
@@ -2266,7 +2267,9 @@ dgc_emit_dispatch_taskmesh_gfx(struct dgc_cmdbuf *cs, nir_def *sequence_id)
    dgc_cs_emit_imm(V_0287F0_DI_SRC_SEL_AUTO_INDEX);
    dgc_cs_end();
 
-   dgc_emit_after_draw(cs, ApiCmdDrawMeshTasksEXT);
+   dgc_gfx12_emit_hiz_wa(cs);
+   /* No SQTT marker emitted because it's part of the packet. */
+   dgc_emit_sqtt_end_api_marker(cs, ApiCmdDrawMeshTasksEXT);
 }
 
 static void
@@ -2452,6 +2455,8 @@ dgc_emit_draw_mesh_tasks_ace(struct dgc_cmdbuf *ace_cs, nir_def *stream_addr)
    {
       dgc_emit_userdata_task(ace_cs, x, y, z);
       dgc_emit_dispatch_taskmesh_direct_ace(ace_cs, x, y, z);
+
+      dgc_emit_sqtt_thread_trace_marker(ace_cs);
    }
    nir_pop_if(b, NULL);
 }
@@ -2493,6 +2498,8 @@ dgc_emit_draw_mesh_tasks_with_count_ace(struct dgc_cmdbuf *ace_cs, nir_def *stre
    dgc_cs_emit(stride);
    dgc_cs_emit(dispatch_initiator);
    dgc_cs_end();
+
+   dgc_emit_sqtt_thread_trace_marker(ace_cs);
 }
 
 /**

@@ -130,7 +130,7 @@ aco_postprocess_shader(const struct aco_compiler_options* options,
    /* Register Allocation */
    register_allocation(program.get());
 
-   if (validate_ra(program.get())) {
+   if ((debug_flags & DEBUG_VALIDATE_RA) && validate_ra(program.get())) {
       aco_print_program(program.get(), stderr);
       abort();
    } else if (options->dump_ir) {
@@ -273,8 +273,8 @@ aco_compile_shader(const struct aco_compiler_options* options, const struct aco_
 void
 aco_compile_rt_prolog(const struct aco_compiler_options* options,
                       const struct aco_shader_info* info, const struct ac_shader_args* in_args,
-                      const struct ac_shader_args* out_args, aco_callback* build_prolog,
-                      void** binary)
+                      const struct ac_arg* descriptors, unsigned raygen_param_count,
+                      nir_parameter* raygen_params, aco_callback* build_prolog, void** binary)
 {
    init();
 
@@ -285,7 +285,8 @@ aco_compile_rt_prolog(const struct aco_compiler_options* options,
    program->debug.func = NULL;
    program->debug.private_data = NULL;
 
-   select_rt_prolog(program.get(), &config, options, info, in_args, out_args);
+   select_rt_prolog(program.get(), &config, options, info, in_args, descriptors, raygen_param_count,
+                    raygen_params);
    validate(program.get());
    insert_waitcnt(program.get());
    insert_NOPs(program.get());

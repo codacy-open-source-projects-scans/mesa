@@ -165,10 +165,8 @@ void si_flush_gfx_cs(struct si_context *ctx, unsigned flags, struct pipe_fence_h
    }
 
    /* Wait for draw calls to finish if needed. */
-   if (wait_flags) {
-      ctx->barrier_flags |= wait_flags;
-      si_emit_barrier_direct(ctx);
-   }
+   if (wait_flags)
+      si_emit_barrier_direct(ctx, wait_flags);
    ctx->gfx_last_ib_is_busy = (wait_flags & wait_ps_cs) != wait_ps_cs;
 
    if (ctx->current_saved_cs) {
@@ -324,6 +322,7 @@ static void si_draw_vstate_tmz_preamble(struct pipe_context *ctx,
 
 void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
 {
+   unsigned new_barrier_flags;
    bool is_secure = false;
 
    if (!first_cs)
@@ -372,16 +371,15 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     *
     * TODO: Do we also need to invalidate CB & DB caches?
     */
-   ctx->barrier_flags |= SI_BARRIER_INV_L2;
+   new_barrier_flags = SI_BARRIER_INV_L2;
    if (ctx->gfx_level < GFX10)
-      ctx->barrier_flags |= SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
+      new_barrier_flags |= SI_BARRIER_INV_ICACHE | SI_BARRIER_INV_SMEM | SI_BARRIER_INV_VMEM;
 
    /* Disable pipeline stats if there are no active queries. */
-   ctx->barrier_flags &= ~SI_BARRIER_EVENT_PIPELINESTAT_START & ~SI_BARRIER_EVENT_PIPELINESTAT_STOP;
    if (ctx->num_hw_pipestat_streamout_queries)
-      ctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
+      new_barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_START;
    else
-      ctx->barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
+      new_barrier_flags |= SI_BARRIER_EVENT_PIPELINESTAT_STOP;
 
    ctx->pipeline_stats_enabled = -1; /* indicate that the current hw state is unknown */
 
@@ -389,9 +387,11 @@ void si_begin_new_gfx_cs(struct si_context *ctx, bool first_cs)
     * When switching NGG->legacy, we need to flush VGT for certain hw generations.
     */
    if (ctx->screen->info.has_vgt_flush_ngg_legacy_bug && !ctx->ngg)
-      ctx->barrier_flags |= SI_BARRIER_EVENT_VGT_FLUSH;
+      new_barrier_flags |= SI_BARRIER_EVENT_VGT_FLUSH;
 
-   si_mark_atom_dirty(ctx, &ctx->atoms.s.barrier);
+   si_clear_and_set_barrier_flags(ctx,
+                            SI_BARRIER_EVENT_PIPELINESTAT_START | SI_BARRIER_EVENT_PIPELINESTAT_STOP,
+                            new_barrier_flags);
    si_mark_atom_dirty(ctx, &ctx->atoms.s.spi_ge_ring_state);
 
    if (ctx->screen->attribute_pos_prim_ring && !is_secure) {

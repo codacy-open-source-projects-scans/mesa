@@ -802,9 +802,6 @@ init_ici(struct zink_screen *screen, VkImageCreateInfo *ici, const struct pipe_r
       ici->flags |= VK_IMAGE_CREATE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_BIT_EXT;
    ici->sharingMode = VK_SHARING_MODE_EXCLUSIVE;
    ici->initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-   if (templ->target == PIPE_TEXTURE_CUBE)
-      ici->arrayLayers *= 6;
 }
 
 static const VkImageAspectFlags plane_aspects[] = {
@@ -2070,6 +2067,7 @@ zink_resource_from_handle(struct pipe_screen *pscreen,
          res->valid = true;
       else
          tc_buffer_disable_cpu_storage(pres);
+      res->obj->immutable_handle = true;
       res->internal_format = whandle->format;
    }
    return pres;
@@ -2548,6 +2546,8 @@ zink_image_map(struct pipe_context *pctx,
    struct zink_context *ctx = zink_context(pctx);
    struct zink_screen *screen = zink_screen(pctx->screen);
    struct zink_resource *res = zink_resource(pres);
+   if (res->unflushed_transient)
+      res = res->transient;
    struct zink_transfer *trans = create_transfer(ctx, pres, usage, box);
    if (!trans)
       return NULL;

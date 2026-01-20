@@ -224,6 +224,16 @@ struct radv_device {
    bool sqtt_enabled;
    bool sqtt_triggered;
 
+   VkCommandBuffer sqtt_start_cmdbuf[2];
+   VkCommandBuffer sqtt_stop_cmdbuf[2];
+
+   uint64_t sqtt_size;
+   VkBuffer sqtt_buffer;
+   VkDeviceMemory sqtt_memory;
+
+   VkBuffer sqtt_staging_buffer;
+   VkDeviceMemory sqtt_staging_memory;
+
    /* SQTT timestamps for queue events. */
    simple_mtx_t sqtt_timestamp_mtx;
    struct radv_sqtt_timestamp sqtt_timestamp;
@@ -232,11 +242,20 @@ struct radv_device {
    simple_mtx_t sqtt_command_pool_mtx;
    struct vk_command_pool *sqtt_command_pool[2];
 
+   /* Whether to use a staging buffer for SQTT/SPM buffers. */
+   bool rgp_use_staging_buffer;
+
    /* Memory trace. */
    struct radv_memory_trace_data memory_trace;
 
    /* SPM. */
    struct ac_spm spm;
+
+   uint64_t spm_buffer_va;
+   VkBuffer spm_buffer;
+   VkDeviceMemory spm_memory;
+   VkBuffer spm_staging_buffer;
+   VkDeviceMemory spm_staging_memory;
 
    /* Radeon Raytracing Analyzer trace. */
    struct radv_rra_trace_data rra_trace;

@@ -66,6 +66,8 @@
 #include "vk_dispatch_table.h"
 #include "util/perf/cpu_trace.h"
 
+#include "nir_to_spirv/nir_to_spirv.h"
+
 #if HAVE_RENDERDOC_INTEGRATION
 #include "renderdoc_app.h"
 #endif
@@ -768,22 +770,6 @@ struct zink_framebuffer_clear {
 
 
 /** compiler types */
-struct zink_shader_info {
-   uint16_t stride[PIPE_MAX_SO_BUFFERS];
-   uint32_t sampler_mask;
-   bool have_sparse;
-   bool have_vulkan_memory_model;
-   bool have_workgroup_memory_explicit_layout;
-   bool broken_arbitary_type_const;
-   struct {
-      uint8_t flush_denorms:3; // 16, 32, 64
-      uint8_t preserve_denorms:3; // 16, 32, 64
-      bool denorms_32_bit_independence:1;
-      bool denorms_all_independence:1;
-   } float_controls;
-   unsigned bindless_set_idx;
-};
-
 enum zink_rast_prim {
    ZINK_PRIM_POINTS,
    ZINK_PRIM_LINES,
@@ -807,7 +793,7 @@ struct zink_shader {
    /* this is deleted in zink_shader_init */
    nir_shader *nir;
 
-   struct zink_shader_info sinfo;
+   uint16_t xfb_stride[PIPE_MAX_SO_BUFFERS];
 
    struct {
       int index;
@@ -1266,6 +1252,7 @@ struct zink_resource_object {
    bool host_visible;
    bool coherent;
    bool is_aux;
+   bool immutable_handle;
 };
 
 /* "gfx" includes mesh here */
@@ -1275,7 +1262,7 @@ struct zink_resource {
    enum pipe_format internal_format:16;
 
    struct zink_resource_object *obj;
-   struct zink_resource *transient; //for msrtt without EXT_multisampled_render_to_single_sampled
+   struct zink_resource *transient; //for msrtt without EXT_multisampled_render_to_single_sampled and format view shadowing
    uint32_t queue;
    union {
       struct {
@@ -1328,6 +1315,7 @@ struct zink_resource {
    bool deleted; //resource_release
    bool swapchain;
    bool dmabuf;
+   bool unflushed_transient; //format view transient has newer data than parent
    bool subdata; //doing subdata call
    unsigned dt_stride;
 
@@ -1463,6 +1451,7 @@ struct zink_screen {
 
    struct zink_device_info info;
    struct nir_shader_compiler_options nir_options;
+   struct ntv_info ntv_info;
 
    bool optimal_keys;
    bool have_full_ds3;
@@ -1773,6 +1762,7 @@ struct zink_context {
    struct zink_rasterizer_state *rast_state;
    struct zink_depth_stencil_alpha_state *dsa_state;
 
+   bool transient_msrtss; //transient_attachments is for msrtss
    bool has_swapchain;
    bool pipeline_changed[ZINK_PIPELINE_MAX]; //gfx, compute, mesh
 
@@ -1821,6 +1811,7 @@ struct zink_context {
    VkExtent2D swapchain_size;
    bool awaiting_resolve; //from tc info
    bool in_rp; //renderpass is currently active
+   bool rp_draw; //renderpass has draws
    bool rp_changed; //force renderpass restart
    bool rp_layout_changed; //renderpass changed, maybe restart
    bool rp_loadop_changed; //renderpass changed, don't restart

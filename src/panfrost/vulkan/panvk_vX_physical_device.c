@@ -91,6 +91,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .KHR_pipeline_library = true,
       .KHR_push_descriptor = true,
       .KHR_relaxed_block_layout = true,
+      .KHR_robustness2 = PAN_ARCH >= 10,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
@@ -489,7 +490,7 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_KHR_pipeline_executable_properties */
       .pipelineExecutableInfo = true,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustBufferAccess2 = PAN_ARCH >= 11,
       .robustImageAccess2 = false,
       .nullDescriptor = PAN_ARCH >= 10,
@@ -615,12 +616,7 @@ panvk_per_arch(get_physical_device_properties)(
       .driverVersion = vk_get_driver_version(),
       .vendorID =
          instance->force_vk_vendor ? instance->force_vk_vendor : ARM_VENDOR_ID,
-
-      /* Collect arch_major, arch_minor, arch_rev and product_major,
-       * as done by the Arm driver.
-       */
-      .deviceID = device->kmod.dev->props.gpu_id &
-                  (ARCH_MAJOR | ARCH_MINOR | ARCH_REV | PRODUCT_MAJOR),
+      .deviceID = device->kmod.dev->props.gpu_id,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
       /* Vulkan 1.0 limits */
@@ -641,12 +637,10 @@ panvk_per_arch(get_physical_device_properties)(
       .maxImageDimension3D = PAN_ARCH <= 10 ? (1 << 9) : (1 << 14),
       .maxImageDimensionCube = PAN_ARCH <= 10 ? (1 << 14) - 1 : (1 << 16),
       .maxImageArrayLayers = (1 << 16),
-      /* Currently Bifrost is limited by the 1D texture size, which is 2^16,
-         while pre-v11 is limited to 2^27 elements of 16 byte formats due to
+      /* Pre-v11 is limited to 2^27 elements of 16 byte formats due to
          size fields of 32 bits. */
-      .maxTexelBufferElements = PAN_ARCH >= 11  ? PANVK_MAX_BUFFER_SIZE
-                                : PAN_ARCH >= 9 ? (1 << 27)
-                                                : (1 << 16),
+      .maxTexelBufferElements =
+         PAN_ARCH >= 11 ? PANVK_MAX_BUFFER_SIZE : (1 << 27),
       /* Each uniform entry is 16-byte and the number of entries is encoded in a
        * 12-bit field, with the minus(1) modifier, which gives 2^20.
        */
@@ -986,8 +980,8 @@ panvk_per_arch(get_physical_device_properties)(
       .integerDotProductAccumulatingSaturating64BitMixedSignednessAccelerated = false,
       .storageTexelBufferOffsetAlignmentBytes = 64,
       .storageTexelBufferOffsetSingleTexelAlignment = false,
-      .uniformTexelBufferOffsetAlignmentBytes = PAN_ARCH >= 9 ? 4 : 64,
-      .uniformTexelBufferOffsetSingleTexelAlignment = PAN_ARCH >= 9,
+      .uniformTexelBufferOffsetAlignmentBytes = 4,
+      .uniformTexelBufferOffsetSingleTexelAlignment = true,
       .maxBufferSize = PANVK_MAX_BUFFER_SIZE,
 
       /* Vulkan 1.4 properties */
@@ -1025,7 +1019,7 @@ panvk_per_arch(get_physical_device_properties)(
       .pipelineBinaryPrecompiledInternalCache = has_disk_cache,
       .pipelineBinaryCompressedData = false,
 
-      /* VK_EXT_robustness2 */
+      /* VK_KHR_robustness2 */
       .robustStorageBufferAccessSizeAlignment = 1,
       .robustUniformBufferAccessSizeAlignment = 1,
 

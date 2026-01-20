@@ -26,6 +26,7 @@
 
 extern const struct vk_device_shader_ops panvk_per_arch(device_shader_ops);
 
+#define MAX_RTS 8
 #define MAX_VS_ATTRIBS 16
 
 #if PAN_ARCH < 9
@@ -154,6 +155,10 @@ struct panvk_graphics_sysvals {
       int32_t base_instance;
       uint32_t noperspective_varyings;
    } vs;
+
+   struct {
+      aligned_u64 blend_descs[MAX_RTS];
+   } fs;
 
    struct panvk_input_attachment_info iam[INPUT_ATTACHMENT_MAP_SIZE];
 
@@ -546,6 +551,9 @@ struct panvk_internal_shader {
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(panvk_internal_shader, vk.base, VkShaderEXT,
                                VK_OBJECT_TYPE_SHADER_EXT)
+
+void panvk_per_arch(compiler_lock)(void);
+void panvk_per_arch(compiler_unlock)(void);
 
 VkResult panvk_per_arch(create_internal_shader)(
    struct panvk_device *dev, nir_shader *nir,

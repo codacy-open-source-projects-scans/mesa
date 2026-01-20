@@ -151,9 +151,9 @@ static uint32_t setup_pck_info(VkFormat vk_format)
    return pck_info;
 }
 
-VkResult PVR_PER_ARCH(pack_tex_state)(struct pvr_device *device,
-                                      const struct pvr_texture_state_info *info,
-                                      struct pvr_image_descriptor *state)
+VkResult pvr_arch_pack_tex_state(struct pvr_device *device,
+                                 const struct pvr_texture_state_info *info,
+                                 struct pvr_image_descriptor *state)
 {
    const struct pvr_device_info *dev_info = &device->pdevice->dev_info;
    enum pvr_memlayout mem_layout;
@@ -226,7 +226,7 @@ VkResult PVR_PER_ARCH(pack_tex_state)(struct pvr_device *device,
        * to avoid this.
        */
       word0.texformat =
-         pvr_get_tex_format_aspect(info->format, info->aspect_mask);
+         pvr_arch_get_tex_format_aspect(info->format, info->aspect_mask);
       word0.smpcnt = util_logbase2(info->sample_count);
       word0.swiz0 =
          pvr_get_hw_swizzle(VK_COMPONENT_SWIZZLE_R, info->swizzle[0]);

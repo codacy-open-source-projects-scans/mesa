@@ -923,6 +923,29 @@ vtn_handle_non_semantic_debug_info(struct vtn_builder *b, SpvOp ext_opcode,
    return true;
 }
 
+static bool
+vtn_handle_mesa_internal(struct vtn_builder *b, SpvOp ext_opcode,
+                         const uint32_t *w, unsigned count)
+{
+   uint32_t instr = w[4];
+
+   switch (instr) {
+   case SpvOpFConvertRUMesa: {
+      struct vtn_ssa_value *arg = vtn_ssa_value(b, w[5]);
+      vtn_push_nir_ssa(b, w[2], nir_f2f16_ru(&b->nb, arg->def));
+      break;
+   }
+   case SpvOpFConvertRDMesa: {
+      struct vtn_ssa_value *arg = vtn_ssa_value(b, w[5]);
+      vtn_push_nir_ssa(b, w[2], nir_f2f16_rd(&b->nb, arg->def));
+      break;
+   }
+   }
+
+   return true;
+}
+
+
 static void
 vtn_handle_extension(struct vtn_builder *b, SpvOp opcode,
                      const uint32_t *w, unsigned count)
@@ -958,6 +981,8 @@ vtn_handle_extension(struct vtn_builder *b, SpvOp opcode,
          val->ext_handler = vtn_handle_debug_printf;
       } else if (strstr(ext, "NonSemantic.") == ext) {
          val->ext_handler = vtn_handle_non_semantic_instruction;
+      } else if (strstr(ext, "MesaInternal") == ext) {
+         val->ext_handler = vtn_handle_mesa_internal;
       } else {
          vtn_fail("Unsupported extension: %s", ext);
       }
@@ -2928,7 +2953,7 @@ vtn_handle_constant(struct vtn_builder *b, SpvOp opcode,
          nir_const_value *srcs[3] = {
             src[0], src[1], src[2],
          };
-         nir_eval_const_opcode(op, val->constant->values,
+         nir_eval_const_opcode(op, val->constant->values, NULL,
                                num_components, bit_size, srcs,
                                b->shader->info.float_controls_execution_mode);
 

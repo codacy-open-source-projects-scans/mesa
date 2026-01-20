@@ -108,11 +108,11 @@ static inline void pvr_get_samples_in_xy(uint32_t samples,
    }
 }
 
-void PVR_PER_ARCH(rt_mtile_info_init)(const struct pvr_device_info *dev_info,
-                                      struct pvr_rt_mtile_info *info,
-                                      uint32_t width,
-                                      uint32_t height,
-                                      uint32_t samples)
+void pvr_arch_rt_mtile_info_init(const struct pvr_device_info *dev_info,
+                                 struct pvr_rt_mtile_info *info,
+                                 uint32_t width,
+                                 uint32_t height,
+                                 uint32_t samples)
 {
    uint32_t samples_in_x;
    uint32_t samples_in_y;
@@ -611,7 +611,7 @@ static void pvr_rt_dataset_ws_create_info_init(
       pvr_rt_get_isp_region_size(device, mtile_info);
 }
 
-VkResult PVR_PER_ARCH(render_target_dataset_create)(
+VkResult pvr_arch_render_target_dataset_create(
    struct pvr_device *device,
    uint32_t width,
    uint32_t height,
@@ -632,7 +632,7 @@ VkResult PVR_PER_ARCH(render_target_dataset_create)(
    assert(height <= rogue_get_render_size_max_y(dev_info));
    assert(layers > 0 && layers <= PVR_MAX_FRAMEBUFFER_LAYERS);
 
-   pvr_rt_mtile_info_init(dev_info, &mtile_info, width, height, samples);
+   pvr_arch_rt_mtile_info_init(dev_info, &mtile_info, width, height, samples);
 
    rt_dataset = vk_zalloc(&device->vk.alloc,
                           sizeof(*rt_dataset),
@@ -925,14 +925,14 @@ static void pvr_frag_state_stream_init(struct pvr_render_ctx *ctx,
    stream_ptr += pvr_cmd_length(KMD_STREAM_HDR);
 
    /* FIXME: pass in the number of samples rather than isp_aa_mode? */
-   pvr_setup_tiles_in_flight(dev_info,
-                             dev_runtime_info,
-                             isp_aa_mode,
-                             job->pixel_output_width,
-                             false,
-                             job->max_tiles_in_flight,
-                             &isp_ctl,
-                             &pixel_ctl);
+   pvr_arch_setup_tiles_in_flight(dev_info,
+                                  dev_runtime_info,
+                                  isp_aa_mode,
+                                  job->pixel_output_width,
+                                  false,
+                                  job->max_tiles_in_flight,
+                                  &isp_ctl,
+                                  &pixel_ctl);
 
    pvr_csb_pack ((uint64_t *)stream_ptr, CR_ISP_SCISSOR_BASE, value) {
       value.addr = job->scissor_table_addr;
@@ -1136,11 +1136,11 @@ static void pvr_frag_state_stream_init(struct pvr_render_ctx *ctx,
    }
    stream_ptr += pvr_cmd_length(CR_ISP_AA);
 
-   pvr_rt_mtile_info_init(dev_info,
-                          &tiling_info,
-                          rt_dataset->width,
-                          rt_dataset->height,
-                          rt_dataset->samples);
+   pvr_arch_rt_mtile_info_init(dev_info,
+                               &tiling_info,
+                               rt_dataset->width,
+                               rt_dataset->height,
+                               rt_dataset->samples);
    pvr_csb_pack (stream_ptr, CR_ISP_CTL, value) {
       value.sample_pos = true;
       value.process_empty_tiles = job->process_empty_tiles;
@@ -1452,12 +1452,12 @@ static void pvr_render_job_ws_submit_info_init(
       &submit_info->fragment_pr);
 }
 
-VkResult PVR_PER_ARCH(render_job_submit)(struct pvr_render_ctx *ctx,
-                                         struct pvr_render_job *job,
-                                         struct vk_sync *wait_geom,
-                                         struct vk_sync *wait_frag,
-                                         struct vk_sync *signal_sync_geom,
-                                         struct vk_sync *signal_sync_frag)
+VkResult pvr_arch_render_job_submit(struct pvr_render_ctx *ctx,
+                                    struct pvr_render_job *job,
+                                    struct vk_sync *wait_geom,
+                                    struct vk_sync *wait_frag,
+                                    struct vk_sync *signal_sync_geom,
+                                    struct vk_sync *signal_sync_frag)
 {
    struct pvr_rt_dataset *rt_dataset =
       job->view_state.rt_datasets[job->view_state.view_index];

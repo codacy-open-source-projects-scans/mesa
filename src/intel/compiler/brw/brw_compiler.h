@@ -403,8 +403,6 @@ struct brw_wm_prog_key {
 
    float min_sample_shading;
 
-   uint8_t color_outputs_valid;
-
    /* Some collection of BRW_WM_IZ_* */
    unsigned nr_color_regions:5;
    bool alpha_test_replicate_alpha:1;
@@ -433,9 +431,8 @@ struct brw_wm_prog_key {
 
    bool ignore_sample_mask_out:1;
    bool coarse_pixel:1;
-   bool null_push_constant_tbimr_workaround:1;
    bool api_sample_shading:1;
-   unsigned pad:3;
+   unsigned pad:12;
 };
 
 static inline bool
@@ -543,7 +540,6 @@ enum brw_param_builtin {
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_X,
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_Y,
    BRW_PARAM_BUILTIN_BASE_WORK_GROUP_ID_Z,
-   BRW_PARAM_BUILTIN_SUBGROUP_ID,
    BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_X,
    BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_Y,
    BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_Z,
@@ -564,14 +560,15 @@ enum brw_param_builtin {
    (((param) - BRW_PARAM_BUILTIN_CLIP_PLANE_0_X) & 0x3)
 
 struct brw_stage_prog_data {
-   /* Ranges of memory of nir_intrinsic_load_ubo instructions that were promoted
-    * to push constants to improve performance.
-    */
-   struct brw_ubo_range ubo_ranges[4];
-
-   unsigned nr_params;       /**< number of float params/constants */
-
    mesa_shader_stage stage;
+
+   /**
+    * Amount of push data delivered to the shader (in bytes)
+    *
+    * The HW can push up to 4 ranges from 4 different virtual addresses.
+    * Values should be aligned to 32B.
+    */
+   uint16_t push_sizes[4];
 
    /* If robust_ubo_ranges not 0, push_reg_mask_param specifies the param
     * index (in 32-bit units) where the 4 UBO range limits will be pushed
@@ -585,7 +582,6 @@ struct brw_stage_prog_data {
    uint8_t robust_ubo_ranges;
    unsigned push_reg_mask_param;
 
-   unsigned curb_read_length;
    unsigned total_scratch;
    unsigned total_shared;
 
@@ -615,14 +611,6 @@ struct brw_stage_prog_data {
    bool use_alt_mode; /**< Use ALT floating point mode?  Otherwise, IEEE. */
 
    uint32_t source_hash;
-
-   /* 32-bit identifiers for all push/pull parameters.  These can be anything
-    * the driver wishes them to be; the core of the back-end compiler simply
-    * re-arranges them.  The one restriction is that the bottom 2^16 values
-    * are reserved for builtins defined in the brw_param_builtin enum defined
-    * above.
-    */
-   uint32_t *param;
 
    /* Whether shader uses atomic operations. */
    bool uses_atomic_load_store;
@@ -762,13 +750,13 @@ struct brw_wm_prog_data {
 
    /**
     * Push constant location of intel_msaa_flags (dynamic configuration of the
-    * pixel shader).
+    * pixel shader) in bytes.
     */
    unsigned msaa_flags_param;
 
    /**
     * Push constant location of the remapping offset in the instruction heap
-    * for Wa_18019110168.
+    * for Wa_18019110168 in bytes.
     */
    unsigned per_primitive_remap_param;
 
@@ -1179,7 +1167,7 @@ struct brw_tcs_prog_data
 
    /**
     * Push constant location of intel_tess_config (dynamic configuration of
-    * the tessellation shaders).
+    * the tessellation shaders) in bytes.
     */
    unsigned tess_config_param;
 };
@@ -1194,7 +1182,7 @@ struct brw_tes_prog_data
 
    /**
     * Push constant location of intel_tess_config (dynamic configuration of
-    * the tessellation shaders).
+    * the tessellation shaders) in bytes.
     */
    unsigned tess_config_param;
 };
@@ -1671,6 +1659,11 @@ void brw_debug_key_recompile(const struct brw_compiler *c, void *log,
 unsigned
 brw_cs_push_const_total_size(const struct brw_cs_prog_data *cs_prog_data,
                              unsigned threads);
+
+void
+brw_cs_fill_push_const_info(const struct intel_device_info *devinfo,
+                            struct brw_cs_prog_data *cs_prog_data,
+                            int subgroup_id_index);
 
 void
 brw_write_shader_relocs(const struct brw_isa_info *isa,

@@ -29,10 +29,11 @@
 #include <vulkan/vulkan.h>
 
 #include "pvr_macros.h"
-#include "pvr_physical_device.h"
 
 #include "util/format/u_formats.h"
 #include "vk_format.h"
+
+struct pvr_device_info;
 
 /* This is based on VkClearColorValue which is an array of RGBA, and on the
  * output register usage for the biggest 32 bit 4 component formats which use up
@@ -226,6 +227,11 @@ struct pvr_format {
    uint32_t bind;
 };
 
+struct pvr_format_table {
+   const struct pvr_format *formats;
+   unsigned count;
+};
+
 struct util_format_description;
 
 const uint8_t *
@@ -305,26 +311,26 @@ pvr_vk_format_get_common_color_channel_count(VkFormat src_format,
 
 #ifdef PVR_PER_ARCH
 
-const struct pvr_format *PVR_PER_ARCH(get_format_table)(unsigned *num_formats);
-#   define pvr_get_format_table PVR_PER_ARCH(get_format_table)
+struct pvr_format_table PVR_PER_ARCH(get_format_table)(void);
+#   define pvr_arch_get_format_table PVR_PER_ARCH(get_format_table)
 
 uint32_t PVR_PER_ARCH(get_tex_format)(VkFormat vk_format);
-#   define pvr_get_tex_format PVR_PER_ARCH(get_tex_format)
+#   define pvr_arch_get_tex_format PVR_PER_ARCH(get_tex_format)
 
 uint32_t PVR_PER_ARCH(get_tex_format_aspect)(VkFormat vk_format,
                                              VkImageAspectFlags aspect_mask);
-#   define pvr_get_tex_format_aspect PVR_PER_ARCH(get_tex_format_aspect)
+#   define pvr_arch_get_tex_format_aspect PVR_PER_ARCH(get_tex_format_aspect)
 
 uint32_t PVR_PER_ARCH(get_pbe_packmode)(VkFormat vk_format);
-#   define pvr_get_pbe_packmode PVR_PER_ARCH(get_pbe_packmode)
+#   define pvr_arch_get_pbe_packmode PVR_PER_ARCH(get_pbe_packmode)
 
 uint32_t PVR_PER_ARCH(get_pbe_accum_format)(VkFormat vk_format);
-#   define pvr_get_pbe_accum_format PVR_PER_ARCH(get_pbe_accum_format)
+#   define pvr_arch_get_pbe_accum_format PVR_PER_ARCH(get_pbe_accum_format)
 
 bool PVR_PER_ARCH(format_is_pbe_downscalable)(
    const struct pvr_device_info *dev_info,
    VkFormat vk_format);
-#   define pvr_format_is_pbe_downscalable \
+#   define pvr_arch_format_is_pbe_downscalable \
       PVR_PER_ARCH(format_is_pbe_downscalable)
 
 #endif /* PVR_PER_ARCH */

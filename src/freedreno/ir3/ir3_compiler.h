@@ -238,6 +238,8 @@ struct ir3_compiler {
    bool predtf_nop_quirk;
    bool prede_nop_quirk;
 
+   bool has_salu_int_narrowing_quirk;
+
    /* MAX_COMPUTE_VARIABLE_GROUP_INVOCATIONS_ARB */
    uint32_t max_variable_workgroup_size;
 
@@ -311,6 +313,8 @@ struct ir3_compiler {
    bool has_alias_rt;
 
    bool reading_shading_rate_requires_smask_quirk;
+
+   bool shading_rate_matches_vk;
 
    bool cat3_rel_offset_0_quirk;
 

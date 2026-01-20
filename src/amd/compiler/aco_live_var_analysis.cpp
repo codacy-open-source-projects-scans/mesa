@@ -169,6 +169,27 @@ compute_live_out(live_ctx& ctx, Block* block)
    return live;
 }
 
+template <typename T>
+RegisterDemand
+get_demand_for_reg(live_ctx& ctx, T op_or_def)
+{
+   if (!op_or_def.isPrecolored())
+      return RegisterDemand();
+
+   PhysReg reg = op_or_def.physReg();
+   RegType type = op_or_def.regClass().type();
+
+   if (type == RegType::sgpr && reg >= ctx.program->dev.sgpr_limit)
+      return RegisterDemand();
+
+   PhysReg max_reg = reg.advance(op_or_def.regClass().bytes());
+
+   if (type == RegType::sgpr)
+      return RegisterDemand(0, max_reg);
+   else
+      return RegisterDemand(max_reg - 256, 0);
+}
+
 void
 process_live_temps_per_block(live_ctx& ctx, Block* block)
 {
@@ -191,6 +212,18 @@ process_live_temps_per_block(live_ctx& ctx, Block* block)
       Instruction* insn = block->instructions[idx].get();
       if (is_phi(insn))
          break;
+
+      /* Precolored operands may be fixed to a register higher than the current demand.
+       * Record the demand of precolored registers here.
+       */
+      if (insn->hasPrecoloredGPRs()) {
+         RegisterDemand precolored_demand = RegisterDemand();
+         for (Operand op : insn->operands)
+            precolored_demand.update(get_demand_for_reg(ctx, op));
+         for (Definition def : insn->definitions)
+            precolored_demand.update(get_demand_for_reg(ctx, def));
+         ctx.program->fixed_reg_demand.update(precolored_demand);
+      }
 
       ctx.program->needs_vcc |= instr_needs_vcc(insn);
       RegisterDemand demand_after_instr = RegisterDemand(new_demand.vgpr, new_demand.sgpr);
@@ -647,7 +680,7 @@ max_suitable_waves(Program* program, uint16_t waves)
 }
 
 void
-update_vgpr_sgpr_demand(Program* program, const RegisterDemand new_demand)
+update_vgpr_sgpr_demand(Program* program, RegisterDemand new_demand)
 {
    assert(program->min_waves >= 1);
    RegisterDemand limit = get_addr_regs_from_waves(program, program->min_waves);
@@ -657,6 +690,9 @@ update_vgpr_sgpr_demand(Program* program, const RegisterDemand new_demand)
       program->num_waves = 0;
       program->max_reg_demand = new_demand;
    } else {
+      RegisterDemand temp_demand = new_demand;
+      new_demand.update(program->fixed_reg_demand);
+
       program->num_waves = program->dev.physical_sgprs / get_sgpr_alloc(program, new_demand.sgpr);
       uint16_t vgpr_demand =
          get_vgpr_alloc(program, new_demand.vgpr) + program->config->num_shared_vgprs / 2;
@@ -664,8 +700,21 @@ update_vgpr_sgpr_demand(Program* program, const RegisterDemand new_demand)
          std::min<uint16_t>(program->num_waves, program->dev.physical_vgprs / vgpr_demand);
       program->num_waves = std::min(program->num_waves, program->dev.max_waves_per_simd);
 
-      /* Adjust for LDS and workgroup multiples and calculate max_reg_demand */
+      /* Adjust for LDS, workgroup multiples and callee ABI, and calculate max_reg_demand */
       program->num_waves = max_suitable_waves(program, program->num_waves);
+      if (program->is_callee) {
+         /* Decrease waves to reduce the chances of needing preserved VGPRs. */
+         std::pair<int, unsigned> best(INT_MIN, program->num_waves);
+         for (; program->num_waves > program->min_waves; program->num_waves--) {
+            program->max_reg_demand = get_addr_regs_from_waves(program, program->num_waves);
+            RegisterDemand clobbered = program->callee_abi.numClobbered(program->max_reg_demand);
+            std::pair<int, unsigned> val(MIN2(clobbered.vgpr - temp_demand.vgpr, 0),
+                                         program->num_waves);
+            if (val > best)
+               best = val;
+         }
+         program->num_waves = best.second;
+      }
       program->max_reg_demand = get_addr_regs_from_waves(program, program->num_waves);
    }
 }
@@ -678,6 +727,7 @@ live_var_analysis(Program* program)
    program->live.live_in.resize(program->blocks.size(), IDSet(program->live.memory));
    program->max_reg_demand = RegisterDemand();
    program->max_call_spills = RegisterDemand();
+   program->fixed_reg_demand = RegisterDemand();
    program->needs_vcc = program->gfx_level >= GFX10;
 
    live_ctx ctx;

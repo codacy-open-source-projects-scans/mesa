@@ -1569,10 +1569,17 @@ radv_enc_ctx(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *inf
 
    uint32_t swizzle_mode = 0;
 
-   if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_4)
-      swizzle_mode = RENCODE_REC_SWIZZLE_MODE_256B_D;
-   else if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_2)
-      swizzle_mode = RENCODE_REC_SWIZZLE_MODE_256B_S;
+   if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_4) {
+      if (vid->vk.luma_bit_depth == VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR)
+         swizzle_mode = RENCODE_REC_SWIZZLE_MODE_8x8_1D_THIN_12_24BPP_VCN4;
+      else
+         swizzle_mode = RENCODE_REC_SWIZZLE_MODE_256B_D;
+   } else if (pdev->enc_hw_ver >= RADV_VIDEO_ENC_HW_2) {
+      if (vid->vk.luma_bit_depth == VK_VIDEO_COMPONENT_BIT_DEPTH_10_BIT_KHR)
+         swizzle_mode = RENCODE_REC_SWIZZLE_MODE_8x8_1D_THIN_12_24BPP;
+      else
+         swizzle_mode = RENCODE_REC_SWIZZLE_MODE_256B_S;
+   }
 
    RADEON_ENC_BEGIN(pdev->vcn_enc_cmds.ctx);
    RADEON_ENC_CS(va >> 32);
@@ -1682,16 +1689,10 @@ radv_enc_ctx2(struct radv_cmd_buffer *cmd_buffer, const VkVideoEncodeInfoKHR *in
    if (info->pSetupReferenceSlot) {
       max_ref_slot_idx = info->pSetupReferenceSlot->slotIndex;
       slots[info->pSetupReferenceSlot->slotIndex] = info->pSetupReferenceSlot->pPictureResource;
-   } else if (vid->vk.max_dpb_slots == 0) {
+   } else {
+      assert(vid->vk.max_dpb_slots == 0);
       intra_only_dpb = true;
       slots[0] = &info->srcPictureResource;
-   } else {
-      /* Workaround for CTS bug dEQP-VK.video.encode.h264.i_p_b_13_layered_src_general_layout:
-       *   VUID-vkCmdEncodeVideoKHR-pEncodeInfo-08377
-       *    pEncodeInfo->pSetupReferenceSlot must not be NULL unless the bound video session
-       *    was created with VkVideoSessionCreateInfoKHR::maxDpbSlots equal to zero
-       */
-      slots[0] = info->pReferenceSlots[0].pPictureResource;
    }
 
    for (unsigned i = 0; i < info->referenceSlotCount; i++) {

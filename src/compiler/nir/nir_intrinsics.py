@@ -1157,8 +1157,8 @@ barycentric("coord_at_offset", 3, [2])
 
 # Load sample position:
 #
-# Takes a sample # and returns a sample position.  Used for lowering
-# interpolateAtSample() to interpolateAtOffset()
+# Takes a sample # and returns a sample position (where the pixel center is
+# (0.5, 0.5)).  Used for lowering interpolateAtSample() to interpolateAtOffset()
 intrinsic("load_sample_pos_from_id", src_comp=[1], dest_comp=2,
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
@@ -1628,7 +1628,7 @@ intrinsic("prefetch_ubo_ir3", [1], flags=[CAN_REORDER])
 # src[] = { vertex_id, instance_id, offset }
 load("attribute_pan", [1, 1, 1], [BASE, COMPONENT, DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
-# Panfrost-specific intrinsic to load the shader_output special-FAU value on Avalon.
+# Panfrost-specific intrinsic to load the shader_output special-FAU value on 5th Gen.
 intrinsic("load_shader_output_pan", dest_comp=1, src_comp=[], bit_sizes=[32],
           indices=[], flags=[CAN_REORDER, CAN_ELIMINATE])
 
@@ -1671,18 +1671,26 @@ intrinsic("load_frag_coord_zw_pan", [2], dest_comp=1, indices=[COMPONENT], flags
 # src[] = { sampler_index }
 load("sampler_lod_parameters", [1], flags=[CAN_ELIMINATE, CAN_REORDER])
 
-# Like load_output but using a specified render target and conversion descriptor
-# src[] = { target, sample, conversion }
-# target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
-# and is ignored otherwise
-load("converted_output_pan", [1, 1, 1], indices=[ACCESS, DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+# Maps to LD_TILE
+#
+# rt must be in the [0..7] range when and io_semantics.location is not
+# GL_FRAG_RESULT_DEPTH or GL_FRAG_RESULT_STENCIL
+#
+# src[] = { rt_sample_pixel, coverage_offset, conversion }
+load("tile_pan", [1, 1, 1], indices=[ACCESS, DEST_TYPE, IO_SEMANTICS],
+     flags=[CAN_ELIMINATE])
 
-# Like converted_output_pan but for case where the output is never written by the shader
-# This is used to relax waits on tile-buffer accesses and the target is read-only
-# src[] = { target, sample, conversion }
-# target must be in the [0..7] range when io_semantics.location is FRAG_RESULT_DATA0
-# and is ignored otherwise
-load("readonly_output_pan", [1, 1, 1], indices=[ACCESS, DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+# Like load_tile_pan except it relies on resource tracking through
+# resource_read/write_mask for dependencies instead of ensuring absolute
+# pixel ordering like load_tile_pan does.
+#
+# src[] = { rt_sample_pixel, coverage_offset, conversion }
+load("tile_res_pan", [1, 1, 1], indices=[ACCESS, DEST_TYPE, IO_SEMANTICS],
+     flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# Maps to ST_TILE
+# src[] = { rt_sample_pixel, coverage_offset, conversion }
+store("tile_pan", [1, 1, 1], indices=[ACCESS, SRC_TYPE, IO_SEMANTICS])
 
 # Load converted memory given an address and a conversion descriptor
 # src[] = { address, conversion }
@@ -1692,9 +1700,11 @@ load("converted_mem_pan", [1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_
 # src[] = { value, address, conversion }
 store("converted_mem_pan", [1, 1], indices=[IO_SEMANTICS])
 
-# Load the address of a texel buffer index
+# Load the address and potentially the conversion descriptor for a texel buffer index.
+# The 64 bit address is always in the first two channels, while the 32 bit
+# conversion descriptor is in the last channel only for Bifrost.
 # src[] = { resource_handle, index }
-intrinsic("load_texel_buf_index_address_pan", [1, 1], dest_comp=1, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[64])
+intrinsic("load_texel_buf_index_address_pan", [1, 1], dest_comp=3, flags=[CAN_ELIMINATE, CAN_REORDER], bit_sizes=[32])
 
 # Load conversion descriptor for a texel buffer
 # src[] = { resource_handle }
@@ -1727,6 +1737,24 @@ system_value("multisampled_pan", 1, bit_sizes=[32])
 # interpolation in the linked fragment shader. Since special slots cannot be
 # noperspective, this is 32 bits and starts from VARYING_SLOT_VAR0.
 system_value("noperspective_varyings_pan", 1, bit_sizes=[32])
+
+# Cumulative coverage mask, the start of the atest/zt/blend chain
+system_value("cumulative_coverage_pan", 1, bit_sizes=[32])
+system_value("blend_descriptor_pan", 1, bit_sizes=[64], indices=[BASE])
+
+load("blend_input_pan", [], [IO_SEMANTICS, DEST_TYPE],
+     [CAN_ELIMINATE, CAN_REORDER])
+# src[] = { coverage, alpha }
+intrinsic("atest_pan", [1, 1], dest_comp=1, bit_sizes=[32])
+# src[] = { coverage, depth, stencil }
+intrinsic("zs_emit_pan", [1, 1, 1], dest_comp=1,
+          indices=[FLAGS], bit_sizes=[32])
+# src[] = { coverage, desc, color }
+intrinsic("blend_pan", [1, 1, 4], indices=[IO_SEMANTICS, SRC_TYPE])
+# src[] = { coverage, desc, color1, color2 }
+intrinsic("blend2_pan", [1, 1, 4, 4],
+          indices=[IO_SEMANTICS, SRC_TYPE, DEST_TYPE])
+barrier("blend_return_pan")
 
 # System values for SPV_ARM_core_builtins
 system_value("core_count_arm", 1, bit_sizes=[32])
@@ -1765,9 +1793,12 @@ intrinsic("optimization_barrier_sgpr_amd", dest_comp=0, src_comp=[0],
           flags=[CAN_ELIMINATE])
 
 # These are no-op intrinsics used as a simple source and user of SSA defs for testing.
-intrinsic("unit_test_amd", src_comp=[0], indices=[BASE])
-intrinsic("unit_test_uniform_amd", dest_comp=0, indices=[BASE])
-intrinsic("unit_test_divergent_amd", dest_comp=0, indices=[BASE])
+intrinsic("unit_test_output", src_comp=[0], indices=[BASE])
+intrinsic("unit_test_uniform_input", dest_comp=0, indices=[BASE])
+intrinsic("unit_test_divergent_input", dest_comp=0, indices=[BASE])
+
+# Intrinsic used for nir_opt_algebraic_pattern_test
+intrinsic("unit_test_assert_eq", src_comp=[0, 0], flags=[])
 
 # Untyped buffer load/store instructions of arbitrary length.
 # src[] = { descriptor, vector byte offset, scalar byte offset, index offset }
@@ -1995,6 +2026,10 @@ intrinsic("execute_miss_amd", src_comp=[1])
 # BASE=dword index
 intrinsic("load_hit_attrib_amd", dest_comp=1, bit_sizes=[32], indices=[BASE])
 intrinsic("store_hit_attrib_amd", src_comp=[1], indices=[BASE])
+intrinsic("load_incoming_ray_payload_amd", dest_comp=1, bit_sizes=[32], indices=[BASE])
+intrinsic("store_incoming_ray_payload_amd", src_comp=[1], indices=[BASE])
+intrinsic("load_outgoing_ray_payload_amd", dest_comp=1, bit_sizes=[32], indices=[BASE])
+intrinsic("store_outgoing_ray_payload_amd", src_comp=[1], indices=[BASE])
 
 # Load forced VRS rates.
 intrinsic("load_force_vrs_rates_amd", dest_comp=1, bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
@@ -2127,6 +2162,13 @@ intrinsic("sleep_amd", indices=[BASE])
 
 # s_nop BASE (sleep for BASE+1 cycles, BASE must be in [0, 15]).
 intrinsic("nop_amd", indices=[BASE])
+
+intrinsic("store_param_amd", src_comp=[-1], indices=[PARAM_IDX])
+intrinsic("load_return_param_amd", dest_comp=0, indices=[CALL_IDX, PARAM_IDX])
+
+system_value("call_return_address_amd", 1, bit_sizes=[64])
+# src[0] is the divergent call target for each lane, src[1] is the (uniform) address to jump to next
+intrinsic("set_next_call_pc_amd", src_comp=[1, 1], bit_sizes=[64])
 
 # Return the FMASK descriptor of color buffer 0.
 system_value("fbfetch_image_fmask_desc_amd", 8)
@@ -2561,9 +2603,15 @@ system_value("urb_output_handle_intel", 1)
 load("urb_input_handle_indexed_intel", [1], [], [CAN_ELIMINATE, CAN_REORDER])
 
 # Inline register delivery (available on Gfx12.5+ for CS/Mesh/Task stages)
-intrinsic("load_inline_data_intel", [], dest_comp=0,
-          indices=[BASE],
-          flags=[CAN_ELIMINATE, CAN_REORDER])
+load("inline_data_intel", [], [BASE], [CAN_ELIMINATE, CAN_REORDER])
+
+# Load push data on Intel VS,TCS,TES,GS,FS stages
+# src[] = { offset }
+#
+# We use the ACCESS index mostly for ACCESS_NON_UNIFORM, this allows us to
+# preserve the semantic of load_push_constant which is always uniform
+# regardless of the offset source.
+load("push_data_intel", [1], [BASE, RANGE, ACCESS], [CAN_ELIMINATE, CAN_REORDER])
 
 # Dynamic tesselation parameters (see intel_tess_config).
 system_value("tess_config_intel", 1)
@@ -2611,6 +2659,8 @@ system_value("leaf_procedural_intel", 1, bit_sizes=[1])
 #  2: Miss
 #  3: Intersection
 system_value("btd_shader_type_intel", 1)
+# 64bit pointer to a couple of RT_DISPATCH_GLOBALS structure each aligned to
+# 64B, the pointer needs 256B aligned.
 system_value("ray_query_global_intel", 1, bit_sizes=[64])
 
 # Source 0: Accumulator matrix (type specified by DEST_TYPE)

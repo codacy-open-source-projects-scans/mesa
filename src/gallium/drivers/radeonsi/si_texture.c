@@ -2356,67 +2356,6 @@ void vi_disable_dcc_if_incompatible_format(struct si_context *sctx, struct pipe_
          si_decompress_dcc(sctx, stex);
 }
 
-static struct pipe_surface *si_create_surface(struct pipe_context *pipe, struct pipe_resource *tex,
-                                              const struct pipe_surface *templ)
-{
-   unsigned level = templ->level;
-   unsigned width = u_minify(tex->width0, level);
-   unsigned height = u_minify(tex->height0, level);
-   unsigned width0 = tex->width0;
-   unsigned height0 = tex->height0;
-
-   if (tex->target != PIPE_BUFFER && templ->format != tex->format) {
-      const struct util_format_description *tex_desc = util_format_description(tex->format);
-      const struct util_format_description *templ_desc = util_format_description(templ->format);
-
-      assert(tex_desc->block.bits == templ_desc->block.bits);
-
-      /* Adjust size of surface if and only if the block width or
-       * height is changed. */
-      if (tex_desc->block.width != templ_desc->block.width ||
-          tex_desc->block.height != templ_desc->block.height) {
-         unsigned nblks_x = util_format_get_nblocksx(tex->format, width);
-         unsigned nblks_y = util_format_get_nblocksy(tex->format, height);
-
-         width = nblks_x * templ_desc->block.width;
-         height = nblks_y * templ_desc->block.height;
-
-         width0 = util_format_get_nblocksx(tex->format, width0);
-         height0 = util_format_get_nblocksy(tex->format, height0);
-      }
-   }
-
-   struct si_surface *surface = CALLOC_STRUCT(si_surface);
-
-   if (!surface)
-      return NULL;
-
-   assert(templ->first_layer <= util_max_layer(tex, templ->level));
-   assert(templ->last_layer <= util_max_layer(tex, templ->level));
-
-   pipe_reference_init(&surface->base.reference, 1);
-   pipe_resource_reference(&surface->base.texture, tex);
-   surface->base.context = pipe;
-   surface->base.format = templ->format;
-   surface->base.level = templ->level;
-   surface->base.first_layer = templ->first_layer;
-   surface->base.last_layer = templ->last_layer;
-
-   surface->width0 = width0;
-   surface->height0 = height0;
-
-   surface->dcc_incompatible =
-      tex->target != PIPE_BUFFER &&
-      vi_dcc_formats_are_incompatible(tex, templ->level, templ->format);
-   return &surface->base;
-}
-
-static void si_surface_destroy(struct pipe_context *pipe, struct pipe_surface *surface)
-{
-   pipe_resource_reference(&surface->texture, NULL);
-   FREE(surface);
-}
-
 static struct pipe_memory_object *
 si_memobj_from_handle(struct pipe_screen *screen, struct winsys_handle *whandle, bool dedicated)
 {
@@ -2597,6 +2536,4 @@ void si_init_context_texture_functions(struct si_context *sctx)
 {
    sctx->b.texture_map = si_texture_transfer_map;
    sctx->b.texture_unmap = si_texture_transfer_unmap;
-   sctx->b.create_surface = si_create_surface;
-   sctx->b.surface_destroy = si_surface_destroy;
 }

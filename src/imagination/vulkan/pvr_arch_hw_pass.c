@@ -2454,9 +2454,8 @@ pvr_count_uses_in_color_output_list(struct pvr_render_subpass *subpass,
    *resolve_output_count_out = resolve_count;
 }
 
-void PVR_PER_ARCH(destroy_renderpass_hwsetup)(
-   const VkAllocationCallbacks *alloc,
-   struct pvr_renderpass_hwsetup *hw_setup)
+void pvr_arch_destroy_renderpass_hwsetup(const VkAllocationCallbacks *alloc,
+                                         struct pvr_renderpass_hwsetup *hw_setup)
 {
    for (uint32_t i = 0U; i < hw_setup->render_count; i++) {
       struct pvr_renderpass_hwsetup_render *hw_render = &hw_setup->renders[i];
@@ -2482,7 +2481,7 @@ void PVR_PER_ARCH(destroy_renderpass_hwsetup)(
    vk_free(alloc, hw_setup);
 }
 
-VkResult PVR_PER_ARCH(create_renderpass_hwsetup)(
+VkResult pvr_arch_create_renderpass_hwsetup(
    struct pvr_device *device,
    const VkAllocationCallbacks *alloc,
    struct pvr_render_pass *pass,
@@ -2552,7 +2551,7 @@ VkResult PVR_PER_ARCH(create_renderpass_hwsetup)(
       const uint32_t part_bits = 0;
 
       if (vk_format_is_color(format) &&
-          pvr_get_pbe_accum_format(attachment->vk_format) ==
+          pvr_arch_get_pbe_accum_format(attachment->vk_format) ==
              PVR_PBE_ACCUM_FORMAT_INVALID) {
          /* The VkFormat is not supported as a color attachment so `0`.
           * Vulkan doesn't seems to restrict vkCreateRenderPass() to supported
@@ -2720,7 +2719,7 @@ end_create_renderpass_hwsetup:
       pvr_free_render(ctx);
 
       if (hw_setup) {
-         PVR_PER_ARCH(destroy_renderpass_hwsetup)(alloc, hw_setup);
+         pvr_arch_destroy_renderpass_hwsetup(alloc, hw_setup);
          hw_setup = NULL;
       }
    }

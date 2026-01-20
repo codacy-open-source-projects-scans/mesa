@@ -993,7 +993,7 @@ static unsigned si_get_ia_multi_vgt_param(struct si_context *sctx,
          /* The cache flushes should have been emitted already. */
          assert(sctx->barrier_flags == 0);
          sctx->barrier_flags = SI_BARRIER_EVENT_VGT_FLUSH;
-         si_emit_barrier_direct(sctx);
+         si_emit_barrier_direct(sctx, 0);
       }
    }
 
@@ -2264,8 +2264,7 @@ static void si_draw(struct pipe_context *ctx,
          index_size = 2;
 
          /* GFX6-7 don't read index buffers through L2. */
-         sctx->barrier_flags |= SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+         si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
          si_resource(indexbuf)->L2_cache_dirty = false;
       } else if (!IS_DRAW_VERTEX_STATE && info->has_user_indices) {
          struct pipe_resource *release_buf = NULL;
@@ -2293,8 +2292,7 @@ static void si_draw(struct pipe_context *ctx,
                  si_resource(indexbuf)->L2_cache_dirty) {
          /* GFX8-GFX11.5 reads index buffers through L2, so it doesn't
           * need this. */
-         sctx->barrier_flags |= SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME;
-         si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+         si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
          si_resource(indexbuf)->L2_cache_dirty = false;
       }
    }
@@ -2308,15 +2306,13 @@ static void si_draw(struct pipe_context *ctx,
       /* Indirect buffers use L2 on GFX9-GFX11.5, but not other hw. */
       if (GFX_VERSION <= GFX8 || GFX_VERSION == GFX12) {
          if (indirect->buffer && si_resource(indirect->buffer)->L2_cache_dirty) {
-            sctx->barrier_flags |= SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME;
-            si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+            si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
             si_resource(indirect->buffer)->L2_cache_dirty = false;
          }
 
          if (indirect->indirect_draw_count &&
              si_resource(indirect->indirect_draw_count)->L2_cache_dirty) {
-            sctx->barrier_flags |= SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME;
-            si_mark_atom_dirty(sctx, &sctx->atoms.s.barrier);
+            si_set_barrier_flags(sctx, SI_BARRIER_WB_L2 | SI_BARRIER_PFP_SYNC_ME);
             si_resource(indirect->indirect_draw_count)->L2_cache_dirty = false;
          }
       }

@@ -227,6 +227,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_ray_query = has_raytracing,
       .KHR_ray_tracing_maintenance1 = has_raytracing,
       .KHR_relaxed_block_layout = true,
+      .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
       .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
@@ -752,7 +753,7 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_KHR_ray_tracing_maintenance1 */
    features->rayTracingMaintenance1 = true;
 
-   /* VK_EXT_robustness2 */
+   /* VK_KHR_robustness2 */
    features->robustBufferAccess2 = true;
    features->robustImageAccess2 = true;
    features->nullDescriptor = true;
@@ -910,12 +911,17 @@ tu_get_physical_device_properties_1_2(struct tu_physical_device *pdevice,
    p->roundingModeIndependence =
       VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL;
 
-   p->shaderDenormFlushToZeroFloat16         = true;
-   p->shaderDenormPreserveFloat16            = false;
+   if (pdevice->info->chip >= A8XX) {
+      p->shaderDenormFlushToZeroFloat16      = false;
+      p->shaderDenormPreserveFloat16         = true;
+   } else {
+      p->shaderDenormFlushToZeroFloat16      = true;
+      p->shaderDenormPreserveFloat16         = false;
+   }
+
    p->shaderRoundingModeRTEFloat16           = true;
    p->shaderRoundingModeRTZFloat16           = false;
    p->shaderSignedZeroInfNanPreserveFloat16  = true;
-
    p->shaderDenormFlushToZeroFloat32         = true;
 
    /* FP32 denorm preserve has to be emulated via soft-float. Normal
@@ -1280,7 +1286,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
    /* VK_KHR_performance_query */
    props->allowCommandBufferQueryCopies = false;
 
-   /* VK_EXT_robustness2 */
+   /* VK_KHR_robustness2 */
    /* see write_buffer_descriptor() */
    props->robustStorageBufferAccessSizeAlignment = 4;
    /* see write_ubo_descriptor() */
@@ -1578,7 +1584,8 @@ tu_physical_device_init(struct tu_physical_device *device,
 
    switch (fd_dev_gen(&device->dev_id)) {
    case 6:
-   case 7: {
+   case 7:
+   case 8: {
       device->dev_info = info;
       device->info = &device->dev_info;
 
@@ -2045,6 +2052,7 @@ tu_GetPhysicalDeviceFragmentShadingRatesKHR(
    uint32_t *pFragmentShadingRateCount,
    VkPhysicalDeviceFragmentShadingRateKHR *pFragmentShadingRates)
 {
+   VK_FROM_HANDLE(tu_physical_device, physical_device, physicalDevice);
    VK_OUTARRAY_MAKE_TYPED(VkPhysicalDeviceFragmentShadingRateKHR, out,
                           pFragmentShadingRates, pFragmentShadingRateCount);
 
@@ -2062,6 +2070,9 @@ tu_GetPhysicalDeviceFragmentShadingRatesKHR(
 
    append_rate(4, 4, VK_SAMPLE_COUNT_1_BIT);
    append_rate(4, 2, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT);
+   /* Apparently hw didn't actually have this rate in a7xx: */
+   if (physical_device->info->chip >= A8XX)
+      append_rate(2, 4, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT);
    append_rate(2, 2, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT);
    append_rate(2, 1, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT);
    append_rate(1, 2, VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT);
@@ -2685,6 +2696,13 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    case 7:
       vk_device_dispatch_table_from_entrypoints(
          &dispatch_table, &tu_device_entrypoints_a7xx, false);
+      break;
+   case 8:
+      /* gen8 TODO: */
+      tu_env.debug |= TU_DEBUG_NOLRZ;     /* WRITE iova faults from UCHE */
+      tu_env.debug |= TU_DEBUG_FLUSHALL;  /* dEQP-VK.draw.\*from_compute\* */
+      vk_device_dispatch_table_from_entrypoints(
+         &dispatch_table, &tu_device_entrypoints_a8xx, false);
    }
 
    vk_device_dispatch_table_from_entrypoints(
@@ -2953,8 +2971,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
             goto fail_prepare_perfcntrs_pass_cs;
          }
 
-         /* TODO: a8xx */
-         tu_cs_emit_regs(&sub_cs, CP_SCRATCH_REG(A6XX, PERF_CNTRS_REG, 1 << i));
+         tu_cs_emit_regs(&sub_cs, TU_CALLX(device, tu_scratch_reg)(PERF_CNTRS_REG, 1 << i));
          tu_cs_emit_pkt7(&sub_cs, CP_WAIT_FOR_ME, 0);
 
          device->perfcntrs_pass_cs_entries[i] =

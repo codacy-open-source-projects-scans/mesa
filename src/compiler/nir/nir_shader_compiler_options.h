@@ -216,6 +216,12 @@ typedef enum {
     */
    nir_io_use_frag_result_dual_src_blend = BITFIELD_BIT(12),
 
+   /**
+    * Whether the implementation can compact 16-bit values in the higher
+    * 32-bits of a varying.
+    */
+   nir_io_compact_to_higher_16 = BITFIELD_BIT(13),
+
    /* Options affecting the GLSL compiler or Gallium are below. */
 
    /**
@@ -642,6 +648,11 @@ typedef struct nir_shader_compiler_options {
     * FLOAT_CONTROLS_DENORM_PRESERVE_FP32 is not set
     */
    bool has_fmulz_no_denorms;
+
+   /** Backend supports fcanonicalize, if not set fcanonicalize will be lowered
+    * to fmul(a, 1.0)
+    */
+   bool has_fcanonicalize;
 
    /** Backend supports 32bit ufind_msb_rev and ifind_msb_rev. */
    bool has_find_msb_rev;
