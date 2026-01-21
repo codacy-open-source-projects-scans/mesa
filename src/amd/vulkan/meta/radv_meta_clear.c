@@ -29,10 +29,9 @@ radv_is_clear_rect_full(const struct radv_image_view *iview, const VkClearRect *
    if (view_mask && (image->vk.array_layers >= 32 || (1u << image->vk.array_layers) - 1u != view_mask))
       return false;
 
-   if (!view_mask && clear_rect->baseArrayLayer != 0)
-      return false;
-
-   if (!view_mask && clear_rect->layerCount != image->vk.array_layers)
+   /* All slices must be fast-cleared when comp-to-single isn't supported. */
+   const bool all_slices = clear_rect->baseArrayLayer == 0 && clear_rect->layerCount == image->vk.array_layers;
+   if (!view_mask && !all_slices && !image->support_comp_to_single)
       return false;
 
    return true;
@@ -1475,15 +1474,22 @@ radv_can_fast_clear_color(struct radv_cmd_buffer *cmd_buffer, const struct radv_
 
 static void
 radv_fast_clear_color(struct radv_cmd_buffer *cmd_buffer, const struct radv_image_view *iview,
-                      const VkClearAttachment *clear_att, enum radv_cmd_flush_bits *pre_flush,
-                      enum radv_cmd_flush_bits *post_flush)
+                      const VkClearAttachment *clear_att, const VkClearRect *clear_rect,
+                      enum radv_cmd_flush_bits *pre_flush, enum radv_cmd_flush_bits *post_flush)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    VkClearColorValue clear_value = clear_att->clearValue.color;
    uint32_t clear_color[4], flush_bits = 0;
    uint32_t cmask_clear_value;
-   VkImageSubresourceRange range = vk_image_view_subresource_range(&iview->vk);
+
+   VkImageSubresourceRange range = {
+      .aspectMask = iview->vk.aspects,
+      .baseMipLevel = iview->vk.base_mip_level,
+      .levelCount = iview->vk.level_count,
+      .baseArrayLayer = iview->vk.base_array_layer + clear_rect->baseArrayLayer,
+      .layerCount = clear_rect->layerCount,
+   };
 
    if (pre_flush) {
       enum radv_cmd_flush_bits bits =
@@ -1569,7 +1575,7 @@ emit_clear(struct radv_cmd_buffer *cmd_buffer, const VkClearAttachment *clear_at
 
       if (radv_can_fast_clear_color(cmd_buffer, color_att->iview, color_att->layout, clear_rect, clear_value,
                                     view_mask)) {
-         radv_fast_clear_color(cmd_buffer, color_att->iview, clear_att, pre_flush, post_flush);
+         radv_fast_clear_color(cmd_buffer, color_att->iview, clear_att, clear_rect, pre_flush, post_flush);
       } else {
          emit_color_clear(cmd_buffer, clear_att, clear_rect, view_mask);
       }
@@ -1859,7 +1865,7 @@ radv_fast_clear_range(struct radv_cmd_buffer *cmd_buffer, struct radv_image *ima
                   u_minify(image->vk.extent.height, range->baseMipLevel),
                },
          },
-      .baseArrayLayer = range->baseArrayLayer,
+      .baseArrayLayer = 0,
       .layerCount = vk_image_subresource_layer_count(&image->vk, range),
    };
 
@@ -1871,7 +1877,7 @@ radv_fast_clear_range(struct radv_cmd_buffer *cmd_buffer, struct radv_image *ima
 
    if (vk_format_is_color(format)) {
       if (radv_can_fast_clear_color(cmd_buffer, &iview, image_layout, &clear_rect, clear_att.clearValue.color, 0)) {
-         radv_fast_clear_color(cmd_buffer, &iview, &clear_att, NULL, NULL);
+         radv_fast_clear_color(cmd_buffer, &iview, &clear_att, &clear_rect, NULL, NULL);
          fast_cleared = true;
       }
    } else {

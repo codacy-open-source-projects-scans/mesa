@@ -413,7 +413,7 @@ endif
 
 _codecs = get_option('video-codecs')
 patent_codecs = ['vc1dec', 'h264dec', 'h264enc', 'h265dec', 'h265enc']
-free_codecs = ['av1dec', 'av1enc', 'vp9dec']
+free_codecs = ['av1dec', 'av1enc', 'vp9dec', 'mpeg12dec', 'jpegdec']
 all_codecs = patent_codecs + free_codecs
 
 if _codecs.contains('all')
@@ -450,6 +450,27 @@ with_platform_wayland = _platforms.contains('wayland')
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')
+
+with_gfxstream_emulated_android = with_gfxstream_vk and with_platform_android and host_machine.system() == 'linux'
+if with_gfxstream_emulated_android
+  # When building the android_stub with a non-Bionic sysroot/target, we to have
+  # define macros that are typically in <sys/cdefs.h> when using a Bionic
+  # sysroot
+  pre_args += '-D__INTRODUCED_IN(api_level)='
+
+  # We don't want to build Vulkan common code when running the emulated
+  # gfxstream Android platform.  This causes issues when building in
+  # tandem with host Lavapipe.
+  #
+  # TODO(gfxstream-devs@): Modifying the user-provided platform can be removed
+  # when Cuttlefish moves it's host library builds off Soong, and on to Github.
+  # For now, add basic sanity checks before modifying user arguments.
+  if _platforms.contains('android') and _platforms.length() != 1
+    error('You cannot enable platform "android" at the same time as another platform')
+  endif
+  _platforms = []
+  with_platform_android = false
+endif
 
 with_glx = get_option('glx')
 if with_glx == 'auto'
@@ -925,8 +946,9 @@ endif
 pre_args += '-DGLAPI_EXPORT_PROTO_ENTRY_POINTS=@0@'.format(with_glapi_export_proto_entry_points.to_int())
 
 with_android_stub = get_option('android-stub')
-if with_android_stub and not with_platform_android
-  error('`-D android-stub=true` makes no sense without `-D platforms=android`')
+need_android_stub = with_platform_android or with_gfxstream_emulated_android
+if with_android_stub and not need_android_stub
+  error('`-D android-stub=true` makes no sense without `-D platforms=android` or emulated Android')
 endif
 
 with_libbacktrace = get_option('android-libbacktrace') \
@@ -956,6 +978,10 @@ if with_platform_android
     endif
     if get_option('platform-sdk-version') >= 35
       dep_android_ui = dependency('ui', required : false)
+    endif
+    dep_hwvulkan_headers = dependency('android-hwvulkan-headers', required : false)
+    if dep_hwvulkan_headers.found() and with_any_vk
+      dep_android += dep_hwvulkan_headers
     endif
   endif
   pre_args += '-DANDROID_API_LEVEL=' + get_option('platform-sdk-version').to_string()
@@ -1437,7 +1463,8 @@ if not ['linux'].contains(host_machine.system())
 endif
 
 foreach h : ['xlocale.h', 'linux/futex.h', 'endian.h', 'dlfcn.h', 'sys/shm.h',
-             'cet.h', 'pthread_np.h', 'sys/inotify.h', 'linux/udmabuf.h']
+             'cet.h', 'pthread_np.h', 'poll.h', 'sys/inotify.h',
+             'linux/udmabuf.h']
   if cc.check_header(h)
     pre_args += '-DHAVE_@0@'.format(h.to_upper().underscorify())
   endif
@@ -2315,7 +2342,9 @@ elif host_machine.system() == 'windows' and cc.get_argument_syntax() != 'msvc'
 else
   prog_nm = find_program('nm')
   with_symbols_check = prog_nm.found() and with_tests
-  symbols_check_args = ['--nm', prog_nm.full_path()]
+  if with_symbols_check
+    symbols_check_args = ['--nm', prog_nm.full_path()]
+  endif
 endif
 
 # This quirk needs to be applied to sources with functions defined in assembly

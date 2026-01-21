@@ -91,6 +91,8 @@ SUPPORTED_FEATURES = [
     "VK_EXT_depth_clip_enable",
     "VK_EXT_robustness2",
     "VK_KHR_multiview",
+    "VK_EXT_blend_operation_advanced",
+    "VK_EXT_frame_boundary",
     # see aosp/2736079 + b/268351352
     "VK_EXT_swapchain_maintenance1",
     "VK_KHR_maintenance5",
@@ -531,6 +533,10 @@ using DlSymFunc = void* (void*, const char*);
 #include "goldfish_vk_private_defs.h"
 """
 
+        countingIncludeGuest = """
+#include <cstdlib>
+"""
+
         dispatchImplIncludes = """
 #include <stdio.h>
 #include <stdlib.h>
@@ -640,7 +646,7 @@ class BumpPool;
                                        extraImpl=commonCerealImplIncludesGuest + deepcopyInclude)
             self.addGuestEncoderModule("goldfish_vk_counting_guest",
                                        extraHeader=countingIncludes,
-                                       extraImpl=commonCerealImplIncludesGuest)
+                                       extraImpl=commonCerealImplIncludesGuest + countingIncludeGuest)
             self.addGuestEncoderModule("goldfish_vk_transform_guest",
                                        extraHeader=commonCerealIncludesGuest + transformIncludeGuest,
                                        extraImpl=commonCerealImplIncludesGuest + transformImplIncludeGuest)

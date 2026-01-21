@@ -159,14 +159,14 @@ wsi_device_init(struct wsi_device *wsi,
       &vk_physical_device_from_handle(pdevice)->supported_extensions;
    wsi->has_import_memory_host =
       supported_extensions->EXT_external_memory_host;
-   wsi->khr_present_wait =
-      supported_extensions->KHR_present_id &&
-      supported_extensions->KHR_present_wait;
+   wsi->has_present_wait = supported_extensions->KHR_present_wait ||
+                           supported_extensions->KHR_present_wait2;
+
    wsi->has_timeline_semaphore =
       supported_extensions->KHR_timeline_semaphore;
 
    /* We cannot expose KHR_present_wait without timeline semaphores. */
-   assert(!wsi->khr_present_wait || supported_extensions->KHR_timeline_semaphore);
+   assert(!wsi->has_present_wait || wsi->has_timeline_semaphore);
 
    list_inithead(&wsi->hotplug_fences);
 
@@ -210,7 +210,7 @@ wsi_device_init(struct wsi_device *wsi,
    WSI_GET_CB(WaitForFences);
    WSI_GET_CB(MapMemory);
    WSI_GET_CB(UnmapMemory);
-   if (wsi->khr_present_wait)
+   if (wsi->has_present_wait)
       WSI_GET_CB(WaitSemaphores);
 #undef WSI_GET_CB
 
@@ -479,6 +479,9 @@ wsi_swapchain_init(const struct wsi_device *wsi,
    chain->device = _device;
    chain->alloc = *pAllocator;
    chain->blit.type = get_blit_type(wsi, image_params, _device);
+   chain->present_wait_enabled =
+      device->enabled_features.presentWait ||
+      (pCreateInfo->flags & VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR);
 
    chain->blit.queue = NULL;
    if (chain->blit.type != WSI_SWAPCHAIN_NO_BLIT) {
@@ -1079,7 +1082,8 @@ wsi_CreateSwapchainKHR(VkDevice _device,
       return VK_ERROR_OUT_OF_HOST_MEMORY;
    }
 
-   if (wsi_device->khr_present_wait) {
+   if (swapchain->present_wait_enabled) {
+      assert(wsi_device->has_present_wait);
       const VkSemaphoreTypeCreateInfo type_info = {
          .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO,
          .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE,
@@ -1567,13 +1571,17 @@ wsi_common_queue_present(const struct wsi_device *wsi,
       }
       if (present_id > 0) {
          image_signal_infos[i].present_id = present_id;
-         const VkSemaphoreSubmitInfo sem_info = {
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
-            .semaphore = swapchain->present_id_timeline,
-            .value = present_id,
-            .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
-         };
-         wsi_image_signal_info_add_semaphore(&image_signal_infos[i], sem_info);
+
+         if (swapchain->present_wait_enabled) {
+            const VkSemaphoreSubmitInfo sem_info = {
+               .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
+               .semaphore = swapchain->present_id_timeline,
+               .value = present_id,
+               .stageMask = VK_PIPELINE_STAGE_2_TRANSFER_BIT,
+            };
+            wsi_image_signal_info_add_semaphore(&image_signal_infos[i],
+                                                sem_info);
+         }
       }
 
       /* The present fence guards all client-allocated resources and GPU
@@ -2180,7 +2188,9 @@ wsi_cmd_blit_image_to_buffer(VkCommandBuffer cmd_buffer,
    };
    wsi->CmdPipelineBarrier(cmd_buffer,
                            VK_PIPELINE_STAGE_TRANSFER_BIT,
-                           VK_PIPELINE_STAGE_HOST_BIT,
+                           image->blit.to_foreign_queue
+                              ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+                              : VK_PIPELINE_STAGE_HOST_BIT,
                            0,
                            0, NULL,
                            1, &buf_mem_barrier,
