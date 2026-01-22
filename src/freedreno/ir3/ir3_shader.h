@@ -306,7 +306,7 @@ struct ir3_const_state {
  * A single output for vertex transform feedback.
  */
 struct ir3_stream_output {
-   unsigned register_index  : 6;  /**< 0 to 63 (OUT index) */
+   unsigned location        : 6;  /**< 0 to 63 (VARYING_SLOT_*) */
    unsigned start_component : 2;  /** 0 to 3 */
    unsigned num_components  : 3;  /** 1 to 4 */
    unsigned output_buffer   : 3;  /**< 0 to PIPE_MAX_SO_BUFFERS */
@@ -1073,7 +1073,7 @@ static inline unsigned
 ir3_max_const_compute(const struct ir3_shader_variant *v,
                       const struct ir3_compiler *compiler)
 {
-   unsigned lm_size = v->local_size_variable ? compiler->local_mem_size :
+   unsigned lm_size = v->local_size_variable ? compiler->info->cs_shared_mem_size :
       v->cs.req_local_mem;
 
    /* The LB is divided between consts and local memory. LB is split into
@@ -1088,7 +1088,7 @@ ir3_max_const_compute(const struct ir3_shader_variant *v,
     * configuration where there is enough space for LM.
     */
    unsigned lb_const_size =
-      ((compiler->compute_lb_size - lm_size) / compiler->wave_granularity) /
+      ((compiler->compute_lb_size - lm_size) / compiler->info->wave_granularity) /
       16 /* bytes per vec4 */;
    if (lb_const_size < compiler->max_const_compute) {
       const uint32_t lb_const_sizes[] = { 128, 192, 256, 512 };
@@ -1186,8 +1186,7 @@ ir3_shader_get_variant(struct ir3_shader *shader,
 
 struct ir3_shader *
 ir3_shader_from_nir(struct ir3_compiler *compiler, nir_shader *nir,
-                    const struct ir3_shader_options *options,
-                    struct ir3_stream_output_info *stream_output);
+                    const struct ir3_shader_options *options);
 uint32_t ir3_trim_constlen(const struct ir3_shader_variant **variants,
                            const struct ir3_compiler *compiler);
 struct ir3_shader *
@@ -1420,10 +1419,8 @@ void print_raw(FILE *out, const BITSET_WORD *data, size_t size);
 void ir3_link_stream_out(struct ir3_shader_linkage *l,
                          const struct ir3_shader_variant *v);
 
-#define VARYING_SLOT_GS_HEADER_IR3       (VARYING_SLOT_MAX + 0)
-#define VARYING_SLOT_GS_VERTEX_FLAGS_IR3 (VARYING_SLOT_MAX + 1)
-#define VARYING_SLOT_TCS_HEADER_IR3      (VARYING_SLOT_MAX + 2)
-#define VARYING_SLOT_REL_PATCH_ID_IR3    (VARYING_SLOT_MAX + 3)
+#define VARYING_SLOT_TCS_HEADER_IR3      (VARYING_SLOT_MAX + 0)
+#define VARYING_SLOT_REL_PATCH_ID_IR3    (VARYING_SLOT_MAX + 1)
 
 static inline uint32_t
 ir3_find_sysval_regid(const struct ir3_shader_variant *so, unsigned slot)

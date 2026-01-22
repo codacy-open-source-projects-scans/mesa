@@ -2484,6 +2484,13 @@ image("store_raw_intel", src_comp=[1, 0])
 # Maximum number of polygons processed in the fragment shader
 system_value("max_polygon_intel", 1, bit_sizes=[32])
 
+# Screen-space X/Y coordinate of upper-left vertex of the triangle being rasterized
+system_value("fs_start_intel", 2, bit_sizes=[32])
+
+# z_c, z_c0 (Cx/Cy/Co for Z plane)
+system_value("fs_z_c_intel", 2, bit_sizes=[32])
+system_value("fs_z_c0_intel", 1, bit_sizes=[32])
+
 # Read the attribute thread payload at a given byte offset
 # src[] = { offset }
 load("attribute_payload_intel", [1], flags=[CAN_ELIMINATE, CAN_REORDER])

@@ -149,7 +149,7 @@ ir3_nir_should_scalarize_mem(const nir_intrinsic_instr *intrin, const void *data
     */
    if ((intrin->intrinsic == nir_intrinsic_load_ssbo) &&
        (nir_intrinsic_access(intrin) & ACCESS_CAN_REORDER) &&
-       compiler->has_isam_ssbo && !compiler->has_isam_v) {
+       compiler->has_isam_ssbo && !compiler->info->props.has_isam_v) {
       return true;
    }
 
@@ -187,7 +187,7 @@ ir3_nir_should_vectorize_mem(unsigned align_mul, unsigned align_offset,
     */
    if ((low->intrinsic == nir_intrinsic_load_ssbo) &&
        (nir_intrinsic_access(low) & ACCESS_CAN_REORDER) &&
-       compiler->has_isam_ssbo && !compiler->has_isam_v) {
+       compiler->has_isam_ssbo && !compiler->info->props.has_isam_v) {
       return false;
    }
 
@@ -659,8 +659,35 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
       mesa_logi("----------------------");
    }
 
-   if (s->info.stage == MESA_SHADER_GEOMETRY)
+   /* For vertex inputs, we expect them to all be at the top. FS inputs are also
+    * more optimal at the top.
+    */
+   if (s->info.stage == MESA_SHADER_VERTEX ||
+       s->info.stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, s, nir_opt_move_to_top, nir_move_to_top_input_loads);
+
+   if (s->info.stage == MESA_SHADER_GEOMETRY) {
+      /* nir_unlower_io_to_vars expects constant indirect offsets to be folded
+       * in.
+       */
+      NIR_PASS(_, s, nir_opt_constant_folding);
+      NIR_PASS(_, s, nir_opt_dce);
+
+      /* GS lowering works most easily with variables, so temporarily switch
+       * inputs/outputs to variables and then switch back after the lowering is
+       * done.
+       */
+      NIR_PASS(_, s, nir_unlower_io_to_vars, false);
+      /* nir_lower_io doesn't work with compact variables and non-constant
+       * indices, so clean up output of unlower_io_to_vars.
+       */
+      NIR_PASS(_, s, nir_opt_constant_folding);
+      NIR_PASS(_, s, nir_opt_dce);
+
       NIR_PASS(_, s, ir3_nir_lower_gs);
+
+      ir3_nir_lower_io(s);
+   }
 
    NIR_PASS(_, s, nir_lower_frexp);
    NIR_PASS(_, s, nir_lower_amul, ir3_glsl_type_size);
@@ -845,6 +872,24 @@ ir3_nir_lower_subgroup_id_cs(nir_shader *nir, struct ir3_shader *shader)
 }
 
 /**
+ * Call nir_lower_io with the appropriate arguments.
+ */
+void
+ir3_nir_lower_io(nir_shader *s)
+{
+   NIR_PASS(_, s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
+            ir3_glsl_type_size,
+            nir_lower_io_lower_64bit_to_32 |
+               nir_lower_io_use_interpolated_input_intrinsics);
+   NIR_PASS(_, s, nir_opt_dce);
+   NIR_PASS(_, s, nir_remove_dead_variables,
+            nir_var_shader_in | nir_var_shader_out,
+            &(nir_remove_dead_variables_options) {});
+
+   s->info.io_lowered = true;
+}
+
+/**
  * Late passes that need to be done after pscreen->finalize_nir()
  */
 void
@@ -854,11 +899,6 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
    struct ir3_compiler *compiler = shader->compiler;
 
    MESA_TRACE_FUNC();
-
-   NIR_PASS(_, s, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
-            ir3_glsl_type_size,
-            nir_lower_io_lower_64bit_to_32 |
-               nir_lower_io_use_interpolated_input_intrinsics);
 
    if (s->info.stage == MESA_SHADER_FRAGMENT) {
       /* NOTE: nir_opt_barycentric comes first, since it
@@ -870,12 +910,12 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
       NIR_PASS(_, s, ir3_nir_move_varying_inputs);
       NIR_PASS(_, s, nir_lower_fb_read);
       NIR_PASS(_, s, ir3_nir_lower_layer_id);
-      if (!compiler->shading_rate_matches_vk)
+      if (!compiler->info->props.shading_rate_matches_vk)
          NIR_PASS(_, s, ir3_nir_lower_frag_shading_rate);
    }
 
    if (s->info.stage == MESA_SHADER_VERTEX || s->info.stage == MESA_SHADER_GEOMETRY) {
-      if (!compiler->shading_rate_matches_vk)
+      if (!compiler->info->props.shading_rate_matches_vk)
          NIR_PASS(_, s, ir3_nir_lower_primitive_shading_rate);
    }
 
@@ -898,14 +938,8 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
        * you'd end up with an incorrect f2f16(i2i32(load_input())) instead of
        * load_input).
        */
-      uint64_t mediump_varyings = 0;
-      nir_foreach_shader_in_variable(var, s) {
-         if ((var->data.precision == GLSL_PRECISION_MEDIUM ||
-              var->data.precision == GLSL_PRECISION_LOW) &&
-             var->data.interpolation != INTERP_MODE_FLAT) {
-            mediump_varyings |= BITFIELD64_BIT(var->data.location);
-         }
-      }
+      uint64_t mediump_varyings = s->info.linear_varyings |
+         s->info.perspective_varyings;
 
       if (mediump_varyings) {
          NIR_PASS(_, s, nir_lower_mediump_io, nir_var_shader_in,
@@ -947,7 +981,7 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
 
       if (!((s->info.stage == MESA_SHADER_COMPUTE) ||
             (s->info.stage == MESA_SHADER_KERNEL) ||
-            compiler->has_getfiberid)) {
+            compiler->info->props.has_getfiberid)) {
          options.subgroup_size = 1;
          options.lower_vote_trivial = true;
       }
@@ -1289,7 +1323,7 @@ ir3_nir_set_threadsize(struct ir3_shader_variant *v, const nir_shader *s)
        * might make different barrier choices).
        */
       if (!info->workgroup_size_variable) {
-         if (threads_per_wg <= compiler->threadsize_base)
+         if (threads_per_wg <= compiler->info->threadsize_base)
             v->shader_options.real_wavesize = IR3_SINGLE_ONLY;
       }
 
@@ -1304,7 +1338,7 @@ ir3_nir_set_threadsize(struct ir3_shader_variant *v, const nir_shader *s)
        */
       if (compiler->gen < 6 &&
           (info->workgroup_size_variable ||
-           threads_per_wg > compiler->threadsize_base * compiler->max_waves)) {
+           threads_per_wg > compiler->info->threadsize_base * compiler->info->max_waves)) {
          v->shader_options.real_wavesize = IR3_DOUBLE_ONLY;
       };
    }
@@ -1429,7 +1463,7 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
 
    progress |= OPT(s, ir3_nir_opt_subgroups, so);
 
-   if (so->compiler->load_shader_consts_via_preamble)
+   if (so->compiler->info->props.load_shader_consts_via_preamble)
       progress |= OPT(s, ir3_nir_lower_driver_params_to_ubo, so);
 
    if (!so->binning_pass) {
@@ -1469,7 +1503,7 @@ ir3_nir_lower_variant(struct ir3_shader_variant *so,
        !(ir3_shader_debug & IR3_DBG_NOPREAMBLE))
       progress |= OPT(s, ir3_nir_opt_preamble, so);
 
-   if (so->compiler->load_shader_consts_via_preamble)
+   if (so->compiler->info->props.load_shader_consts_via_preamble)
       progress |= OPT(s, ir3_nir_lower_driver_params_to_ubo, so);
 
    /* Do matrix reassociate after preamble, because we want uniform matrix
@@ -1857,7 +1891,7 @@ ir3_setup_const_state(nir_shader *nir, struct ir3_shader_variant *v,
                               align(IR3_MAX_SO_BUFFERS * ptrsz, 4) / 4, 1);
    }
 
-   if (!compiler->load_shader_consts_via_preamble) {
+   if (!compiler->info->props.load_shader_consts_via_preamble) {
       switch (v->type) {
       case MESA_SHADER_TESS_CTRL:
       case MESA_SHADER_TESS_EVAL:
