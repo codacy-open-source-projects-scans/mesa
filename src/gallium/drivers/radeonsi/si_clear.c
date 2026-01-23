@@ -1068,34 +1068,50 @@ static void si_fb_clear_via_compute(struct si_context *sctx, unsigned *buffers,
                                     const union pipe_color_union *color)
 {
    struct pipe_framebuffer_state *fb = &sctx->framebuffer.state;
-
    unsigned color_buffer_mask = (*buffers & PIPE_CLEAR_COLOR) >> util_logbase2(PIPE_CLEAR_COLOR0);
+
+   /* Don't do anything if we are clearing multiple render targets because we would wait
+    * unnecesarily between clears.
+    *
+    * TODO: Use compute for those too but don't wait between compute clears. Do all compute clears
+    *       in parallel with each other and in parallel with the gfx color/Z/S clear as well.
+    */
+   if (sctx->gfx_level >= GFX12 && util_bitcount(color_buffer_mask) > 1)
+      return;
+
    while (color_buffer_mask) {
       unsigned i = u_bit_scan(&color_buffer_mask);
-
       struct pipe_surface *surf = &fb->cbufs[i];
-      unsigned depth = surf->last_layer - surf->first_layer + 1;
       struct si_texture *tex = (struct si_texture *)surf->texture;
+      unsigned width = u_minify(tex->buffer.b.b.width0, surf->level);
+      unsigned height = u_minify(tex->buffer.b.b.height0, surf->level);
+      unsigned depth = surf->last_layer - surf->first_layer + 1;
+      bool compute_clear = false;
 
-      /* If DCC is enable (which can happen with thick tiling on gfx8, don't use compute to get
-       * compressed clears.
-       */
-      if (vi_dcc_enabled(tex, surf->level))
-         continue;
+      if (sctx->gfx_level >= GFX12) {
+         if (tex->surface.is_linear || tex->surface.thick_tiling || tex->surface.bpe <= 4 ||
+             (tex->surface.bpe == 16 && tex->buffer.b.b.nr_samples <= 2))
+            compute_clear = true;
+      } else {
+         /* If DCC is enabled (which can happen with thick tiling on gfx8, don't use compute to get
+          * compressed clears.
+          */
+         if (vi_dcc_enabled(tex, surf->level))
+            continue;
 
-      unsigned width, height;
-      pipe_surface_size(surf, &width, &height);
-      /* Clears of thick and linear layouts are fastest with compute. */
-      if (tex->surface.thick_tiling ||
-          (tex->surface.is_linear && (height > 1 || depth > 1 || width >= 8192))) {
-         struct pipe_box box;
-
-         u_box_3d(0, 0, surf->first_layer, width, height, depth, &box);
-
-         if (si_compute_clear_image(sctx, &tex->buffer.b.b, surf->format, surf->level, &box,
-                                    color, sctx->render_cond_enabled, true))
-            *buffers &= ~(PIPE_CLEAR_COLOR0 << i); /* success */
+         /* Clears of thick and linear layouts are fastest with compute. */
+         if (tex->surface.thick_tiling ||
+             (tex->surface.is_linear && (height > 1 || depth > 1 || width >= 8192)))
+            compute_clear = true;
       }
+
+      struct pipe_box box;
+      u_box_3d(0, 0, surf->first_layer, width, height, depth, &box);
+
+      if (compute_clear &&
+          si_compute_clear_image(sctx, &tex->buffer.b.b, surf->format, surf->level, &box,
+                                 color, sctx->render_cond_enabled, true))
+         *buffers &= ~(PIPE_CLEAR_COLOR0 << i); /* success */
    }
 }
 
@@ -1236,6 +1252,10 @@ static void gfx12_clear(struct pipe_context *ctx, unsigned buffers,
    else if (!util_format_has_stencil(util_format_description(fb->zsbuf.format)))
       buffers &= ~PIPE_CLEAR_STENCIL;
 
+   si_fb_clear_via_compute(sctx, &buffers, color);
+   if (!buffers)
+      return; /* all buffers have been cleared */
+
    if (unlikely(sctx->sqtt_enabled)) {
       if (buffers & PIPE_CLEAR_COLOR)
          sctx->sqtt_next_event = EventCmdClearColorImage;
@@ -1261,8 +1281,9 @@ static bool si_try_normal_clear(struct si_context *sctx, struct pipe_surface *ds
                                 const union pipe_color_union *color,
                                 float depth, unsigned stencil)
 {
-   unsigned surf_width, surf_height;
-   pipe_surface_size(dst, &surf_width, &surf_height);
+   unsigned surf_width = u_minify(dst->texture->width0, dst->level);
+   unsigned surf_height = u_minify(dst->texture->height0, dst->level);
+
    /* This is worth it only if it's a whole image clear. */
    if (dstx == 0 && dsty == 0 &&
        width == surf_width &&
