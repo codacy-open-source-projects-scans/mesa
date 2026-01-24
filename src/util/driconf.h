@@ -366,6 +366,10 @@
    DRI_CONF_OPT_B(intel_enable_wa_14018912822, def, \
                   "Intel workaround for using zero blend constants")
 
+#define DRI_CONF_INTEL_ENABLE_WA_14024015672_MSAA(def) \
+   DRI_CONF_OPT_B(intel_enable_wa_14024015672_msaa, def, \
+                  "Intel workaround for RHWO MSAA")
+
 #define DRI_CONF_INTEL_SAMPLER_ROUTE_TO_LSC(def) \
    DRI_CONF_OPT_B(intel_sampler_route_to_lsc, def, \
                   "Intel specific toggle to enable sampler route to LSC")
@@ -576,6 +580,10 @@
 #define DRI_CONF_WGL_SWAP_INTERVAL(def) \
    DRI_CONF_OPT_I(wgl_swap_interval, def, 1, 4, \
                   "Override default swap interval")
+
+#define DRI_CONF_WGL_REQUIRE_GDI_COMPAT(def) \
+   DRI_CONF_OPT_B(wgl_require_gdi_compat, def, \
+                  "Require all pixel formats to have PFD_SUPPORT_GDI flag")
 
 /**
  * \brief virgl specific configuration options

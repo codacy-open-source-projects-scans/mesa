@@ -161,8 +161,11 @@ struct ir3_compiler {
     */
    uint32_t reg_size_vec4;
 
-   /* The number of total branch stack entries, divided by wave_granularity. */
+   /* The number of total branch stack entries. */
    uint32_t branchstack_size;
+
+   /* The maximum number of branch stack entries per wave. */
+   uint32_t max_branchstack;
 
    /* The byte increment of MEMSIZEPERITEM, the private memory per-fiber allocation. */
    uint32_t pvtmem_per_fiber_align;
