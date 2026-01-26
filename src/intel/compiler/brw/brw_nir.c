@@ -1396,8 +1396,6 @@ brw_nir_optimize(nir_shader *nir,
          LOOP_OPT(nir_split_array_vars, nir_var_function_temp);
       LOOP_OPT(nir_shrink_vec_array_vars, nir_var_function_temp);
       LOOP_OPT(nir_opt_deref);
-      if (LOOP_OPT(nir_opt_memcpy))
-         LOOP_OPT(nir_split_var_copies);
       LOOP_OPT(nir_lower_vars_to_ssa);
       if (!nir->info.var_copies_lowered) {
          /* Only run this pass if nir_lower_var_copies was not called
@@ -1408,7 +1406,6 @@ brw_nir_optimize(nir_shader *nir,
       }
       LOOP_OPT(nir_opt_copy_prop_vars);
       LOOP_OPT(nir_opt_dead_write_vars);
-      LOOP_OPT(nir_opt_combine_stores, nir_var_all);
 
       LOOP_OPT(nir_opt_ray_queries);
       LOOP_OPT(nir_opt_ray_query_ranges);
@@ -1684,6 +1681,9 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
 
    OPT(nir_split_var_copies);
    OPT(nir_split_struct_vars, nir_var_function_temp);
+
+   if (OPT(nir_opt_memcpy))
+      OPT(nir_split_var_copies);
 
    brw_nir_optimize(nir, devinfo);
 
@@ -2258,7 +2258,7 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
                                const struct brw_compiler *compiler,
                                enum brw_robustness_flags robust_flags)
 {
-   bool progress = false;
+   UNUSED bool progress = false;
 
    nir_load_store_vectorize_options options = {
       .modes = nir_var_mem_ubo | nir_var_mem_ssbo |
@@ -2321,17 +2321,11 @@ brw_vectorize_lower_mem_access(nir_shader *nir,
       .cb_data = &cb_data,
    };
    OPT(nir_lower_mem_access_bit_sizes, &mem_access_options);
-
-   while (progress) {
-      progress = false;
-
-      OPT(nir_lower_pack);
-      OPT(nir_opt_copy_prop);
-      OPT(nir_opt_dce);
-      OPT(nir_opt_cse);
-      OPT(nir_opt_algebraic);
-      OPT(nir_opt_constant_folding);
-   }
+   OPT(nir_lower_pack);
+   OPT(nir_opt_copy_prop);
+   OPT(nir_opt_dce);
+   OPT(nir_opt_algebraic);
+   OPT(nir_opt_cse);
 
    /* Do this after the vectorization & brw_nir_rebase_const_offset_ubo_loads
     * so that we maximize the offset put into the messages.
