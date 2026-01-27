@@ -1405,7 +1405,7 @@ static unsigned rvcn_dec_dynamic_dpb_t2_message(struct radeon_decoder *dec, rvcn
 
    dynamic_dpb_t2->dpbCurrLo = addr;
    dynamic_dpb_t2->dpbCurrHi = addr >> 32;
-   decode->decode_flags = 1;
+   decode->decode_flags |= RDECODE_FLAGS_USE_DYNAMIC_DPB_MASK;
    dynamic_dpb_t2->dpbConfigFlags = 0;
 
    return 0;
@@ -1437,7 +1437,7 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
    struct si_texture *luma;
    struct si_texture *chroma;
    struct pipe_video_buffer *out_surf = target;
-   ASSERTED struct si_screen *sscreen = (struct si_screen *)dec->screen;
+   struct si_screen *sscreen = (struct si_screen *)dec->screen;
    rvcn_dec_message_header_t *header;
    rvcn_dec_message_index_t *index_codec;
    rvcn_dec_message_index_t *index_drm = NULL;
@@ -1565,7 +1565,10 @@ static struct pb_buffer_lean *rvcn_dec_message_decode(struct radeon_decoder *dec
    decode->height_in_samples = dec->base.height;
 
    if (dec->dpb_type == DPB_DYNAMIC_TIER_3)
-      decode->decode_flags = RDECODE_FLAGS_UNIFIED_DT_MASK;
+      decode->decode_flags |= RDECODE_FLAGS_UNIFIED_DT_MASK;
+
+   if (sscreen->multimedia_debug_flags & DBG(LOW_LATENCY_DECODE))
+      decode->decode_flags |= RDECODE_FLAGS_LOW_LATENCY_MASK;
 
    decode->bsd_size = align(dec->bs_size, 128);
 

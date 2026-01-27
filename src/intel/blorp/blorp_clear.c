@@ -300,14 +300,25 @@ get_fast_clear_rect(const struct isl_device *dev,
           */
          enum isl_format ccs_format;
          if (ISL_GFX_VERX10(dev) == 120) {
-            assert(surf->tiling == ISL_TILING_Y0);
-            switch (isl_format_get_layout(surf->format)->bpb) {
-            case   8: ccs_format = ISL_FORMAT_GFX12_CCS_8BPP_Y0;   break;
-            case  16: ccs_format = ISL_FORMAT_GFX12_CCS_16BPP_Y0;  break;
-            case  32: ccs_format = ISL_FORMAT_GFX12_CCS_32BPP_Y0;  break;
-            case  64: ccs_format = ISL_FORMAT_GFX12_CCS_64BPP_Y0;  break;
-            case 128: ccs_format = ISL_FORMAT_GFX12_CCS_128BPP_Y0; break;
-            default:  UNREACHABLE("Invalid surface bpb for fast clearing");
+            if (surf->tiling == ISL_TILING_Y0) {
+               switch (isl_format_get_layout(surf->format)->bpb) {
+               case   8: ccs_format = ISL_FORMAT_GFX12_CCS_8BPP_Y0;   break;
+               case  16: ccs_format = ISL_FORMAT_GFX12_CCS_16BPP_Y0;  break;
+               case  32: ccs_format = ISL_FORMAT_GFX12_CCS_32BPP_Y0;  break;
+               case  64: ccs_format = ISL_FORMAT_GFX12_CCS_64BPP_Y0;  break;
+               case 128: ccs_format = ISL_FORMAT_GFX12_CCS_128BPP_Y0; break;
+               default:  UNREACHABLE("Invalid surface bpb for fast clearing");
+               }
+            } else {
+               assert(surf->tiling == ISL_TILING_ICL_Ys);
+               switch (isl_format_get_layout(surf->format)->bpb) {
+               case   8: ccs_format = ISL_FORMAT_GFX12_CCS_8BPP_Ys;   break;
+               case  16: ccs_format = ISL_FORMAT_GFX12_CCS_16BPP_Ys;  break;
+               case  32: ccs_format = ISL_FORMAT_GFX12_CCS_32BPP_Ys;  break;
+               case  64: ccs_format = ISL_FORMAT_GFX12_CCS_64BPP_Ys;  break;
+               case 128: ccs_format = ISL_FORMAT_GFX12_CCS_128BPP_Ys; break;
+               default:  UNREACHABLE("Invalid surface bpb for fast clearing");
+               }
             }
          } else {
             assert(aux_surf->usage == ISL_SURF_USAGE_CCS_BIT);
@@ -549,15 +560,13 @@ blorp_fast_clear(struct blorp_batch *batch,
                                           &start_tile_B, &end_tile_B)) {
          size_B = end_tile_B - start_tile_B;
          addr.offset += start_tile_B;
-      } else if (isl_tiling_is_64(surf->surf->tiling)) {
-         /* If not supported above, clear the range without redescription. If
-          * the image is 3D, redescription is not possible because multiple
-          * depth slices are non-trivially interleaved into one plane. If the
-          * image is part of a miptail, there should be no benefit from
-          * redescription.
+      } else if (isl_tiling_is_64(surf->surf->tiling) ||
+                 isl_tiling_is_std_y(surf->surf->tiling)) {
+         /* If not supported above, clear the range without redescription.
+          * Thankfully, we haven't run into this outside of conformance tests.
           */
-         assert(surf->surf->logical_level0_px.d > 1 ||
-                level <= surf->surf->miptail_start_level);
+         assert(surf->surf->levels > 1 ||
+                surf->surf->logical_level0_px.d != num_layers);
       } else if (level == 0 && start_layer == 0 && num_layers == 1) {
          assert(surf->surf->tiling == ISL_TILING_4 ||
                 surf->surf->tiling == ISL_TILING_Y0);

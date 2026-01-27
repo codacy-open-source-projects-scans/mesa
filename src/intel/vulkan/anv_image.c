@@ -362,7 +362,15 @@ choose_isl_tiling_flags(const struct intel_device_info *devinfo,
    default:
       UNREACHABLE("bad VkImageTiling");
    case VK_IMAGE_TILING_OPTIMAL:
-      flags = ISL_TILING_ANY_MASK;
+      if ((image->vk.usage | image->vk.stencil_usage) &
+          VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) {
+         /* Disable support for tilings that are not supported by ISL's
+          * tiled-memcpy functions.
+          */
+         flags = ~(ISL_TILING_STD_64_MASK | ISL_TILING_STD_Y_MASK);
+      } else {
+         flags = ISL_TILING_ANY_MASK;
+      }
       break;
    case VK_IMAGE_TILING_LINEAR:
       flags = ISL_TILING_LINEAR_BIT;
@@ -773,8 +781,7 @@ add_aux_surface_if_supported(struct anv_device *device,
       if (!ok)
          return VK_SUCCESS;
 
-      if (!isl_surf_supports_ccs(&device->isl_dev, main_surf,
-                                 &image->planes[plane].aux_surface.isl)) {
+      if (!isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
          image->planes[plane].aux_usage = ISL_AUX_USAGE_HIZ;
       } else if (want_hiz_wt_for_image(device->info, image)) {
          assert(device->info->ver >= 12);
@@ -803,7 +810,7 @@ add_aux_surface_if_supported(struct anv_device *device,
                                               plane);
       }
    } else if (main_surf->usage & (ISL_SURF_USAGE_STENCIL_BIT | ISL_SURF_USAGE_CPB_BIT)) {
-      if (!isl_surf_supports_ccs(&device->isl_dev, main_surf, NULL))
+      if (!isl_surf_supports_ccs(&device->isl_dev, main_surf))
          return VK_SUCCESS;
 
       image->planes[plane].aux_usage = ISL_AUX_USAGE_STC_CCS;
@@ -819,7 +826,7 @@ add_aux_surface_if_supported(struct anv_device *device,
       assert(aspect & VK_IMAGE_ASPECT_ANY_COLOR_BIT_ANV);
 
       if (device->info->has_flat_ccs || device->info->has_aux_map) {
-         ok = isl_surf_supports_ccs(&device->isl_dev, main_surf, NULL);
+         ok = isl_surf_supports_ccs(&device->isl_dev, main_surf);
       } else {
          ok = isl_surf_get_ccs_surf(&device->isl_dev, main_surf,
                                     &image->planes[plane].aux_surface.isl,
@@ -882,8 +889,7 @@ add_aux_surface_if_supported(struct anv_device *device,
       if (!ok)
          return VK_SUCCESS;
 
-      if (isl_surf_supports_ccs(&device->isl_dev, main_surf,
-                                &image->planes[plane].aux_surface.isl)) {
+      if (isl_surf_supports_ccs(&device->isl_dev, main_surf)) {
          image->planes[plane].aux_usage = ISL_AUX_USAGE_MCS_CCS;
       } else {
          image->planes[plane].aux_usage = ISL_AUX_USAGE_MCS;
@@ -1835,6 +1841,12 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
                             IMAGE_SWAPCHAIN_CREATE_INFO_KHR) != NULL)
       return VK_SUCCESS;
 #endif
+
+   const VkImageAlignmentControlCreateInfoMESA *alignment =
+      vk_find_struct_const(pCreateInfo->pNext,
+                           IMAGE_ALIGNMENT_CONTROL_CREATE_INFO_MESA);
+   if (alignment && alignment->maximumRequestedAlignment == 4096)
+      isl_extra_usage_flags |= ISL_SURF_USAGE_PREFER_4K_ALIGNMENT;
 
    const struct wsi_image_create_info *wsi_info =
       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
@@ -3884,12 +3896,30 @@ anv_can_fast_clear_color(const struct anv_cmd_buffer *cmd_buffer,
    }
 
    /* Wa_18020603990 - slow clear surfaces up to 256x256, 32bpp. */
+   const uint32_t plane = anv_image_aspect_to_plane(image, clear_aspect);
+   const struct anv_surface *anv_surf = &image->planes[plane].primary_surface;
    if (intel_needs_workaround(cmd_buffer->device->info, 18020603990)) {
-      const struct anv_surface *anv_surf = &image->planes->primary_surface;
       if (isl_format_get_layout(anv_surf->isl.format)->bpb <= 32 &&
           anv_surf->isl.logical_level0_px.w <= 256 &&
           anv_surf->isl.logical_level0_px.h <= 256)
          return false;
+   }
+
+   /* BSpec 46969 (r45602) tells us that we get no fast-clears for 3D:
+    *
+    *   3D/Volumetric surfaces do not support Fast Clear operation.
+    *
+    * If the entire surface is being cleared, we could teach BLORP to clear
+    * it. For now, just keep things simple and reject fast clears. We don't
+    * support compression on 64bpp+ formats anyway.
+    */
+   if (cmd_buffer->device->info->verx10 == 120 &&
+       anv_surf->isl.dim == ISL_SURF_DIM_3D &&
+       anv_surf->isl.tiling == ISL_TILING_ICL_Ys) {
+      assert(isl_format_get_layout(anv_surf->isl.format)->bpb <= 32);
+      anv_perf_warn(VK_LOG_OBJS(&image->vk.base),
+                    "Ys + 3D on gfx12.0.  Slow clearing surface");
+      return false;
    }
 
    /* On gfx12.0, CCS fast clears don't seem to cover the correct portion of

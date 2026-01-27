@@ -1395,7 +1395,6 @@ brw_nir_optimize(nir_shader *nir,
       if (nir->info.stage != MESA_SHADER_KERNEL)
          LOOP_OPT(nir_split_array_vars, nir_var_function_temp);
       LOOP_OPT(nir_shrink_vec_array_vars, nir_var_function_temp);
-      LOOP_OPT(nir_opt_deref);
       LOOP_OPT(nir_lower_vars_to_ssa);
       if (!nir->info.var_copies_lowered) {
          /* Only run this pass if nir_lower_var_copies was not called
@@ -1406,9 +1405,6 @@ brw_nir_optimize(nir_shader *nir,
       }
       LOOP_OPT(nir_opt_copy_prop_vars);
       LOOP_OPT(nir_opt_dead_write_vars);
-
-      LOOP_OPT(nir_opt_ray_queries);
-      LOOP_OPT(nir_opt_ray_query_ranges);
 
       LOOP_OPT(nir_lower_alu_to_scalar, NULL, NULL);
 
@@ -1434,11 +1430,7 @@ brw_nir_optimize(nir_shader *nir,
       LOOP_OPT(nir_opt_peephole_select, &peephole_select_options);
 
       LOOP_OPT(nir_opt_intrinsics);
-      LOOP_OPT(nir_opt_idiv_const, 32);
       LOOP_OPT_NOT_IDEMPOTENT(nir_opt_algebraic);
-
-      LOOP_OPT(nir_opt_generate_bfi);
-      LOOP_OPT(nir_opt_reassociate_bfi);
 
       LOOP_OPT(nir_lower_constant_convert_alu_types);
       LOOP_OPT(nir_opt_constant_folding);
@@ -1686,6 +1678,13 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       OPT(nir_split_var_copies);
 
    brw_nir_optimize(nir, devinfo);
+
+   if (nir->info.ray_queries) {
+      OPT(nir_opt_ray_queries);
+      OPT(nir_opt_ray_query_ranges);
+   }
+
+   OPT(nir_opt_deref);
 
    unsigned lower_flrp =
       (nir->options->lower_flrp16 ? 16 : 0) |
@@ -2567,9 +2566,10 @@ brw_postprocess_nir_opts(nir_shader *nir, const struct brw_compiler *compiler,
       OPT(nir_opt_algebraic_before_ffma);
    } while (progress);
 
+   OPT(nir_opt_idiv_const, 32);
+
    if (devinfo->verx10 >= 125) {
       /* Lower integer division by constants before nir_lower_idiv. */
-      OPT(nir_opt_idiv_const, 32);
       const nir_lower_idiv_options options = {
          .allow_fp16 = false
       };
@@ -2635,6 +2635,8 @@ brw_postprocess_nir_opts(nir_shader *nir, const struct brw_compiler *compiler,
       OPT(nir_opt_shrink_vectors, false);
 
    OPT(intel_nir_opt_peephole_imul32x16);
+   OPT(nir_opt_generate_bfi);
+   OPT(nir_opt_reassociate_bfi);
 
    if (OPT(nir_opt_comparison_pre)) {
       OPT(nir_opt_copy_prop);
@@ -2647,21 +2649,19 @@ brw_postprocess_nir_opts(nir_shader *nir, const struct brw_compiler *compiler,
        * might be under the threshold of conversion to bcsel.
        */
       nir_opt_peephole_select_options peephole_select_options = {
-         .limit = 0,
+         .limit = 1,
+         .expensive_alu_ok = true,
       };
       OPT(nir_opt_peephole_select, &peephole_select_options);
-
-      peephole_select_options.limit = 1;
-      peephole_select_options.expensive_alu_ok = true;
-      OPT(nir_opt_peephole_select, &peephole_select_options);
    }
+
+   OPT(brw_nir_lower_fsign);
+   OPT(brw_nir_opt_fsat);
 
    do {
       progress = false;
 
-      OPT(brw_nir_opt_fsat);
       OPT(nir_opt_algebraic_late);
-      OPT(brw_nir_lower_fsign);
 
       if (progress) {
          OPT(nir_opt_constant_folding);
@@ -2810,11 +2810,8 @@ brw_postprocess_nir_out_of_ssa(nir_shader *nir,
    }
 
    OPT(nir_convert_from_ssa, true, true);
-
+   OPT(nir_opt_rematerialize_compares);
    OPT(nir_opt_dce);
-
-   if (OPT(nir_opt_rematerialize_compares))
-      OPT(nir_opt_dce);
 
    nir_trivialize_registers(nir);
 

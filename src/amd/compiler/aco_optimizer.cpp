@@ -1190,7 +1190,7 @@ alu_opt_gather_info(opt_ctx& ctx, Instruction* instr, alu_opt_info& info)
       info.operands.push_back({instr->operands[0]});
       if (instr->definitions[0].regClass() == s1) {
          info.defs.push_back(instr->definitions[1]);
-         info.opcode = aco_opcode::v_lshl_b32;
+         info.opcode = aco_opcode::s_lshl_b32;
          info.format = Format::SOP2;
          std::swap(info.operands[0], info.operands[1]);
       } else {
@@ -4126,6 +4126,14 @@ pop_def_cb(opt_ctx& ctx, alu_opt_info& info)
 }
 
 bool
+pop_op_cb(opt_ctx& ctx, alu_opt_info& info)
+{
+   assert(info.operands.size() >= 2);
+   info.operands.pop_back();
+   return true;
+}
+
+bool
 check_constant(opt_ctx& ctx, alu_opt_info& info, unsigned idx, uint32_t expected)
 {
    assert(idx < info.operands.size());
@@ -4571,6 +4579,14 @@ combine_instruction(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    } else if (info.opcode == aco_opcode::v_cndmask_b32) {
       add_opt(s_not_b64, v_cndmask_b32, 0x4, "102");
       add_opt(s_not_b32, v_cndmask_b32, 0x4, "102");
+   } else if (info.opcode == aco_opcode::v_alignbyte_b32) {
+      /* GFX6/7 lowered pack(undef, f2f16_rtz(a)) -> v_cvt_pkrtz_f16_f32(0, a) */
+      add_opt(v_cvt_pkrtz_f16_f32, v_cvt_pkrtz_f16_f32, 0x1, "0231",
+              and_cb<and_cb<check_const_cb<0, 0>, remove_const_cb<2>>, pop_op_cb>);
+   } else if (info.opcode == aco_opcode::s_lshl_b32 && !ctx.uses[info.defs[1].tempId()]) {
+      add_opt(
+         s_cvt_pk_rtz_f16_f32, s_cvt_pk_rtz_f16_f32, 0x1, "120",
+         and_cb<and_cb<and_cb<remove_const_cb<16>, pop_op_cb>, pop_def_cb>, insert_const_cb<0, 0>>);
    }
 
    if (match_and_apply_patterns(ctx, info, patterns)) {
@@ -5294,6 +5310,44 @@ opt_split_cvt_pkrtz(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    }
 }
 
+/* After opt_split_cvt_pkrtz, convert
+ * p_create_vector(undef, v_cvt_pkrtz_f16_f32(a, ...)) to
+ * v_cvt_pkrtz_f16_f32(0, a)
+ */
+static void
+opt_pack_undef_cvt_pkrtz(opt_ctx& ctx, aco_ptr<Instruction>& instr)
+{
+   if (instr->operands.size() != 2 || instr->definitions[0].regClass() != v1 ||
+       !instr->operands[0].isUndefined() || !instr->operands[1].isTemp() ||
+       instr->operands[0].bytes() != 2 || ctx.uses[instr->operands[1].tempId()] != 1)
+      return;
+
+   Instruction* pkrtz_f16 = ctx.info[instr->operands[1].tempId()].parent_instr;
+
+   if (pkrtz_f16->opcode != aco_opcode::v_cvt_pkrtz_f16_f32 &&
+       pkrtz_f16->opcode != aco_opcode::v_cvt_pkrtz_f16_f32_e64)
+      return;
+
+   if (pkrtz_f16->isSDWA() || pkrtz_f16->isDPP())
+      return;
+
+   if (pkrtz_f16->operands[1].isTemp()) {
+      decrease_and_dce(ctx, pkrtz_f16->operands[1].getTemp());
+      pkrtz_f16->operands[1] = Operand::c32(0);
+   }
+
+   pkrtz_f16->valu().swapOperands(0, 1);
+   if (!pkrtz_f16->operands[1].isOfType(RegType::vgpr))
+      pkrtz_f16->format = asVOP3(pkrtz_f16->format);
+
+   ctx.uses[pkrtz_f16->definitions[0].tempId()] = 0;
+   ctx.info[pkrtz_f16->definitions[0].tempId()].parent_instr = nullptr;
+
+   pkrtz_f16->definitions[0].setTemp(instr->definitions[0].getTemp());
+   ctx.info[pkrtz_f16->definitions[0].tempId()].parent_instr = pkrtz_f16;
+   instr.reset();
+}
+
 static void
 opt_fma_mix_acc(opt_ctx& ctx, aco_ptr<Instruction>& instr)
 {
@@ -5453,6 +5507,12 @@ apply_literals(opt_ctx& ctx, aco_ptr<Instruction>& instr)
    if (instr->opcode == aco_opcode::v_cvt_pkrtz_f16_f32 ||
        instr->opcode == aco_opcode::v_cvt_pkrtz_f16_f32_e64) {
       opt_split_cvt_pkrtz(ctx, instr);
+      if (!instr)
+         return;
+   }
+
+   if (instr->opcode == aco_opcode::p_create_vector) {
+      opt_pack_undef_cvt_pkrtz(ctx, instr);
       if (!instr)
          return;
    }

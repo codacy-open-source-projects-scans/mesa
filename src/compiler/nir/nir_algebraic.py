@@ -431,6 +431,8 @@ class Expression(Value):
         self.nnan = cond.pop('nnan', False)
         self.ninf = cond.pop('ninf', False)
         self.contract = cond.pop('contract', False)
+        # Single component index of the swizzle of the output of this
+        # expression, or -1 if no swizzle (all components)
         self.swizzle = - \
             1 if m.group('swizzle') is None else swizzles[m.group(
                 'swizzle').removeprefix('.')]
@@ -1292,14 +1294,21 @@ TEST_F(${pass_name}_pattern_test, ${test_name})
 {
    b->shader->info.name = "${verbose_name}";
 % if expected_result == test_status.XFAIL:
-   expected_result = XFAIL;
+   expected_result = FAIL;
 % elif expected_result == test_status.UNSUPPORTED:
    expected_result = UNSUPPORTED;
 % endif
 % for xform_def in xform_defs:
    ${xform_def}
 % endfor
-   nir_unit_test_assert_eq(b, ${search_def}, ${replace_def});
+<%
+   # Note that fdot_replicated replacements will generate more channels than the search
+   # side, and that's OK -- nir_opt_algebraic allows that in patterns.  But
+   # nir_unit_test_assert_eq wants equality.
+%>
+   unsigned mask = BITFIELD_MASK(MIN2(${search_def}->num_components, ${replace_def}->num_components));
+   nir_unit_test_assert_eq(b, nir_channels(b, ${search_def}, mask),
+                              nir_channels(b, ${replace_def}, mask));
 % for cond in expr_conds:
    ${cond}
 % endfor
@@ -1335,18 +1344,9 @@ def expression_is_unsupported(expr):
     if any(expression_is_unsupported(src) for src in expr.sources):
         return True
 
-    if expr.swizzle != -1:
-        return True
-
     broken_opcodes = [
         # medium precision means that the compiler can do whatever it wants which makes it unsuitable for testing.
         "f2fmp", "i2imp", "f2imp", "f2ump", "i2fmp", "u2fmp",
-        # _replicated OPs do not have nir_builder functions.
-        "fdot2_replicated", "fdot3_replicated", "fdot4_replicated", "fdph_replicated",
-
-        # The tests do not validate patterns with those opcodes correctly.
-        "imad24_ir3", "imul24_relaxed", "umad24_relaxed", "umul24_relaxed",
-        "udiv_aligned_4",
     ]
 
     if expr.opcode in broken_opcodes:
@@ -1478,6 +1478,9 @@ def get_expression_def(expr, name, value_comps, variable_map, defs, expr_conds, 
         fp_math_ctrl.add("nir_fp_preserve_inf")
 
     defs.append(f"nir_def *{def_name} = nir_{opcode}(b, {', '.join(srcs)});")
+
+    if expr.swizzle != -1:
+        def_name = f"nir_channel(b, {def_name}, {expr.swizzle})"
 
     if expr.cond != None and isinstance(expr, Expression):
         # These do not matter for correctness

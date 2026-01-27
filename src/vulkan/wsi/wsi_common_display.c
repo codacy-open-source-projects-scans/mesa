@@ -192,7 +192,15 @@ struct wsi_display {
 
    const VkAllocationCallbacks  *alloc;
 
+   /* fd currently in use for KHR_display, provided by vkAcquireDrmDisplayEXT()
+    * or vkAcquireXlibDisplayEXT().  When none is active, it's set to device_fd
+    * for connector enumeration.
+    */
    int                          fd;
+   /* fd that was passed to wsi_display_init_wsi */
+   int                          device_fd;
+   /* Refcount for DRM master on device_fd. */
+   uint32_t                     master_refcount;
 
    /* Used with syncobj imported from driver side. */
    int                          syncobj_fd;
@@ -1729,12 +1737,54 @@ wsi_display_image_finish(struct wsi_swapchain *drv_chain,
    wsi_destroy_image(&chain->base, &image->base);
 }
 
+/** Re-acquires DRM master privileges for the device_fd as necessary.
+ *
+ * We have to refcount, because an oldSwapchain can be freed after a new
+ * swapchain is created.
+ */
+static int
+wsi_display_get_master(struct wsi_display *wsi)
+{
+   if (wsi->fd != wsi->device_fd)
+      return 0;
+
+   if (wsi->master_refcount++ == 0) {
+      int ret = drmSetMaster(wsi->fd);
+      if (ret != 0) {
+         wsi_display_debug("drm fd %d failed to re-set master: %s", wsi->fd, strerror(-errno));
+         wsi->master_refcount--;
+         return ret;
+      }
+      wsi_display_debug("drm fd %d got master", wsi->fd);
+   }
+
+   return 0;
+}
+
+static int
+wsi_display_drop_master(struct wsi_display *wsi)
+{
+   if (wsi->fd != wsi->device_fd)
+      return 0;
+
+   if (--wsi->master_refcount == 0) {
+      int ret = drmDropMaster(wsi->fd);
+      if (ret != 0) {
+         wsi_display_debug("drm fd %d failed to drop master: %s", wsi->fd, strerror(-errno));
+      }
+      wsi_display_debug("drm fd %d dropped master", wsi->fd);
+   }
+
+   return 0;
+}
+
 static VkResult
 wsi_display_swapchain_destroy(struct wsi_swapchain *drv_chain,
                               const VkAllocationCallbacks *allocator)
 {
    struct wsi_display_swapchain *chain =
       (struct wsi_display_swapchain *) drv_chain;
+   struct wsi_display *wsi = chain->wsi;
 
    _wsi_display_cleanup_state(chain);
 
@@ -1750,6 +1800,8 @@ wsi_display_swapchain_destroy(struct wsi_swapchain *drv_chain,
       display_mode->connector->crtc_id = 0;
 
    wsi_swapchain_finish(&chain->base);
+
+   wsi_display_drop_master(wsi);
 
    vk_free(allocator, chain);
    return VK_SUCCESS;
@@ -2847,13 +2899,20 @@ _wsi_display_queue_next(struct wsi_swapchain *drv_chain)
       if (ret != -EACCES) {
          connector->active = false;
          image->state = WSI_IMAGE_IDLE;
+         wsi_display_debug("drm_atomic_commit error: %s\n", strerror(-ret));
          wsi_display_surface_error(chain, VK_ERROR_SURFACE_LOST_KHR);
          return VK_ERROR_SURFACE_LOST_KHR;
+      }
+
+      if (!drmIsMaster(wsi->fd)) {
+         wsi_display_debug("drm_atomic_commit without DRM master\n");
+         wsi_display_surface_error(chain, VK_ERROR_SURFACE_LOST_KHR);
       }
 
       /* Some other VT is currently active. Sit here waiting for
        * our VT to become active again by polling once a second
        */
+      wsi_display_debug("waiting for VT\n");
       usleep(1000 * 1000);
       connector->active = false;
    }
@@ -2967,6 +3026,7 @@ wsi_display_surface_create_swapchain(
    VkIcdSurfaceDisplay *surface = (VkIcdSurfaceDisplay *) icd_surface;
    wsi_display_mode *display_mode =
       wsi_display_mode_from_handle(surface->displayMode);
+   VkResult result = VK_SUCCESS;
 
    assert(create_info->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
 
@@ -3000,21 +3060,20 @@ wsi_display_surface_create_swapchain(
 
    int ret = mtx_init(&chain->present_id_mutex, mtx_plain);
    if (ret != thrd_success) {
-      vk_free(allocator, chain);
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_free;
    }
 
    ret = u_cnd_monotonic_init(&chain->present_id_cond);
    if (ret != thrd_success) {
-      mtx_destroy(&chain->present_id_mutex);
-      vk_free(allocator, chain);
-      return VK_ERROR_OUT_OF_HOST_MEMORY;
+      result = VK_ERROR_OUT_OF_HOST_MEMORY;
+      goto fail_mtx_destroy;
    }
 
-   VkResult result =
+   result =
       wsi_display_setup_connector(display_mode->connector, display_mode);
    if (result != VK_SUCCESS)
-      return result;
+      goto fail_cond_destroy;
 
    uint32_t num_modifiers = 0;
    const uint64_t *modifiers = NULL;
@@ -3029,16 +3088,22 @@ wsi_display_surface_create_swapchain(
       image_params.num_modifiers = &num_modifiers;
    }
 
+   /* Set master, so that we can do modesets when we're using wsi->device_fd
+    * that had previously had master dropped.
+    */
+   ret = wsi_display_get_master(wsi);
+   if (ret != 0) {
+      wsi_display_debug("Failed to get DRM master: %s", strerror(ret));
+      result = VK_ERROR_DEVICE_LOST;
+      goto fail_cond_destroy;
+   }
+
    result = wsi_swapchain_init(wsi_device, &chain->base, device,
                                create_info, &image_params.base,
                                allocator);
    free((void *)modifiers);
-   if (result != VK_SUCCESS) {
-      u_cnd_monotonic_destroy(&chain->present_id_cond);
-      mtx_destroy(&chain->present_id_mutex);
-      vk_free(allocator, chain);
-      return result;
-   }
+   if (result != VK_SUCCESS)
+      goto fail_drop_master;
 
    chain->base.destroy = wsi_display_swapchain_destroy;
    chain->base.get_wsi_image = wsi_display_get_wsi_image;
@@ -3074,11 +3139,7 @@ wsi_display_surface_create_swapchain(
             wsi_display_image_finish(&chain->base,
                                      &chain->images[image]);
          }
-         u_cnd_monotonic_destroy(&chain->present_id_cond);
-         mtx_destroy(&chain->present_id_mutex);
-         wsi_swapchain_finish(&chain->base);
-         vk_free(allocator, chain);
-         goto fail_init_images;
+         goto fail_swapchain_fini;
       }
    }
 
@@ -3095,7 +3156,17 @@ wsi_display_surface_create_swapchain(
 
    return VK_SUCCESS;
 
-fail_init_images:
+fail_swapchain_fini:
+   wsi_swapchain_finish(&chain->base);
+fail_drop_master:
+   if (wsi->fd == wsi->device_fd)
+      wsi_display_drop_master(wsi);
+fail_cond_destroy:
+   u_cnd_monotonic_destroy(&chain->present_id_cond);
+fail_mtx_destroy:
+   mtx_destroy(&chain->present_id_mutex);
+fail_free:
+   vk_free(allocator, chain);
    return result;
 }
 
@@ -3222,10 +3293,29 @@ wsi_display_init_wsi(struct wsi_device *wsi_device,
    if (wsi->fd != -1 && !local_drmIsMaster(wsi->fd))
       wsi->fd = -1;
 
+   /* wsi->fd will get modified as part of vkAcquireDRMDisplayEXT() and
+    * vkReleaseDisplay(), but we need to keep it around for the
+    * device-equivalence check in vkAcquireDRMDisplayEXT.
+    */
+   wsi->device_fd = wsi->fd;
+
    wsi->syncobj_fd = wsi->fd;
 
-   if (wsi->fd >= 0)
+   if (wsi->fd >= 0) {
       drmSetClientCap(wsi->fd, DRM_CLIENT_CAP_ATOMIC, 1);
+      /* Drop master, so that others (vkAcquireDRMDisplayEXT, KMS-native
+       * compositors after a VT switch) can get master when they open.
+       */
+      int ret = drmDropMaster(wsi->fd);
+      if (ret != 0) {
+         /* Leave a debug note, but ignore it -- if you ask for KHR_display, and
+          * are the second client (not master), but can later acquire a master
+          * fd by whatever means (systemd-logind, whatever), that should be
+          * allowed.
+          */
+         wsi_display_debug("wsi_display_init_wsi: drm fd %d failed to drop master", wsi->fd);
+      }
+   }
 
    wsi->alloc = alloc;
 
@@ -3317,8 +3407,10 @@ wsi_ReleaseDisplayEXT(VkPhysicalDevice physicalDevice,
    if (wsi->fd >= 0) {
       wsi_display_stop_wait_thread(wsi);
 
-      close(wsi->fd);
-      wsi->fd = -1;
+      /* Only close if we have an active drmFd passed in from an Acquire. */
+      if (wsi->fd != wsi->device_fd)
+         close(wsi->fd);
+      wsi->fd = wsi->device_fd;
    }
 
    wsi_display_connector_from_handle(display)->active = false;
@@ -3333,8 +3425,8 @@ wsi_ReleaseDisplayEXT(VkPhysicalDevice physicalDevice,
 #ifdef VK_USE_PLATFORM_XLIB_XRANDR_EXT
 
 static struct wsi_display_connector *
-wsi_display_find_output(struct wsi_device *wsi_device,
-                        xcb_randr_output_t output)
+wsi_display_find_randr_output(struct wsi_device *wsi_device,
+                              xcb_randr_output_t output)
 {
    struct wsi_display *wsi =
       (struct wsi_display *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_DISPLAY];
@@ -3353,9 +3445,9 @@ wsi_display_find_output(struct wsi_device *wsi_device,
  */
 
 static uint32_t
-wsi_display_output_to_connector_id(xcb_connection_t *connection,
-                                   xcb_atom_t *connector_id_atom_p,
-                                   xcb_randr_output_t output)
+wsi_display_randr_output_to_connector_id(xcb_connection_t *connection,
+                                         xcb_atom_t *connector_id_atom_p,
+                                         xcb_randr_output_t output)
 {
    uint32_t connector_id = 0;
    xcb_atom_t connector_id_atom = *connector_id_atom_p;
@@ -3432,8 +3524,8 @@ wsi_display_check_randr_version(xcb_connection_t *connection)
  */
 
 static xcb_randr_output_t
-wsi_display_connector_id_to_output(xcb_connection_t *connection,
-                                   uint32_t connector_id)
+wsi_display_randr_connector_id_to_output(xcb_connection_t *connection,
+                                         uint32_t connector_id)
 {
    if (!wsi_display_check_randr_version(connection))
       return 0;
@@ -3461,8 +3553,8 @@ wsi_display_connector_id_to_output(xcb_connection_t *connection,
       int o;
 
       for (o = 0; o < gsr_r->num_outputs; o++) {
-         if (wsi_display_output_to_connector_id(connection,
-                                                &connector_id_atom, ro[o])
+         if (wsi_display_randr_output_to_connector_id(connection,
+                                                      &connector_id_atom, ro[o])
              == connector_id)
          {
             output = ro[o];
@@ -3478,8 +3570,8 @@ wsi_display_connector_id_to_output(xcb_connection_t *connection,
  * Given a RandR output, find out which screen it's associated with
  */
 static xcb_window_t
-wsi_display_output_to_root(xcb_connection_t *connection,
-                           xcb_randr_output_t output)
+wsi_display_randr_output_to_root(xcb_connection_t *connection,
+                                 xcb_randr_output_t output)
 {
    if (!wsi_display_check_randr_version(connection))
       return 0;
@@ -3585,21 +3677,21 @@ wsi_display_register_x_mode(struct wsi_device *wsi_device,
 }
 
 static struct wsi_display_connector *
-wsi_display_get_output(struct wsi_device *wsi_device,
-                       xcb_connection_t *connection,
-                       xcb_randr_output_t output)
+wsi_display_get_randr_output(struct wsi_device *wsi_device,
+                             xcb_connection_t *connection,
+                             xcb_randr_output_t output)
 {
    struct wsi_display *wsi =
       (struct wsi_display *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_DISPLAY];
    struct wsi_display_connector *connector;
    uint32_t connector_id;
 
-   xcb_window_t root = wsi_display_output_to_root(connection, output);
+   xcb_window_t root = wsi_display_randr_output_to_root(connection, output);
    if (!root)
       return NULL;
 
    /* See if we already have a connector for this output */
-   connector = wsi_display_find_output(wsi_device, output);
+   connector = wsi_display_find_randr_output(wsi_device, output);
 
    if (!connector) {
       xcb_atom_t connector_id_atom = 0;
@@ -3607,9 +3699,9 @@ wsi_display_get_output(struct wsi_device *wsi_device,
       /*
        * Go get the kernel connector ID for this X output
        */
-      connector_id = wsi_display_output_to_connector_id(connection,
-                                                        &connector_id_atom,
-                                                        output);
+      connector_id = wsi_display_randr_output_to_connector_id(connection,
+                                                              &connector_id_atom,
+                                                              output);
 
       /* Any X server with lease support will have this atom */
       if (!connector_id) {
@@ -3673,9 +3765,9 @@ wsi_display_get_output(struct wsi_device *wsi_device,
 }
 
 static xcb_randr_crtc_t
-wsi_display_find_crtc_for_output(xcb_connection_t *connection,
-                                 xcb_window_t root,
-                                 xcb_randr_output_t output)
+wsi_display_find_crtc_for_randr_output(xcb_connection_t *connection,
+                                       xcb_window_t root,
+                                       xcb_randr_output_t output)
 {
    xcb_randr_get_screen_resources_cookie_t gsr_c =
       xcb_randr_get_screen_resources(connection, root);
@@ -3740,26 +3832,28 @@ wsi_AcquireXlibDisplayEXT(VkPhysicalDevice physicalDevice,
       wsi_display_connector_from_handle(display);
    xcb_window_t root;
 
-   /* XXX no support for multiple leases yet */
-   if (wsi->fd >= 0)
+   /* XXX no support for tracking the FD used for a particular VkDisplayKHR, so
+    * make sure that we don't have an existing Acquire active.
+    */
+   if (wsi->fd >= 0 && wsi->fd != wsi->device_fd)
       return VK_ERROR_INITIALIZATION_FAILED;
 
    if (!connector->output) {
-      connector->output = wsi_display_connector_id_to_output(connection,
-                                                             connector->id);
+      connector->output = wsi_display_randr_connector_id_to_output(connection,
+                                                                   connector->id);
 
       /* Check and see if we found the output */
       if (!connector->output)
          return VK_ERROR_INITIALIZATION_FAILED;
    }
 
-   root = wsi_display_output_to_root(connection, connector->output);
+   root = wsi_display_randr_output_to_root(connection, connector->output);
    if (!root)
       return VK_ERROR_INITIALIZATION_FAILED;
 
-   xcb_randr_crtc_t crtc = wsi_display_find_crtc_for_output(connection,
-                                                            root,
-                                                            connector->output);
+   xcb_randr_crtc_t crtc = wsi_display_find_crtc_for_randr_output(connection,
+                                                                  root,
+                                                                  connector->output);
 
    if (!crtc)
       return VK_ERROR_INITIALIZATION_FAILED;
@@ -3801,8 +3895,8 @@ wsi_GetRandROutputDisplayEXT(VkPhysicalDevice physicalDevice,
    struct wsi_device *wsi_device = pdevice->wsi_device;
    xcb_connection_t *connection = XGetXCBConnection(dpy);
    struct wsi_display_connector *connector =
-      wsi_display_get_output(wsi_device, connection,
-                             (xcb_randr_output_t) rrOutput);
+      wsi_display_get_randr_output(wsi_device, connection,
+                                   (xcb_randr_output_t) rrOutput);
 
    if (connector)
       *pDisplay = wsi_display_connector_to_handle(connector);
@@ -4060,9 +4154,39 @@ wsi_AcquireDrmDisplayEXT(VkPhysicalDevice physicalDevice,
    struct wsi_display *wsi =
       (struct wsi_display *) wsi_device->wsi[VK_ICD_WSI_PLATFORM_DISPLAY];
 
-   /* XXX no support for mulitple leases yet */
-   if (wsi->fd >= 0 || !local_drmIsMaster(drmFd))
+   /* "The provided drmFd must correspond to the one owned by the
+    *  physicalDevice.  If not, the error code VK_ERROR_UNKNOWN must be returned.
+    *  The DRM FD must have DRM mast⁠er permissions.  If any error is encountered
+    *  during the acquisition of the display, the call must return the error code
+    *  VK_ERROR_INITIALIZATION_FAILED."
+    *
+    * Since the wsi->fd will only be set to a master fd, we just check if they
+    * provided an fd that matches the device's, and treat the "DRM fd must have
+    * DRM master permissions" as referring to the physicalDevice's.
+    */
+   if (wsi->fd >= 0) {
+      struct stat in_stat = {0}, wsi_stat = {0};
+      if (fstat(drmFd, &in_stat) != 0 ||
+          fstat(wsi->device_fd, &wsi_stat) != 0 ||
+          in_stat.st_dev != wsi_stat.st_dev ||
+          in_stat.st_rdev != wsi_stat.st_rdev) {
+         wsi_display_debug("vkAcquireDRMDisplayEXT(rdev=%d/%d) vs wsi->fd rdev=%d/%d\n",
+            major(in_stat.st_dev), minor(in_stat.st_dev),
+            major(wsi_stat.st_rdev), minor(wsi_stat.st_rdev));
+         return VK_ERROR_UNKNOWN;
+      }
+
+      /* XXX no support for tracking the FD used for a particular VkDisplayKHR, so
+       * make sure that we don't have an existing Acquire active.
+       */
+      if (wsi->fd != wsi->device_fd)
+         return VK_ERROR_INITIALIZATION_FAILED;
+   }
+
+   if (!local_drmIsMaster(drmFd)) {
+      wsi_display_debug("vkAcquireDRMDisplayEXT(drmFd=%d not master)\n", drmFd);
       return VK_ERROR_INITIALIZATION_FAILED;
+   }
 
    struct wsi_display_connector *connector =
          wsi_display_connector_from_handle(display);

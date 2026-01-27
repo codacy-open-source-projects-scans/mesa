@@ -391,6 +391,11 @@ enum isl_format {
    ISL_FORMAT_GFX12_CCS_32BPP_Y0,
    ISL_FORMAT_GFX12_CCS_64BPP_Y0,
    ISL_FORMAT_GFX12_CCS_128BPP_Y0,
+   ISL_FORMAT_GFX12_CCS_8BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_16BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_32BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_64BPP_Ys,
+   ISL_FORMAT_GFX12_CCS_128BPP_Ys,
 
    /* An upper bound on the supported format enumerations */
    ISL_NUM_FORMATS,
@@ -1141,6 +1146,7 @@ typedef uint64_t isl_surf_usage_flags_t;
 #define ISL_SURF_USAGE_MULTI_ENGINE_SEQ_BIT    (1u << 24)
 #define ISL_SURF_USAGE_MULTI_ENGINE_PAR_BIT    (1u << 25)
 #define ISL_SURF_USAGE_SOFTWARE_DETILING       (1u << 26)
+#define ISL_SURF_USAGE_PREFER_4K_ALIGNMENT     (1u << 27)
 /** @} */
 
 /**
@@ -2786,14 +2792,11 @@ isl_surf_get_tile_info(const struct isl_surf *surf,
 
 /**
  * :param surf:                 |in|  The main surface
- * :param hiz_or_mcs_surf:      |in|  HiZ or MCS surface associated with the main
- *                                    surface
  * :returns: true if the given surface supports CCS.
  */
 bool
 isl_surf_supports_ccs(const struct isl_device *dev,
-                      const struct isl_surf *surf,
-                      const struct isl_surf *hiz_or_mcs_surf);
+                      const struct isl_surf *surf);
 
 /** Constructs a HiZ surface for the given main surface.
  *

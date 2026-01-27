@@ -268,10 +268,10 @@ optimizations = [
    (('fadd', a, a), ('fmul', a, 2.0)),
    (('fadd(contract)', a, ('fadd(is_used_once)', a, b)), ('fadd', b, ('fmul', a, 2.0))),
    (('~fmul', a, 0.0), 0.0),
-   (('~fmul', a, -0.0), 0.0, 'true', TestStatus.UNSUPPORTED), # No support for inexactly testing -0.0 inputs
+   (('~fmul', a, -0.0), 0.0),
    # The only effect a*0.0 should have is when 'a' is infinity, -0.0 or NaN
    (('fmul(nsz,nnan)', 'a', 0.0), 0.0),
-   (('fmul(nsz,nnan)', 'a', -0.0), 0.0, 'true', TestStatus.UNSUPPORTED), # No support for nsz testing -0.0 inputs
+   (('fmul(nsz,nnan)', 'a', -0.0), 0.0),
    (('fmulz', a, 0.0), 0.0),
    (('fmulz', a, -0.0), 0.0),
    (('fmulz(nsz)', a, 'b(is_finite_not_zero)'), ('fmul', a, b)),
@@ -294,7 +294,7 @@ optimizations = [
    (('fmul', ('fsign', a), ('fmul', a, a)), ('fmul', ('fabs', a), a)),
    (('fmul', ('fmul', ('fsign', a), a), a), ('fmul', ('fabs', a), a)),
    (('ffma(nsz,nnan)', 0.0, a, b), ('fcanonicalize', b)),
-   (('ffma(nsz,nnan)', -0.0, a, b), ('fcanonicalize', b), 'true', TestStatus.UNSUPPORTED), # No support for nsz testing -0.0 inputs
+   (('ffma(nsz,nnan)', -0.0, a, b), ('fcanonicalize', b)),
    (('ffmaz', 0.0, a, b), ('fadd', 0.0, b)),
    (('ffmaz', -0.0, a, b), ('fadd', 0.0, b)),
    (('ffma(nsz)', a, b, 0.0), ('fmul', a, b)),
@@ -308,11 +308,11 @@ optimizations = [
    (('~ffma', '#a', '#b', c), ('fadd', ('fmul', a, b), c)),
    (('~ffmaz', '#a', '#b', c), ('fadd', ('fmulz', a, b), c)),
    (('flrp(nnan,nsz)', a, b, 0.0), ('fcanonicalize', a)),
-   (('flrp(nnan,nsz)', a, b, -0.0), ('fcanonicalize', a), 'true', TestStatus.UNSUPPORTED), # No support for nsz testing -0.0 inputs
+   (('flrp(nnan,nsz)', a, b, -0.0), ('fcanonicalize', a)),
    (('flrp(nnan,nsz)', a, b, 1.0), ('fcanonicalize', b)),
    (('~flrp', a, a, b), ('fcanonicalize', a)),
    (('flrp(nnan,nsz)', 0.0, a, b), ('fmul', a, b)),
-   (('flrp(nnan,nsz)', -0.0, a, b), ('fmul', a, b), 'true', TestStatus.UNSUPPORTED), # No support for nsz testing -0.0 inputs
+   (('flrp(nnan,nsz)', -0.0, a, b), ('fmul', a, b)),
 
    # flrp(a, a + b, c) => a + flrp(0, b, c) => a + (b * c)
    (('~flrp', a, ('fadd(is_used_once)', a, b), c), ('fadd', ('fmul', b, c), a)),
@@ -541,19 +541,19 @@ optimizations.extend([
    (('fdot4', ('vec4', a, 0.0, 0.0, 0.0), b), ('fmul', a, 'b.x'), 'true', TestStatus.XFAIL), # XFAIL is that fdot(vec(-1.0, 0.0...), 0.0) produces -0.0 instead of 0.0.
    (('fdot4', ('vec4', a, b,   0.0, 0.0), c), ('fdot2', ('vec2', a, b), c), 'true', TestStatus.XFAIL),
    (('fdot4', ('vec4', a, b,   c,   0.0), d), ('fdot3', ('vec3', a, b, c), d), 'true', TestStatus.XFAIL),
-   (('fdot4', 'a(w_is_zero)', b), ('fdot3', 'a.xyz', 'b.xyz')),
-   (('fdot4', 'a(z_is_zero)', b), ('fdot3', 'a.xyw', 'b.xyw')),
-   (('fdot4', 'a(y_is_zero)', b), ('fdot3', 'a.xzw', 'b.xzw')),
-   (('fdot4', 'a(x_is_zero)', b), ('fdot3', 'a.yzw', 'b.yzw')),
+   (('fdot4', 'a(w_is_zero)', b), ('fdot3', 'a.xyz', 'b.xyz'), 'true', TestStatus.XFAIL), # XFAIL is that fdot((1,-1,0,0), (0,.12345,1,inf) produces -.12345 instead of -nan)
+   (('fdot4', 'a(z_is_zero)', b), ('fdot3', 'a.xyw', 'b.xyw'), 'true', TestStatus.XFAIL),
+   (('fdot4', 'a(y_is_zero)', b), ('fdot3', 'a.xzw', 'b.xzw'), 'true', TestStatus.XFAIL),
+   (('fdot4', 'a(x_is_zero)', b), ('fdot3', 'a.yzw', 'b.yzw'), 'true', TestStatus.XFAIL),
 
    (('fdot3', ('vec3', a, 0.0, 0.0), b), ('fmul', a, 'b.x'), 'true', TestStatus.XFAIL),
    (('fdot3', ('vec3', a, b,   0.0), c), ('fdot2', ('vec2', a, b), c), 'true', TestStatus.XFAIL),
-   (('fdot3', 'a(x_is_zero)', b), ('fdot2', 'a.yz', 'b.yz')),
-   (('fdot3', 'a(y_is_zero)', b), ('fdot2', 'a.xz', 'b.xz')),
+   (('fdot3', 'a(x_is_zero)', b), ('fdot2', 'a.yz', 'b.yz'), 'true', TestStatus.XFAIL),
+   (('fdot3', 'a(y_is_zero)', b), ('fdot2', 'a.xz', 'b.xz'), 'true', TestStatus.XFAIL),
    (('fdot3', 'a(z_is_zero)', b), ('fdot2', 'a.xy', 'b.xy'), 'true', TestStatus.XFAIL),
 
    (('fdot2', ('vec2', a, 0.0), b), ('fmul', a, 'b.x'), 'true', TestStatus.XFAIL),
-   (('fdot2', 'a(x_is_zero)', b), ('fmul', 'a.y', 'b.y')),
+   (('fdot2', 'a(x_is_zero)', b), ('fmul', 'a.y', 'b.y'), 'true', TestStatus.XFAIL),
    (('fdot2', 'a(y_is_zero)', b), ('fmul', 'a.x', 'b.x'), 'true', TestStatus.XFAIL),
    (('fdot2', a, 1.0), ('fadd', 'a.x', 'a.y')),
 
@@ -974,8 +974,8 @@ optimizations.extend([
    (('fneg', ('fmin(is_used_once)', ('fneg', a), ('fneg', b))), ('fmax', a, b)),
    (('fneg', ('fmax(is_used_once)', ('fneg', a), '#b')), ('fmin', a, ('fneg', b))),
    (('fneg', ('fmin(is_used_once)', ('fneg', a), '#b')), ('fmax', a, ('fneg', b))),
-   (('fmin(nsz)', a, -0.0), ('fmin', a, 0.0), 'true', TestStatus.UNSUPPORTED), # No support for nsz testing -0.0 inputs
-   (('fmax(nsz)', a, -0.0), ('fmax', a, 0.0), 'true', TestStatus.UNSUPPORTED), # No support for nsz testing -0.0 inputs
+   (('fmin(nsz)', a, -0.0), ('fmin', a, 0.0)),
+   (('fmax(nsz)', a, -0.0), ('fmax', a, 0.0)),
 ])
 
 for op in ['ine', 'ieq', 'ilt', 'ige', 'ult', 'uge', 'bitz', 'bitnz',
@@ -1536,12 +1536,12 @@ optimizations.extend([
    (('fall_equal3', a, b), ('seq', ('fany_nequal3', a, b), 0.0), 'options->lower_vector_cmp'),
    (('fall_equal4', a, b), ('seq', ('fany_nequal4', a, b), 0.0), 'options->lower_vector_cmp'),
    (('fall_equal8', a, b), ('seq', ('fany_nequal8', a, b), 0.0), 'options->lower_vector_cmp'),
-   (('fall_equal16', a, b), ('seq', ('fany_nequal16', a, b), 0.0), 'options->lower_vector_cmp'),
+   (('fall_equal16', a, b), ('seq', ('fany_nequal16', a, b), 0.0), 'options->lower_vector_cmp', TestStatus.UNSUPPORTED), # all test inputs skipped
    (('fany_nequal2', a, b), ('fmax', ('sne', 'a.x', 'b.x'), ('sne', 'a.y', 'b.y')), 'options->lower_vector_cmp'),
    (('fany_nequal3', a, b), ('fsat', ('fdot3', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
    (('fany_nequal4', a, b), ('fsat', ('fdot4', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
    (('fany_nequal8', a, b), ('fsat', ('fdot8', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
-   (('fany_nequal16', a, b), ('fsat', ('fdot16', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp'),
+   (('fany_nequal16', a, b), ('fsat', ('fdot16', ('sne', a, b), ('sne', a, b))), 'options->lower_vector_cmp', TestStatus.UNSUPPORTED), # all test inputs skipped
 
    # Vulkan allows us to use any rounding mode, so choose rtz because it's simple.
    # Avoid some NaNs being converted to Inf if the lsb are cut off.
@@ -2048,7 +2048,7 @@ for pack, bits, compbits in [('pack_64_2x32', 64, 32), ('pack_32_2x16', 32, 16)]
         ((unpack, (pack + '_split', a, b)), ('vec2', a, b)),
         ((unpack, (pack, a)), a),
         ((pack + '_split', (unpack + '_split_x', a), (unpack + '_split_y', a)), a),
-        ((pack + '_split', (unpack, a), (unpack + '.y', a)), a, 'true', TestStatus.UNSUPPORTED),
+        ((pack + '_split', (unpack, a), (unpack + '.y', a)), a),
         ((pack, ('vec2', (unpack + '_split_x', a), (unpack + '_split_y', a))), a),
         ((pack, (unpack, a)), a),
     ]
@@ -2180,13 +2180,13 @@ optimizations.extend([
 
    # Mixed 16-bit/8-bit loads vectorized to 8-bit vector load and then lowered to 32-bit
    (('ior', ('u2u16', ('unpack_32_4x8', a)), ('ishl', ('u2u16', ('unpack_32_4x8.y', a)), 8)),
-    ('unpack_32_2x16_split_x', a), '!options->lower_unpack_32_2x16_split', TestStatus.UNSUPPORTED),
+    ('unpack_32_2x16_split_x', a), '!options->lower_unpack_32_2x16_split'),
    (('ior', ('u2u16', ('unpack_32_4x8.z', a)), ('ishl', ('u2u16', ('unpack_32_4x8.w', a)), 8)),
-    ('unpack_32_2x16_split_y', a), '!options->lower_unpack_32_2x16_split', TestStatus.UNSUPPORTED),
+    ('unpack_32_2x16_split_y', a), '!options->lower_unpack_32_2x16_split'),
 
    # Prefer 16bit unpack/extract because it's easier to vectorize
-   (('i2i16', ('unpack_32_4x8(xz_components_unused).y', a)), ('extract_i8', ('unpack_32_2x16.x', a), 1), '!options->lower_extract_byte', TestStatus.UNSUPPORTED),
-   (('i2i16', ('unpack_32_4x8(xz_components_unused).w', a)), ('extract_i8', ('unpack_32_2x16.y', a), 1), '!options->lower_extract_byte', TestStatus.UNSUPPORTED),
+   (('i2i16', ('unpack_32_4x8(xz_components_unused).y', a)), ('extract_i8', ('unpack_32_2x16.x', a), 1), '!options->lower_extract_byte'),
+   (('i2i16', ('unpack_32_4x8(xz_components_unused).w', a)), ('extract_i8', ('unpack_32_2x16.y', a), 1), '!options->lower_extract_byte'),
 
    (('extract_u16', ('extract_i16', a, b), 0), ('extract_u16', a, b)),
    (('extract_u16', ('extract_u16', a, b), 0), ('extract_u16', a, b)),
@@ -2785,8 +2785,8 @@ optimizations.extend([
 
    # udiv_aligned_4 assumes the source is a multiple of 4 specifically to enable
    # this identity. Usually this transform would require masking.
-   (('amul', ('udiv_aligned_4', a), 4), a, 'true', TestStatus.UNSUPPORTED),
-   (('imul', ('udiv_aligned_4', a), 4), a, 'true', TestStatus.UNSUPPORTED),
+   (('amul', ('udiv_aligned_4', a), 4), a),
+   (('imul', ('udiv_aligned_4', a), 4), a),
 
    (('umul24', a, b),
     ('imul', ('iand', a, 0xffffff), ('iand', b, 0xffffff)),
@@ -2796,27 +2796,21 @@ optimizations.extend([
     '!options->has_umad24'),
 
    # Relaxed 24bit ops
-   (('imul24_relaxed', a, b), ('imul24', a, b),
-    '!options->has_mul24_relaxed && options->has_imul24', TestStatus.UNSUPPORTED),
-   (('imul24_relaxed', a, b), ('imul', a, b),
-    '!options->has_mul24_relaxed && !options->has_imul24', TestStatus.UNSUPPORTED),
-   (('umad24_relaxed', a, b, c), ('umad24', a, b, c),
-    'options->has_umad24', TestStatus.UNSUPPORTED),
-   (('umad24_relaxed', a, b, c), ('iadd', ('umul24_relaxed', a, b), c),
-    '!options->has_umad24', TestStatus.UNSUPPORTED),
-   (('umul24_relaxed', a, b), ('umul24', a, b),
-    '!options->has_mul24_relaxed && options->has_umul24', TestStatus.UNSUPPORTED),
-   (('umul24_relaxed', a, b), ('imul', a, b),
-    '!options->has_mul24_relaxed && !options->has_umul24', TestStatus.UNSUPPORTED),
+   (('imul24_relaxed', a, b), ('imul24', a, b), '!options->has_mul24_relaxed && options->has_imul24'),
+   (('imul24_relaxed', a, b), ('imul', a, b), '!options->has_mul24_relaxed && !options->has_imul24'),
+   (('umad24_relaxed', a, b, c), ('umad24', a, b, c),  'options->has_umad24'),
+   (('umad24_relaxed', a, b, c), ('iadd', ('umul24_relaxed', a, b), c), '!options->has_umad24'),
+   (('umul24_relaxed', a, b), ('umul24', a, b), '!options->has_mul24_relaxed && options->has_umul24'),
+   (('umul24_relaxed', a, b), ('imul', a, b), '!options->has_mul24_relaxed && !options->has_umul24'),
 
-   (('imad24_ir3', a, b, 0), ('imul24', a, b), 'true', TestStatus.UNSUPPORTED),
-   (('imad24_ir3', a, 0, c), (c), 'true', TestStatus.UNSUPPORTED),
-   (('imad24_ir3', a, 1, c), ('iadd', a, c), 'true', TestStatus.UNSUPPORTED),
+   (('imad24_ir3', a, b, 0), ('imul24', a, b)),
+   (('imad24_ir3', a, 0, c), (c)),
+   (('imad24_ir3', a, 1, c), ('iadd', a, c)), # this is not correct -- a's sign extension gets dropped.
 
    # if first two srcs are const, crack apart the imad so constant folding
    # can clean up the imul:
    # TODO ffma should probably get a similar rule:
-   (('imad24_ir3', '#a', '#b', c), ('iadd', ('imul', a, b), c), 'true', TestStatus.UNSUPPORTED),
+   (('imad24_ir3', '#a', '#b', c), ('iadd', ('imul24', a, b), c)),
 
    # These will turn 24b address/offset calc back into 32b shifts, but
    # it should be safe to get back some of the bits of precision that we
@@ -2825,8 +2819,8 @@ optimizations.extend([
    (('imul24', a, '#b@32(is_neg_power_of_two)'), ('ineg', ('ishl', a, ('find_lsb', ('iabs', b)))), '!options->lower_bitops'),
    (('imul24', a, 0), (0)),
 
-   (('imul_high@16', a, b), ('i2i16', ('ishr', ('imul24_relaxed', ('i2i32', a), ('i2i32', b)), 16)), 'options->lower_mul_high16', TestStatus.UNSUPPORTED),
-   (('umul_high@16', a, b), ('u2u16', ('ushr', ('umul24_relaxed', ('u2u32', a), ('u2u32', b)), 16)), 'options->lower_mul_high16', TestStatus.UNSUPPORTED),
+   (('imul_high@16', a, b), ('i2i16', ('ishr', ('imul24_relaxed', ('i2i32', a), ('i2i32', b)), 16)), 'options->lower_mul_high16'),
+   (('umul_high@16', a, b), ('u2u16', ('ushr', ('umul24_relaxed', ('u2u32', a), ('u2u32', b)), 16)), 'options->lower_mul_high16'),
 
    # Optimize vec2 unsigned comparison predicates to usub_sat with clamp.
    (('b2i16', ('vec2', ('ult', 'a@16', b), ('ult', 'c@16', d))),
@@ -2961,6 +2955,11 @@ for x, y in itertools.product(['f', 'u', 'i'], ['f', 'u', 'i']):
    b2y = 'b2f' if y == 'f' else 'b2i'
    x2yN = '{}2{}'.format(x, y)
    optimizations.append(((x2yN, (b2x, a)), (b2y, a)))
+
+optimizations += [
+   (('f2f16_rtz', ('b2f', a)), ('b2f16', a)),
+   (('f2f16_rtne', ('b2f', a)), ('b2f16', a)),
+]
 
 # Optimize away x2xN(a@N)
 for t in ['int', 'uint', 'float', 'bool']:
@@ -3097,14 +3096,21 @@ optimizations += [
 
 # Optimize fmin/fmax with constant followed by conversion to 16bit
 # Assume 16bit fmin/fmax is faster.
-optimizations += [
-   (('f2f16', ('fmax(is_used_once)', a, '#b')), ('fmax', ('f2f16', a), ('f2f16', b)), 'options->support_16bit_alu'),
-   (('f2f16', ('fmin(is_used_once)', a, '#b')), ('fmin', ('f2f16', a), ('f2f16', b)), 'options->support_16bit_alu'),
-   (('f2f16', ('vec2(is_used_once)', ('fmax(is_used_once)', a, '#b'), ('fmax(is_used_once)', c, '#d'))),
-    ('fmax', ('f2f16', ('vec2', a, c)), ('f2f16', ('vec2', b, d))), 'options->support_16bit_alu'),
-   (('f2f16', ('vec2(is_used_once)', ('fmin(is_used_once)', a, '#b'), ('fmin(is_used_once)', c, '#d'))),
-    ('fmin', ('f2f16', ('vec2', a, c)), ('f2f16', ('vec2', b, d))), 'options->support_16bit_alu'),
+for f2f16 in ['f2f16', 'f2f16_rtz', 'f2f16_rtne']:
+   optimizations += [
+      ((f2f16, ('fmax(is_used_once)', a, '#b')), ('fmax', (f2f16, a), (f2f16, b)), 'options->support_16bit_alu'),
+      ((f2f16, ('fmin(is_used_once)', a, '#b')), ('fmin', (f2f16, a), (f2f16, b)), 'options->support_16bit_alu'),
+      ((f2f16, ('vec2(is_used_once)', ('fmax(is_used_once)', a, '#b'), ('fmax(is_used_once)', c, '#d'))),
+      ('fmax', (f2f16, ('vec2', a, c)), (f2f16, ('vec2', b, d))), 'options->support_16bit_alu'),
+      ((f2f16, ('vec2(is_used_once)', ('fmin(is_used_once)', a, '#b'), ('fmin(is_used_once)', c, '#d'))),
+      ('fmin', (f2f16, ('vec2', a, c)), (f2f16, ('vec2', b, d))), 'options->support_16bit_alu'),
 
+      ((f2f16, ('f2f32', 'a@16')), ('fcanonicalize', a)),
+      ((f2f16, ('bcsel', a, '#b', c)), ('bcsel', a, (f2f16, b), (f2f16, c)), 'options->support_16bit_alu'),
+      ((f2f16, ('bcsel', a, b, '#c')), ('bcsel', a, (f2f16, b), (f2f16, c)), 'options->support_16bit_alu'),
+   ]
+
+optimizations += [
    (('pack_half_2x16_rtz_split', ('fmax(is_used_once)', a, '#b'), ('fmax(is_used_once)', c, '#d')),
     ('pack_32_2x16', ('fmax', ('unpack_32_2x16', ('pack_half_2x16_rtz_split', a, c)), ('unpack_32_2x16', ('pack_half_2x16_rtz_split', b, d)))),
     'options->vectorize_vec2_16bit'),
@@ -3124,6 +3130,13 @@ optimizations += [
     ('bcsel', a, ('pack_half_2x16_rtz_split', b, d), ('pack_half_2x16_rtz_split', c, e))),
 
    (('pack_half_2x16_rtz_split', ('b2f', 'a@1'), ('b2f', a)), ('bcsel', a, 0x3c003c00, 0)),
+
+   (('pack_32_2x16_split', 'a(is_undef)', ('bcsel', b, '#c', d)),
+    ('bcsel', b, ('pack_32_2x16_split', 0, c), ('pack_32_2x16_split', a, d)),
+    'true', TestStatus.UNSUPPORTED),
+   (('pack_32_2x16_split', 'a(is_undef)', ('bcsel', b, c, '#d')),
+    ('bcsel', b, ('pack_32_2x16_split', a, c), ('pack_32_2x16_split', 0, d)),
+    'true', TestStatus.UNSUPPORTED),
 ]
 
 # Some operations such as iadd have the property that the bottom N bits of the
@@ -3469,7 +3482,7 @@ optimizations.extend([
      ('bcsel', ('!flt', ('!fabs', a), math.ldexp(1.0, -14)),
                ('iand', a, 1 << 31),
                ('!f2f32', ('!f2f16_rtne', a))),
-     'options->lower_fquantize2f16', TestStatus.UNSUPPORTED), # All test inputs skipped.
+     'options->lower_fquantize2f16'),
     ])
 
 for s in range(0, 31):
@@ -3488,7 +3501,7 @@ for s in range(0, 31):
 # NaN propagation: Binary opcodes. If any operand is NaN, replace it with NaN.
 # (unary opcodes with NaN are evaluated by nir_opt_constant_folding, not here)
 for op in ['fadd', 'fdiv', 'fmod', 'fmul', 'fpow', 'frem', 'fsub']:
-    optimizations += [((op, '#a(is_nan)', b), NAN, 'true', TestStatus.UNSUPPORTED if op == 'fpow' else TestStatus.PASS)] # All inputs skipped in the fpow case.
+    optimizations += [((op, '#a(is_nan)', b), NAN, 'true', TestStatus.XFAIL if op == 'fpow' else TestStatus.PASS)] # XFAIL is fpow(NaN, 0.0) producing NaN instead of 1.0.
     optimizations += [((op, a, '#b(is_nan)'), NAN, 'true', TestStatus.XFAIL if op == 'fpow' else TestStatus.PASS)] # some opcodes are not commutative.  XFAIL is fpow(1.0, NaN) producing NaN instead of 1.0.
 
 # NaN propagation: Trinary opcodes. If any operand is NaN, replace it with NaN.
@@ -3502,7 +3515,7 @@ for op in ['fmin', 'fmax']:
     optimizations += [((op, '#a(is_nan)', b), b)] # commutative
 
 # NaN propagation: ldexp is NaN if the first operand is NaN.
-optimizations += [(('ldexp', '#a(is_nan)', b), NAN, 'true', TestStatus.UNSUPPORTED)] # all inputs skipped
+optimizations += [(('ldexp', '#a(is_nan)', b), NAN, 'true', TestStatus.XFAIL)] # XFAIL is ldexp(NaN, 0.0) producing NaN instead of 0.0.
 
 # NaN propagation: Dot opcodes. If any component is NaN, replace it with NaN.
 for op in ['fdot2', 'fdot3', 'fdot4', 'fdot5', 'fdot8', 'fdot16']:
@@ -3702,7 +3715,7 @@ late_optimizations = [
 
    # Drivers do not actually implement udiv_aligned_4, it is just used to
    # optimize scratch lowering.
-   (('udiv_aligned_4', a), ('ushr', a, 2), 'true', TestStatus.UNSUPPORTED),
+   (('udiv_aligned_4', a), ('ushr', a, 2)),
 ]
 
 for int_sz in (8, 16, 32):
@@ -3852,10 +3865,10 @@ late_optimizations.extend([
 
    (('fsqrt', ('fsat(is_used_once)', 'a(cannot_add_output_modifier)')), ('fsat', ('fsqrt', a))),
 
-   (('fdot2', a, b), ('fdot2_replicated', a, b), 'options->fdot_replicates', TestStatus.UNSUPPORTED),
-   (('fdot3', a, b), ('fdot3_replicated', a, b), 'options->fdot_replicates', TestStatus.UNSUPPORTED),
-   (('fdot4', a, b), ('fdot4_replicated', a, b), 'options->fdot_replicates', TestStatus.UNSUPPORTED),
-   (('fdph', a, b), ('fdph_replicated', a, b), 'options->fdot_replicates', TestStatus.UNSUPPORTED),
+   (('fdot2', a, b), ('fdot2_replicated', a, b), 'options->fdot_replicates'),
+   (('fdot3', a, b), ('fdot3_replicated', a, b), 'options->fdot_replicates'),
+   (('fdot4', a, b), ('fdot4_replicated', a, b), 'options->fdot_replicates'),
+   (('fdph', a, b), ('fdph_replicated', a, b), 'options->fdot_replicates'),
 
    (('~flrp', ('fadd(is_used_once)', a, b), ('fadd(is_used_once)', a, c), d), ('fadd', ('flrp', b, c, d), a)),
 
@@ -4151,9 +4164,9 @@ distribute_src_mods = [
    # Try to remove some spurious negations rather than pushing them down.
    (('fmul', ('fneg', a), ('fneg', b)), ('fmul', a, b)),
    (('ffma', ('fneg', a), ('fneg', b), c), ('ffma', a, b, c)),
-   (('fdot2_replicated', ('fneg', a), ('fneg', b)), ('fdot2_replicated', a, b), 'true', TestStatus.UNSUPPORTED),
-   (('fdot3_replicated', ('fneg', a), ('fneg', b)), ('fdot3_replicated', a, b), 'true', TestStatus.UNSUPPORTED),
-   (('fdot4_replicated', ('fneg', a), ('fneg', b)), ('fdot4_replicated', a, b), 'true', TestStatus.UNSUPPORTED),
+   (('fdot2_replicated', ('fneg', a), ('fneg', b)), ('fdot2_replicated', a, b)),
+   (('fdot3_replicated', ('fneg', a), ('fneg', b)), ('fdot3_replicated', a, b)),
+   (('fdot4_replicated', ('fneg', a), ('fneg', b)), ('fdot4_replicated', a, b)),
    (('fneg(is_only_used_as_float)', ('fneg', a)), a),
 
    (('fneg', ('fmul(is_used_once)', a, b)), ('fmul', ('fneg', a), b)),
@@ -4168,13 +4181,13 @@ distribute_src_mods = [
    (('fneg', ('fmin(is_used_once)', a, b)), ('fmax', ('fneg', a), ('fneg', b))),
    (('fneg', ('fmax(is_used_once)', a, b)), ('fmin', ('fneg', a), ('fneg', b))),
 
-   (('fneg', ('fdot2_replicated(is_used_once)', a, b)), ('fdot2_replicated', ('fneg', a), b), 'true', TestStatus.UNSUPPORTED),
-   (('fneg', ('fdot3_replicated(is_used_once)', a, b)), ('fdot3_replicated', ('fneg', a), b), 'true', TestStatus.UNSUPPORTED),
-   (('fneg', ('fdot4_replicated(is_used_once)', a, b)), ('fdot4_replicated', ('fneg', a), b), 'true', TestStatus.UNSUPPORTED),
+   (('fneg', ('fdot2_replicated(is_used_once)', a, b)), ('fdot2_replicated', ('fneg', a), b), 'true', TestStatus.XFAIL), # -fdot2(-1, 0) replacement produces 0 instead of -0.
+   (('fneg', ('fdot3_replicated(is_used_once)', a, b)), ('fdot3_replicated', ('fneg', a), b), 'true', TestStatus.XFAIL),
+   (('fneg', ('fdot4_replicated(is_used_once)', a, b)), ('fdot4_replicated', ('fneg', a), b), 'true', TestStatus.XFAIL),
 
    # fdph works mostly like fdot, but to get the correct result, the negation
    # must be applied to the second source.
-   (('fneg', ('fdph_replicated(is_used_once)', a, b)), ('fdph_replicated', a, ('fneg', b)), 'true', TestStatus.UNSUPPORTED),
+   (('fneg', ('fdph_replicated(is_used_once)', a, b)), ('fdph_replicated', a, ('fneg', b)), 'true', TestStatus.XFAIL),
 
    (('fneg', ('fsign(is_used_once)', a)), ('fsign', ('fneg', a))),
    (('fabs', ('fsign(is_used_once)', a)), ('fsign', ('fabs', a))),
@@ -4188,8 +4201,6 @@ for t in ['f', 'i']:
    add_used_once = '~{}add(is_used_once)'.format(t)
    add = '~{}add'.format(t)
    mul = '~{}mul'.format(t)
-   # With so many inputs, we always get an inf or a nan in testing.
-   expected = TestStatus.UNSUPPORTED if t == 'f' else TestStatus.PASS
 
    # Variable names used below were selected based on these layouts:
    #     mat4             mat4         vec4
@@ -4209,10 +4220,10 @@ for t in ['f', 'i']:
    step8 = (add, (add, (add, (mul, 'cc', 'gg'), (mul, 'dd', 'hh')), (mul, 'ee', 'ii')), (mul, 'ff', 'jj'))
 
    # This finds and replaces common (mat4*mat4)*vec4 with something that will get optimised down to mat4*(mat4*vec4)
-   mat_mul_optimizations += [((add_first, (add, (add, (mul, step1, 'gg'), (mul, step2, 'hh')), (mul, step3, 'ii')), (mul, step4, 'jj')), (add, (add, (add, (mul, step5, 'a'), (mul, step6, 'b')), (mul, step7, 'c')), (mul, step8, 'd')), 'true', expected)]
+   mat_mul_optimizations += [((add_first, (add, (add, (mul, step1, 'gg'), (mul, step2, 'hh')), (mul, step3, 'ii')), (mul, step4, 'jj')), (add, (add, (add, (mul, step5, 'a'), (mul, step6, 'b')), (mul, step7, 'c')), (mul, step8, 'd')))]
 
    # This helps propagate the above improvement further up the mul chain e.g. mat4*mat4*mat4*vec4 to (mat4*vec4)*mat4*mat4
-   mat_mul_optimizations += [((add_first, (add, (add, (mul, 'gg', step1), (mul,'hh', step2)), (mul, 'ii', step3)), (mul, 'jj', step4)), (add, (add, (add, (mul, step5, 'a'), (mul, step6, 'b')), (mul, step7, 'c')), (mul, step8, 'd')), 'true', expected)]
+   mat_mul_optimizations += [((add_first, (add, (add, (mul, 'gg', step1), (mul,'hh', step2)), (mul, 'ii', step3)), (mul, 'jj', step4)), (add, (add, (add, (mul, step5, 'a'), (mul, step6, 'b')), (mul, step7, 'c')), (mul, step8, 'd')))]
 
    # Below handles a real world shader that looks like this mat4*mat4*vec4(xyz, 1.0) where the the multiplication of the 1.0 constant has been optimised away
    step5_no_w_mul = (add, (add, (add, (mul, 'q', 'gg'), (mul, 'r', 'hh')), (mul, 's', 'ii')), 't')
@@ -4220,7 +4231,7 @@ for t in ['f', 'i']:
    step7_no_w_mul = (add, (add, (add, (mul, 'y', 'gg'), (mul, 'z', 'hh')), (mul, 'aa', 'ii')), 'bb')
    step8_no_w_mul = (add, (add, (add, (mul, 'cc', 'gg'), (mul, 'dd', 'hh')), (mul, 'ee', 'ii')), 'ff')
 
-   mat_mul_optimizations += [((add_first, (add, (add, (mul, step1, 'gg'), (mul, step2, 'hh')), (mul, step3, 'ii')), step4), (add, (add, (add, (mul, step5_no_w_mul, 'a'), (mul, step6_no_w_mul, 'b')), (mul, step7_no_w_mul, 'c')), (mul, step8_no_w_mul, 'd')), 'true', expected)]
+   mat_mul_optimizations += [((add_first, (add, (add, (mul, step1, 'gg'), (mul, step2, 'hh')), (mul, step3, 'ii')), step4), (add, (add, (add, (mul, step5_no_w_mul, 'a'), (mul, step6_no_w_mul, 'b')), (mul, step7_no_w_mul, 'c')), (mul, step8_no_w_mul, 'd')))]
 
    # Below handles a real world shader that looks like this mat4*mat4*vec4(xy, 0.0, 1.0) where the the multiplication of the 0.0 and 1.0 constants have been optimised away
    step5_zero_z_no_w_mul = (add, (add, (mul, 'q', 'gg'), (mul, 'r', 'hh')), 't')
@@ -4228,7 +4239,7 @@ for t in ['f', 'i']:
    step7_zero_z_no_w_mul = (add, (add, (mul, 'y', 'gg'), (mul, 'z', 'hh')), 'bb')
    step8_zero_z_no_w_mul = (add, (add, (mul, 'cc', 'gg'), (mul, 'dd', 'hh')), 'ff')
 
-   mat_mul_optimizations += [((add_first, (add, (mul, step1, 'gg'), step4), (mul, step2, 'hh')), (add, (add, (add, (mul, step5_zero_z_no_w_mul, 'a'), (mul, step6_zero_z_no_w_mul, 'b')), (mul, step7_zero_z_no_w_mul, 'c')), (mul, step8_zero_z_no_w_mul, 'd')), 'true', expected)]
+   mat_mul_optimizations += [((add_first, (add, (mul, step1, 'gg'), step4), (mul, step2, 'hh')), (add, (add, (add, (mul, step5_zero_z_no_w_mul, 'a'), (mul, step6_zero_z_no_w_mul, 'b')), (mul, step7_zero_z_no_w_mul, 'c')), (mul, step8_zero_z_no_w_mul, 'd')))]
 
 before_lower_int64_optimizations = [
     # The i2i64(a) implies that 'a' has at most 32-bits of data.
