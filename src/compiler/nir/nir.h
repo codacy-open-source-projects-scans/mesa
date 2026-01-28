@@ -2384,6 +2384,15 @@ typedef enum nir_tex_src_type {
    /** Second backend-specific vec4 tex src argument, see nir_tex_src_backend1. */
    nir_tex_src_backend2,
 
+   /** VK_QCOM_image_processing sources */
+   nir_tex_src_ref_coord,
+   nir_tex_src_texture_2_deref,
+   nir_tex_src_sampler_2_deref,
+   nir_tex_src_texture_2_handle,
+   nir_tex_src_sampler_2_handle,
+   nir_tex_src_block_size,
+   nir_tex_src_box_size,
+
    nir_num_tex_src_types
 } nir_tex_src_type;
 
@@ -2450,6 +2459,26 @@ typedef enum nir_texop {
    nir_texop_tex_type_nv,
    /** Maps to TXQ.SAMPLER_POS */
    nir_texop_sample_pos_nv,
+   /**
+    * Returns the weighted average of a region of texels in the texture, using
+    * the filter kernel sampled from ref_texture. (VK_QCOM_image_processing)
+   */
+   nir_texop_sample_weighted_qcom,
+   /**
+    * Returns the result of a weighted average of the texels in a box of size
+    * box_size centered at coord. (VK_QCOM_image_processing)
+   */
+   nir_texop_box_filter_qcom,
+   /**
+    * Returns the result of SAD/SSD block matching on 2D textures.
+    * (VK_QCOM_image_processing)
+    *
+    * The textures are always 2D dim, and the coord and ref_coord texture
+    * sources are ivec2s.  The size of the block is specified in the block_size
+    * texture source (uvec2 from SPIRV, packed u32 in the backend)
+   */
+   nir_texop_block_match_sad_qcom,
+   nir_texop_block_match_ssd_qcom,
 } nir_texop;
 
 /** Represents a texture instruction */
@@ -2493,7 +2522,10 @@ typedef struct nir_tex_instr {
    /** Number of sources */
    unsigned num_srcs;
 
-   /** Number of components in the coordinate, if any */
+   /** Number of components in the coordinate, if any.
+    *
+    * This applies to the nir_tex_src_coord and nir_tex_src_ref_coord src types.
+    */
    unsigned coord_components;
 
    /** True if the texture instruction acts on an array texture */
@@ -5502,10 +5534,12 @@ typedef bool (*nir_should_vectorize_mem_func)(unsigned align_mul,
 
 typedef struct nir_load_store_vectorize_options {
    nir_should_vectorize_mem_func callback;
+   unsigned (*round_up_components)(unsigned);
    nir_variable_mode modes;
    nir_variable_mode robust_modes;
    void *cb_data;
    bool has_shared2_amd;
+   bool round_up_store_components;
 } nir_load_store_vectorize_options;
 
 bool nir_opt_load_store_vectorize(nir_shader *shader, const nir_load_store_vectorize_options *options);

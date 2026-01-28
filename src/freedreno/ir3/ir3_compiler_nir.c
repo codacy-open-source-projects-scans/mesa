@@ -1859,9 +1859,48 @@ emit_intrinsic_image_size_tex(struct ir3_context *ctx,
    }
 }
 
+struct bindless_ref_info {
+   uint32_t desc_set;
+
+   /* Index value (encodes vulkan's binding+index) as a src, which you may use
+    * if not encoding a constant value.
+    */
+   struct ir3_instruction *index;
+
+   bool is_const;
+   uint32_t const_index;
+};
+
+static struct bindless_ref_info
+get_bindless_ref(struct ir3_context *ctx, nir_src *src, bool is_sampler)
+{
+   struct bindless_ref_info info = {0};
+   if (!src) {
+      /* Treat an unused index as a constant 0.*/
+      info.is_const = true;
+      return info;
+   }
+
+   if (is_sampler)
+      ctx->so->bindless_samp = true;
+   else
+      ctx->so->bindless_tex = true;
+
+   nir_intrinsic_instr *bindless_resource = ir3_bindless_resource(*src);
+   assert(bindless_resource);
+   info.desc_set = nir_intrinsic_desc_set(bindless_resource);
+   info.index = ir3_get_src(ctx, &bindless_resource->src[0])[0];
+   if (nir_src_is_const(bindless_resource->src[0])) {
+      info.is_const = true;
+      info.const_index = nir_src_as_uint(bindless_resource->src[0]);
+   }
+
+   return info;
+}
+
 static struct tex_src_info
 get_bindless_samp_src(struct ir3_context *ctx, nir_src *tex,
-                      nir_src *samp)
+                      nir_src *samp, nir_src *tex2, nir_src *samp2)
 {
    struct ir3_builder *b = &ctx->build;
    struct tex_src_info info = {0};
@@ -1871,43 +1910,59 @@ get_bindless_samp_src(struct ir3_context *ctx, nir_src *tex,
    /* Gather information required to determine which encoding to
     * choose as well as for prefetch.
     */
-   nir_intrinsic_instr *bindless_tex = NULL;
-   bool tex_const;
-   if (tex) {
-      ctx->so->bindless_tex = true;
-      bindless_tex = ir3_bindless_resource(*tex);
-      assert(bindless_tex);
-      info.tex_base = nir_intrinsic_desc_set(bindless_tex);
-      tex_const = nir_src_is_const(bindless_tex->src[0]);
-      if (tex_const)
-         info.tex_idx = nir_src_as_uint(bindless_tex->src[0]);
-   } else {
-      /* To simplify some of the logic below, assume the index is
-       * constant 0 when it's not enabled.
+   struct bindless_ref_info tex_info = get_bindless_ref(ctx, tex, false);
+   struct bindless_ref_info samp_info = get_bindless_ref(ctx, samp, true);
+   struct bindless_ref_info tex2_info = get_bindless_ref(ctx, tex2, false);
+   /* NOTE: The QC implementation completely ignores samp2 (reference
+    * sampler), in both the A1 and S2EN cases.
+    */
+
+   if (tex2 || samp2) {
+      struct tex_src_info info = {0};
+      info.flags = IR3_INSTR_B;
+
+      /* NOTE: QC implementation doesn't encode the BASE_HI bits in the right
+       * place (ORing them into src2 instead), but our normal base encoding
+       * appears to work.
        */
-      tex_const = true;
-      info.tex_idx = 0;
-   }
-   nir_intrinsic_instr *bindless_samp = NULL;
-   bool samp_const;
-   if (samp) {
-      ctx->so->bindless_samp = true;
-      bindless_samp = ir3_bindless_resource(*samp);
-      assert(bindless_samp);
-      info.samp_base = nir_intrinsic_desc_set(bindless_samp);
-      samp_const = nir_src_is_const(bindless_samp->src[0]);
-      if (samp_const)
-         info.samp_idx = nir_src_as_uint(bindless_samp->src[0]);
-   } else {
-      samp_const = true;
-      info.samp_idx = 0;
+      info.base = tex_info.desc_set;
+
+      info.a1_val = 0;
+      info.a1_val |= samp_info.desc_set;
+      info.a1_val |= tex2_info.desc_set << 13;
+
+      /* NOTE: QC implementation lets samp index overflow into tex2 index */
+      if (tex_info.is_const && tex_info.const_index < 16 &&
+          samp_info.is_const && samp_info.const_index < 16 &&
+          tex2_info.is_const && tex2_info.const_index < 64) {
+         info.tex_idx = tex_info.const_index;
+         info.a1_val |= (samp_info.const_index << 3);
+         info.a1_val |= (tex2_info.const_index << 7);
+      } else {
+         /* Non-constant case: Collect the combined texture/sampler, and the
+          * secondary texture.
+          */
+         info.samp_tex = ir3_collect(b, tex_info.index, samp_info.index, tex2_info.index);
+
+         info.flags |= IR3_INSTR_S2EN;
+      }
+
+      if (info.a1_val)
+         info.flags |= IR3_INSTR_A1EN;
+
+      return info;
    }
 
+   info.tex_base = tex_info.desc_set;
+   info.tex_idx = tex_info.const_index;
+   info.samp_base = samp_info.desc_set;
+   info.samp_idx = samp_info.const_index;
+
    /* Choose encoding. */
-   if (tex_const && samp_const && info.tex_idx < 256 &&
+   if (tex_info.is_const && samp_info.is_const && info.tex_idx < 256 &&
        info.samp_idx < 256) {
       if (info.tex_idx < 16 && info.samp_idx < 16 &&
-          (!bindless_tex || !bindless_samp ||
+          (!tex_info.index || !samp_info.index ||
            info.tex_base == info.samp_base)) {
          /* Everything fits within the instruction */
          info.base = info.tex_base;
@@ -1927,7 +1982,7 @@ get_bindless_samp_src(struct ir3_context *ctx, nir_src *tex,
       /* In the indirect case, we only use a1.x to store the sampler
        * base if it differs from the texture base.
        */
-      if (!bindless_tex || !bindless_samp ||
+      if (!tex_info.index || !samp_info.index ||
           info.tex_base == info.samp_base) {
          info.base = info.tex_base;
       } else {
@@ -1938,20 +1993,12 @@ get_bindless_samp_src(struct ir3_context *ctx, nir_src *tex,
 
       /* Note: the indirect source is now a vec2 instead of hvec2
        */
-      struct ir3_instruction *texture, *sampler;
+      if (!tex_info.index)
+         tex_info.index = create_immed(b, 0);
+      if (!samp_info.index)
+         samp_info.index = create_immed(b, 0);
 
-      if (bindless_tex) {
-         texture = ir3_get_src(ctx, tex)[0];
-      } else {
-         texture = create_immed(b, 0);
-      }
-
-      if (bindless_samp) {
-         sampler = ir3_get_src(ctx, samp)[0];
-      } else {
-         sampler = create_immed(b, 0);
-      }
-      info.samp_tex = ir3_collect(b, texture, sampler);
+      info.samp_tex = ir3_collect(b, tex_info.index, samp_info.index);
    }
 
    return info;
@@ -3404,7 +3451,7 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
    }
    case nir_intrinsic_prefetch_sam_ir3: {
       struct tex_src_info info =
-         get_bindless_samp_src(ctx, &intr->src[0], &intr->src[1]);
+         get_bindless_samp_src(ctx, &intr->src[0], &intr->src[1], NULL, NULL);
       struct ir3_instruction *sam =
          emit_sam(ctx, OPC_SAM, info, TYPE_F32, 0b1111, NULL, NULL);
 
@@ -3574,13 +3621,17 @@ get_tex_samp_tex_src(struct ir3_context *ctx, nir_tex_instr *tex)
    struct tex_src_info info = {0};
    int texture_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
    int sampler_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
+   int texture2_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_2_handle);
+   int sampler2_idx = nir_tex_instr_src_index(tex, nir_tex_src_sampler_2_handle);
    struct ir3_instruction *texture, *sampler;
 
    if (texture_idx >= 0 || sampler_idx >= 0) {
       /* Bindless case */
       info = get_bindless_samp_src(ctx,
                                    texture_idx >= 0 ? &tex->src[texture_idx].src : NULL,
-                                   sampler_idx >= 0 ? &tex->src[sampler_idx].src : NULL);
+                                   sampler_idx >= 0 ? &tex->src[sampler_idx].src : NULL,
+                                   texture2_idx >= 0 ? &tex->src[texture2_idx].src : NULL,
+                                   sampler2_idx >= 0 ? &tex->src[sampler2_idx].src : NULL);
 
       if (tex->texture_non_uniform || tex->sampler_non_uniform)
          info.flags |= IR3_INSTR_NONUNIF;
@@ -3622,8 +3673,8 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 {
    struct ir3_builder *b = &ctx->build;
    struct ir3_instruction **dst, *sam, *src0[12], *src1[5];
-   struct ir3_instruction *const *coord, *const *off, *const *ddx, *const *ddy;
-   struct ir3_instruction *lod, *compare, *proj, *sample_index, *min_lod;
+   struct ir3_instruction *const *coord, *const *off, *const *ddx, *const *ddy, *const *box_size;
+   struct ir3_instruction *lod, *compare, *proj, *sample_index, *min_lod, *ref_coord, *block_size;
    struct tex_src_info info = {0};
    bool has_bias = false, has_lod = false, has_proj = false, has_off = false;
    bool lod_zero = false, has_min_lod = false;
@@ -3634,8 +3685,8 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
 
    ncomp = tex->def.num_components;
 
-   coord = off = ddx = ddy = NULL;
-   lod = proj = compare = sample_index = min_lod = NULL;
+   coord = off = ddx = ddy = box_size = NULL;
+   lod = proj = compare = sample_index = min_lod = ref_coord = block_size = NULL;
 
    dst = ir3_get_def(ctx, &tex->def, ncomp);
 
@@ -3684,11 +3735,22 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
          min_lod = ir3_get_src(ctx, &tex->src[i].src)[0];
          has_min_lod = true;
          break;
+      case nir_tex_src_box_size:
+         box_size = ir3_get_src(ctx, &tex->src[i].src);
+         break;
+      case nir_tex_src_block_size:
+         block_size = ir3_get_src(ctx, &tex->src[i].src)[0];
+         break;
+      case nir_tex_src_ref_coord:
+         ref_coord = ir3_get_src(ctx, &tex->src[i].src)[0];
+         break;
       case nir_tex_src_texture_offset:
       case nir_tex_src_sampler_offset:
       case nir_tex_src_texture_handle:
       case nir_tex_src_sampler_handle:
-         /* handled in get_tex_samp_src() */
+      case nir_tex_src_texture_2_handle:
+      case nir_tex_src_sampler_2_handle:
+         /* handled in get_tex_samp_tex_src() */
          break;
       default:
          ir3_context_error(ctx, "Unhandled NIR tex src type: %d\n",
@@ -3759,6 +3821,16 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
    case nir_texop_txf_ms_fb:
    case nir_texop_txf_ms:
       opc = OPC_ISAMM;
+      break;
+   case nir_texop_sample_weighted_qcom:
+      opc = OPC_IMG_BINDLESS_HOF;
+      break;
+   case nir_texop_box_filter_qcom:
+      opc = OPC_IMG_BINDLESS_PCMN;
+      break;
+   case nir_texop_block_match_sad_qcom:
+   case nir_texop_block_match_ssd_qcom:
+      opc = OPC_IMG_BINDLESS;
       break;
    default:
       ir3_context_error(ctx, "Unhandled NIR tex type: %d\n", tex->op);
@@ -3857,7 +3929,7 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
     *  - lod
     *  - bias
     */
-   if (has_off | has_lod | has_bias | has_min_lod) {
+   if (has_off | has_lod | has_bias | has_min_lod | (box_size != NULL)) {
       if (has_off) {
          unsigned off_coords = coords;
          if (tex->sampler_dim == GLSL_SAMPLER_DIM_CUBE)
@@ -3876,6 +3948,16 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
          src1[nsrc1++] = min_lod;
          flags |= IR3_INSTR_CLP;
       }
+
+      if (box_size) {
+         src1[nsrc1++] = box_size[0];
+         src1[nsrc1++] = box_size[1];
+      }
+   }
+
+   if (opc == OPC_IMG_BINDLESS) {
+      src1[nsrc1++] = ref_coord;
+      src1[nsrc1++] = block_size;
    }
 
    type = get_tex_dest_type(tex);
@@ -3970,6 +4052,9 @@ emit_tex(struct ir3_context *ctx, nir_tex_instr *tex)
       info.flags |= flags;
       sam = emit_sam(ctx, opc, info, type, MASK(ncomp), col0, col1);
    }
+
+   if (tex->op == nir_texop_block_match_ssd_qcom)
+      sam->cat5.match_mode = IR3_MATCH_MODE_SSD;
 
    if (tex->is_sparse) {
       info.flags |= flags;

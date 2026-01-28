@@ -317,6 +317,9 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_physical_device_drm = !is_kgsl(device->instance),
       .EXT_pipeline_creation_cache_control = true,
       .EXT_pipeline_creation_feedback = true,
+#ifdef TU_USE_WSI_PLATFORM
+      .EXT_present_timing = device->info->props.has_persistent_counter,
+#endif
       .EXT_primitive_topology_list_restart = true,
       .EXT_primitives_generated_query = true,
       .EXT_private_data = true,
@@ -355,6 +358,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .IMG_filter_cubic = device->info->props.has_tex_filter_cubic,
       .NV_compute_shader_derivatives = device->info->chip >= 7,
       .QCOM_fragment_density_map_offset = true,
+      .QCOM_image_processing = device->info->props.has_image_processing,
       .QCOM_multiview_per_view_render_areas = true,
       .QCOM_multiview_per_view_viewports =
          device->info->props.has_per_view_viewport,
@@ -824,6 +828,11 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_EXT_zero_initialize_device_memory */
    features->zeroInitializeDeviceMemory = true;
 
+   /* VK_QCOM_image_processing */
+   features->textureSampleWeighted = pdevice->vk.supported_extensions.QCOM_image_processing;
+   features->textureBoxFilter = pdevice->vk.supported_extensions.QCOM_image_processing;
+   features->textureBlockMatch = pdevice->vk.supported_extensions.QCOM_image_processing;
+
    /* VK_VALVE_fragment_density_map_layered */
    features->fragmentDensityMapLayered = true;
 
@@ -841,6 +850,13 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* QCOM_multiview_per_view_render_areas */
    features->multiviewPerViewRenderAreas = true;
+
+#ifdef TU_USE_WSI_PLATFORM
+   /* VK_EXT_present_timing */
+   features->presentTiming = true;
+   features->presentAtRelativeTime = true;
+   features->presentAtAbsoluteTime = true;
+#endif
 }
 
 static void
@@ -1520,6 +1536,21 @@ tu_get_properties(struct tu_physical_device *pdevice,
 
    /* VK_VALVE_fragment_density_map_layered */
    props->maxFragmentDensityMapLayers = MAX_VIEWS;
+
+   /* VK_QCOM_image_processing */
+   props->maxWeightFilterPhases = 1024;
+   props->maxWeightFilterDimension =
+      pdevice->vk.supported_extensions.QCOM_image_processing
+         ? (VkExtent2D) { 64, 64 }
+         : (VkExtent2D) { 0, 0 };
+   props->maxBlockMatchRegion =
+      pdevice->vk.supported_extensions.QCOM_image_processing
+         ? (VkExtent2D) { 64, 64 }
+         : (VkExtent2D) { 0, 0 };
+   props->maxBoxFilterBlockSize =
+      pdevice->vk.supported_extensions.QCOM_image_processing
+         ? (VkExtent2D) { 64, 64 }
+         : (VkExtent2D) { 0, 0 };
 }
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {

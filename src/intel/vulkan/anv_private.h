@@ -1789,6 +1789,11 @@ struct anv_instance {
     bool                                        intel_enable_wa_14024015672_msaa;
 
     /**
+     * Performance workarounds
+     */
+    bool                                        disable_lto;
+
+    /**
      * Ray tracing configuration.
      */
     unsigned                                    stack_ids;
@@ -6123,6 +6128,15 @@ void
 anv_attachment_external_resolve(struct anv_cmd_buffer *cmd_buffer,
                                 const struct anv_attachment *att);
 
+bool
+anv_image_pixel_is_default_value(const struct intel_device_info *devinfo,
+                                 const struct anv_image *image,
+                                 const uint32_t *view_pixel);
+
+union isl_color_value
+anv_image_color_clear_value(const struct intel_device_info * const devinfo,
+                            const struct anv_image *image);
+
 static inline union isl_color_value
 anv_image_hiz_clear_value(const struct anv_image *image)
 {
@@ -6146,6 +6160,7 @@ void
 anv_image_hiz_clear(struct anv_cmd_buffer *cmd_buffer,
                     const struct anv_image *image,
                     VkImageAspectFlags aspects,
+                    VkImageLayout depth_layout, VkImageLayout stencil_layout,
                     uint32_t level,
                     uint32_t base_layer, uint32_t layer_count,
                     VkRect2D area,
@@ -6271,6 +6286,7 @@ anv_can_fast_clear_color(const struct anv_cmd_buffer *cmd_buffer,
                          const struct VkClearRect *clear_rect,
                          VkImageLayout layout,
                          enum isl_format view_format,
+                         struct isl_swizzle view_swizzle,
                          union isl_color_value clear_color);
 
 enum isl_aux_state ATTRIBUTE_PURE

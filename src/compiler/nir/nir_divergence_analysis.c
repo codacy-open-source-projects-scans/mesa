@@ -1021,6 +1021,7 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_atest_pan:
    case nir_intrinsic_zs_emit_pan:
    case nir_intrinsic_load_return_param_amd:
+   case nir_intrinsic_load_local_invocation_index_intel:
       is_divergent = true;
       break;
 
@@ -1057,12 +1058,14 @@ visit_tex(nir_tex_instr *instr, struct divergence_state *state)
    for (unsigned i = 0; i < instr->num_srcs; i++) {
       switch (instr->src[i].src_type) {
       case nir_tex_src_sampler_deref:
+      case nir_tex_src_sampler_2_deref:
       case nir_tex_src_sampler_handle:
       case nir_tex_src_sampler_offset:
          is_divergent |= src_divergent(instr->src[i].src, state) &&
                          instr->sampler_non_uniform;
          break;
       case nir_tex_src_texture_deref:
+      case nir_tex_src_texture_2_deref:
       case nir_tex_src_texture_handle:
       case nir_tex_src_texture_offset:
          is_divergent |= src_divergent(instr->src[i].src, state) &&

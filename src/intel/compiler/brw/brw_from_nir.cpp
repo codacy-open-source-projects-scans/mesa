@@ -4857,7 +4857,7 @@ brw_from_nir_emit_task_mesh_intrinsic(nir_to_brw_state &ntb,
       UNREACHABLE("local invocation id should have been lowered earlier");
       break;
 
-   case nir_intrinsic_load_local_invocation_index:
+   case nir_intrinsic_load_local_invocation_index_intel:
       dest = retype(dest, BRW_TYPE_UD);
       bld.MOV(dest, payload.local_index);
       break;
@@ -5035,7 +5035,8 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       srcs[URB_LOGICAL_SRC_DATA] = get_nir_src(ntb, instr->src[0], -1);
 
       if (!nir_src_is_const(instr->src[3]) ||
-          nir_src_as_uint(instr->src[3]) != 0xf) {
+          nir_src_as_uint(instr->src[3]) !=
+          nir_component_mask(nir_src_num_components(instr->src[0]))) {
          srcs[URB_LOGICAL_SRC_CHANNEL_MASK] =
             retype(get_nir_src_imm(ntb, instr->src[3]), BRW_TYPE_UD);
       }
@@ -5043,6 +5044,8 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       brw_urb_inst *urb = bld.URB_WRITE(srcs, ARRAY_SIZE(srcs));
       urb->components = instr->src[0].ssa->num_components;
       urb->offset = urb_global_offset;
+
+      assert(urb->components == 4 || urb->components == 8);
       break;
    }
 

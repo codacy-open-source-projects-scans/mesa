@@ -774,12 +774,12 @@ isl_genX(surf_fill_state_s)(const struct isl_device *dev, void *state,
           * compression, this means that we can't even specify MSAA depth CCS
           * in RENDER_SURFACE_STATE::AuxiliarySurfaceMode.
           *
-          * On Xe2+, the above restriction is not mentioned in the
+          * On GFX12.5+, the above restriction is not mentioned in the
           * RENDER_SURFACE_STATE::AuxiliarySurfaceMode.
           *
           * Bspec 57023 (r58975)
           */
-         assert(GFX_VER >= 20 || info->surf->samples == 1);
+         assert(GFX_VERx10 >= 125 || info->surf->samples == 1);
 
          /* Prior to Gfx12, the dimension must not be 3D */
          if (info->aux_usage == ISL_AUX_USAGE_HIZ)
@@ -911,8 +911,15 @@ isl_genX(surf_fill_state_s)(const struct isl_device *dev, void *state,
        * doesn't expect our definition of the compression, it expects qpitch
        * in units of samples on the main surface.
        */
-      s.AuxiliarySurfaceQPitch =
-         isl_surf_get_array_pitch_sa_rows(info->aux_surf) >> 2;
+      uint32_t aux_qpitch = isl_surf_get_array_pitch_sa_rows(info->aux_surf);
+
+      /* From RENDER_SURFACE_STATE::AuxiliarySurfaceQPitch on BDW+,
+       *
+       *    This field must be set to an integer multiple of the Surface
+       *    Vertical Alignment
+       */
+      assert(aux_qpitch % image_align.h == 0);
+      s.AuxiliarySurfaceQPitch = aux_qpitch >> 2;
 #endif
    }
 #endif

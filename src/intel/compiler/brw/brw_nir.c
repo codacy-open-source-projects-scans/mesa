@@ -56,6 +56,12 @@ is_per_primitive(nir_intrinsic_instr *intrin)
           intrin->intrinsic == nir_intrinsic_store_per_primitive_output;
 }
 
+static nir_variable_mode
+io_mode(nir_intrinsic_instr *io)
+{
+   return is_input(io) ? nir_var_shader_in : nir_var_shader_out;
+}
+
 /**
  * Given an URB offset in 32-bit units, determine whether (offset % 4)
  * is statically known.  If so, add this to the value of first_component.
@@ -144,12 +150,12 @@ urb_offset(nir_builder *b,
 
       offset = nir_iadd(b, offset, nir_imul_imm(b, index->ssa, stride));
    } else if (index) {
-      nir_def *stride = cb_data->dynamic_tes
-         ? intel_nir_tess_field(b, PER_VERTEX_SLOTS)
-         : nir_imm_int(b, cb_data->per_vertex_stride /
-                          (cb_data->vec4_access ? 16 : 4));
+      const unsigned unit = cb_data->vec4_access ? 16 : 4;
+      nir_def *index_offset = cb_data->dynamic_tes
+         ? nir_imul(b, index->ssa, intel_nir_tess_field(b, PER_VERTEX_SLOTS))
+         : nir_imul_imm(b, index->ssa, cb_data->per_vertex_stride / unit);
 
-      offset = nir_iadd(b, offset, nir_imul(b, index->ssa, stride));
+      offset = nir_iadd(b, offset, index_offset);
 
       /* In the Tessellation evaluation shader, reposition the offset of
        * builtins when using separate layout.
@@ -180,8 +186,9 @@ load_urb(nir_builder *b,
          enum gl_access_qualifier access)
 {
    const struct intel_device_info *devinfo = cb_data->devinfo;
+   const nir_variable_mode mode = io_mode(intrin);
    const unsigned bits = intrin->def.bit_size;
-   const unsigned base = io_base_slot(intrin, cb_data);
+   unsigned base = io_base_slot(intrin, cb_data);
    unsigned first_component = io_component(intrin, cb_data);
 
    if (devinfo->ver >= 20) {
@@ -189,7 +196,7 @@ load_urb(nir_builder *b,
       return nir_load_urb_lsc_intel(b, intrin->def.num_components, bits,
                                     nir_iadd(b, handle, offset),
                                     16 * base + 4 * first_component,
-                                    .access = access);
+                                    .access = access, .memory_modes = mode);
    }
 
    /* Load a whole vec4 or vec8 and return the desired portion */
@@ -198,9 +205,22 @@ load_urb(nir_builder *b,
    /* If the offset is in vec4 units, do a straightforward load */
    if (cb_data->vec4_access) {
       assert(intrin->def.num_components <= 4);
+
+      /* URB offsets are technically unsigned, and Icelake and earlier seem
+       * to perform the addition of global and per-slot offsets in a way that
+       * doesn't handle 32-bit overflow/unsigned wrapping correctly.
+       *
+       * Work around this by just including the base in the offset.
+       */
+      if (devinfo->ver <= 11 && !nir_def_is_const(offset)) {
+         offset = nir_iadd_imm(b, offset, base);
+         base = 0;
+      }
+
       nir_def *load =
          nir_load_urb_vec4_intel(b, 4, bits, handle, offset,
-                                 .base = base, .access = access);
+                                 .base = base, .access = access,
+                                 .memory_modes = mode);
       return nir_channels(b, load, mask << first_component);
    }
 
@@ -216,7 +236,8 @@ load_urb(nir_builder *b,
 
    nir_def *load =
       nir_load_urb_vec4_intel(b, single_vec4 ? 4 : 8, bits, handle,
-                              vec4_offset, .base = base, .access = access);
+                              vec4_offset, .base = base, .access = access,
+                              .memory_modes = mode);
 
    if (static_mod) {
       return nir_channels(b, load, mask << first_component);
@@ -493,6 +514,7 @@ remap_tess_levels_legacy(nir_builder *b,
 
    b->cursor = nir_before_instr(&intrin->instr);
 
+   const nir_variable_mode mode = io_mode(intrin);
    const bool inner = io_sem.location == VARYING_SLOT_TESS_LEVEL_INNER;
 
    nir_def *tess_config = nir_load_tess_config_intel(b);
@@ -584,7 +606,8 @@ remap_tess_levels_legacy(nir_builder *b,
       } else {
          assert(intrin->intrinsic == nir_intrinsic_load_output);
          nir_def *vec =
-            nir_load_urb_vec4_intel(b, 4, 32, output_handle(b), slot);
+            nir_load_urb_vec4_intel(b, 4, 32, output_handle(b), slot,
+                                    .memory_modes = mode);
          const unsigned nc = intrin->def.num_components;
 
          nir_def *result =
@@ -754,6 +777,59 @@ brw_nir_lower_per_view_outputs(nir_shader *nir)
    return nir_shader_intrinsics_pass(nir, lower_per_view_outputs,
                                      nir_metadata_control_flow,
                                      NULL);
+}
+
+static bool
+brw_nir_should_vectorize_urb(unsigned align_mul, unsigned align_offset,
+                             unsigned bit_size,
+                             unsigned num_components,
+                             int64_t hole_size,
+                             nir_intrinsic_instr *low,
+                             nir_intrinsic_instr *high,
+                             void *data)
+{
+   if (bit_size != 32 || num_components > 8)
+      return false;
+
+   if (num_components > 4 && num_components < 8 &&
+       low->intrinsic == nir_intrinsic_store_urb_lsc_intel)
+      return false;
+
+   if (low->intrinsic == nir_intrinsic_store_urb_vec4_intel)
+      return nir_src_is_const(low->src[3]) && nir_src_is_const(high->src[3]);
+
+   return low->intrinsic == nir_intrinsic_load_urb_lsc_intel ||
+          low->intrinsic == nir_intrinsic_store_urb_lsc_intel ||
+          low->intrinsic == nir_intrinsic_load_urb_vec4_intel;
+}
+
+static unsigned
+vec4_urb_round_up_components(unsigned n)
+{
+   return n < 4 ? 4 : util_next_power_of_two(n);
+}
+
+static unsigned
+lsc_urb_round_up_components(unsigned n)
+{
+   return n < 4 ? n : util_next_power_of_two(n);
+}
+
+void
+brw_nir_opt_vectorize_urb(nir_shader *nir,
+                          const struct intel_device_info *devinfo)
+{
+   NIR_PASS(_, nir, nir_opt_cse);
+
+   nir_load_store_vectorize_options options = {
+      .modes = nir_var_shader_in | nir_var_shader_out,
+      .callback = brw_nir_should_vectorize_urb,
+      .round_up_store_components = true,
+      .round_up_components =
+         devinfo->ver >= 20 ? lsc_urb_round_up_components :
+                              vec4_urb_round_up_components,
+   };
+   NIR_PASS(_, nir, nir_opt_load_store_vectorize, &options);
 }
 
 void
@@ -2605,6 +2681,7 @@ brw_postprocess_nir_opts(nir_shader *nir, const struct brw_compiler *compiler,
    if (nir->info.stage == MESA_SHADER_MESH ||
        nir->info.stage == MESA_SHADER_TASK) {
       OPT(lower_task_payload_to_urb_intrinsics, devinfo);
+      brw_nir_opt_vectorize_urb(nir, devinfo);
    }
 
    /* Needs to be prior int64 lower because it generates 64bit address

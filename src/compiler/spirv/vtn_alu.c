@@ -425,32 +425,53 @@ handle_fp_fast_math(struct vtn_builder *b, UNUSED struct vtn_value *val,
       b->nb.fp_math_ctrl |= nir_fp_preserve_inf;
 }
 
-void
-vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *val)
+unsigned *
+vtn_fp_math_ctrl_for_base_type(struct vtn_builder *b, enum glsl_base_type base_type)
 {
-   /* Take the NaN/Inf/SZ preserve bits from the execution mode and set them
-    * on the builder, so the generated instructions can take it from it.
-    * We only care about some of them, check nir_alu_instr for details.
-    */
-   unsigned bit_size;
+   switch (base_type) {
+   case GLSL_TYPE_FLOAT16: return &b->fp_math_ctrl[0];
+   case GLSL_TYPE_FLOAT: return &b->fp_math_ctrl[1];
+   case GLSL_TYPE_DOUBLE: return &b->fp_math_ctrl[2];
+   case GLSL_TYPE_BFLOAT16: return &b->fp_math_ctrl[3];
+   case GLSL_TYPE_FLOAT_E4M3FN: return &b->fp_math_ctrl[4];
+   case GLSL_TYPE_FLOAT_E5M2: return &b->fp_math_ctrl[5];
+   default: return NULL;
+   }
+}
+
+static unsigned
+fp_math_ctrl_for_type(struct vtn_builder *b, struct vtn_type *type)
+{
+   if (!type)
+      return nir_fp_fast_math;
+
+   enum glsl_base_type base_type;
 
    /* Some ALU like modf and frexp return a struct of two values. */
-   if (!val->type)
-      bit_size = 0;
-   else if (glsl_type_is_struct(val->type->type))
-      bit_size = glsl_get_bit_size(val->type->type->fields.structure[0].type);
+   if (glsl_type_is_struct(type->type))
+      base_type = glsl_get_base_type(type->type->fields.structure[0].type);
    else
-      bit_size = glsl_get_bit_size(val->type->type);
+      base_type = glsl_get_base_type(type->type);
 
+   unsigned *fp_math_ctrl = vtn_fp_math_ctrl_for_base_type(b, base_type);
 
-   switch (bit_size) {
-   case 16: b->nb.fp_math_ctrl = b->fp_math_ctrl_fp16; break;
-   case 32: b->nb.fp_math_ctrl = b->fp_math_ctrl_fp32; break;
-   case 64: b->nb.fp_math_ctrl = b->fp_math_ctrl_fp64; break;
-   default: b->nb.fp_math_ctrl = 0; break;
-   }
+   return fp_math_ctrl ? *fp_math_ctrl : nir_fp_fast_math;
+}
 
-   vtn_foreach_decoration(b, val, handle_fp_fast_math, NULL);
+void
+vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *dest_val, struct vtn_value *src0_val)
+{
+   /* Take union of the fp_math_ctrl bits from the dest and source types.
+    * Assume any additional float source would have the same type as the
+    * first one.
+    */
+   b->nb.fp_math_ctrl = fp_math_ctrl_for_type(b, dest_val->type);
+   b->nb.fp_math_ctrl |= fp_math_ctrl_for_type(b, src0_val->type);
+
+   vtn_foreach_decoration(b, dest_val, handle_fp_fast_math, NULL);
+
+   if (vtn_has_decoration(b, dest_val, SpvDecorationNoContraction))
+      b->nb.fp_math_ctrl |= nir_fp_exact;
 }
 
 nir_rounding_mode
@@ -727,10 +748,8 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       return;
    }
 
-   vtn_handle_fp_fast_math(b, dest_val);
+   vtn_handle_fp_fast_math(b, dest_val, vtn_untyped_value(b, w[3]));
 
-   if (b->exact || vtn_has_decoration(b, dest_val, SpvDecorationNoContraction))
-      b->nb.fp_math_ctrl |= nir_fp_exact;
    bool mediump_16bit = vtn_alu_op_mediump_16bit(b, opcode, dest_val);
 
    /* Collect the various SSA sources */
@@ -750,7 +769,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
          vtn_mediump_upconvert_value(b, dest);
 
       vtn_push_ssa_value(b, w[2], dest);
-      b->nb.fp_math_ctrl = b->exact ? nir_fp_exact : nir_fp_fast_math;
+      b->nb.fp_math_ctrl = nir_fp_fast_math;
       return;
    }
 
@@ -1099,7 +1118,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       vtn_mediump_upconvert_value(b, dest);
    vtn_push_ssa_value(b, w[2], dest);
 
-   b->nb.fp_math_ctrl = b->exact ? nir_fp_exact : nir_fp_fast_math;
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
 }
 
 void

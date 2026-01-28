@@ -383,17 +383,38 @@ fast_clear_color(struct iris_context *ice,
                                  PIPE_CONTROL_RENDER_TARGET_FLUSH);
    }
 
-   /* Update the clear color now that previous rendering is complete. */
-   if (color_changed && res->aux.clear_color_bo)
-      iris_resource_update_indirect_color(batch, res);
+   if (color_changed) {
+      if (devinfo->ver <= 12) {
+         /* A new clear color may require partial resolves later on. */
+         ice->state.dirty |= IRIS_DIRTY_RENDER_RESOLVES_AND_FLUSHES |
+                             IRIS_DIRTY_COMPUTE_RESOLVES_AND_FLUSHES;
+         ice->state.stage_dirty |= IRIS_ALL_STAGE_DIRTY_BINDINGS;
+      }
 
-   /* If the buffer is already in ISL_AUX_STATE_CLEAR, the clear is redundant
-    * and can be skipped.
+      if (devinfo->ver >= 20) {
+         /* The clear pixel is updated by hardware during fast clears. */
+         assert(batch->screen->isl_dev.ss.clear_color_state_size == 0);
+         assert(batch->screen->isl_dev.ss.clear_value_size == 0);
+      } else if (devinfo->ver >= 11) {
+         /* Update dwords used for rendering and sampling. */
+         assert(batch->screen->isl_dev.ss.clear_color_state_size > 0);
+         iris_resource_update_indirect_color(batch, res);
+      } else {
+         /* We've flagged surface states with inline clear colors as dirty. */
+         assert(batch->screen->isl_dev.ss.clear_value_size > 0);
+         assert(ice->state.stage_dirty & IRIS_ALL_STAGE_DIRTY_BINDINGS);
+      }
+   }
+
+   /* If the clear color is up-to-date and the buffer is already in
+    * ISL_AUX_STATE_CLEAR, the clear is redundant and can be skipped.
     */
    const enum isl_aux_state aux_state =
       iris_resource_get_aux_state(res, level, box->z);
-   if (box->depth == 1 && aux_state == ISL_AUX_STATE_CLEAR)
+   if ((devinfo->ver < 20 || !color_changed) &&
+       box->depth == 1 && aux_state == ISL_AUX_STATE_CLEAR) {
       return;
+   }
 
    iris_batch_sync_region_start(batch);
 
@@ -464,13 +485,10 @@ fast_clear_color(struct iris_context *ice,
 
    iris_batch_sync_region_end(batch);
 
-   iris_resource_set_aux_state(ice, res, level, box->z,
-                               box->depth, devinfo->ver < 20 ?
+   iris_resource_set_aux_state(ice, res, level, box->z, box->depth,
+                               devinfo->ver < 20 || res->surf.samples > 1 ?
                                ISL_AUX_STATE_CLEAR :
                                ISL_AUX_STATE_COMPRESSED_NO_CLEAR);
-   ice->state.dirty |= IRIS_DIRTY_RENDER_BUFFER;
-   ice->state.stage_dirty |= IRIS_ALL_STAGE_DIRTY_BINDINGS;
-   return;
 }
 
 static void
@@ -645,7 +663,8 @@ fast_clear_depth(struct iris_context *ice,
                iris_resource_get_aux_state(res, res_level, layer);
 
             if (aux_state != ISL_AUX_STATE_CLEAR &&
-                aux_state != ISL_AUX_STATE_COMPRESSED_CLEAR) {
+                aux_state != ISL_AUX_STATE_COMPRESSED_CLEAR &&
+                aux_state != ISL_AUX_STATE_COMPRESSED_HIER_DEPTH) {
                /* This slice doesn't have any fast-cleared bits. */
                continue;
             }
@@ -705,9 +724,17 @@ fast_clear_depth(struct iris_context *ice,
       }
    }
 
-   iris_resource_set_aux_state(ice, res, level, box->z, box->depth,
-                               devinfo->ver < 20 ? ISL_AUX_STATE_CLEAR :
-                               ISL_AUX_STATE_COMPRESSED_NO_CLEAR);
+   if (res->aux.usage == ISL_AUX_USAGE_HIZ_CCS_WT)
+      iris_resource_set_aux_state(
+         ice, res, level, box->z, box->depth,
+         (devinfo->ver >= 20 ? ISL_AUX_STATE_COMPRESSED_NO_CLEAR :
+          ISL_AUX_STATE_COMPRESSED_CLEAR));
+   else
+      iris_resource_set_aux_state(
+         ice, res, level, box->z, box->depth,
+         (devinfo->ver >= 20 ? ISL_AUX_STATE_COMPRESSED_HIER_DEPTH :
+          ISL_AUX_STATE_CLEAR));
+
    ice->state.dirty |= IRIS_DIRTY_DEPTH_BUFFER;
    ice->state.stage_dirty |= IRIS_ALL_STAGE_DIRTY_BINDINGS;
 }
@@ -818,6 +845,8 @@ clear_depth_stencil(struct iris_context *ice,
 static void
 iris_clear(struct pipe_context *ctx,
            unsigned buffers,
+           uint32_t color_clear_mask,
+           uint8_t stencil_clear_mask,
            const struct pipe_scissor_state *scissor_state,
            const union pipe_color_union *p_color,
            double depth,

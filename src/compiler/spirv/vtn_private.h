@@ -707,12 +707,7 @@ struct vtn_builder {
    /* Current function parameter index */
    unsigned func_param_idx;
 
-   /* false by default, set to true by the ContractionOff execution mode */
-   bool exact;
-
-   unsigned fp_math_ctrl_fp16;
-   unsigned fp_math_ctrl_fp32;
-   unsigned fp_math_ctrl_fp64;
+   unsigned fp_math_ctrl[6];
 
    /* when a physical memory model is choosen */
    bool physical_ptrs;
@@ -992,7 +987,9 @@ void vtn_handle_integer_dot(struct vtn_builder *b, SpvOp opcode,
 void vtn_handle_bitcast(struct vtn_builder *b, const uint32_t *w,
                         unsigned count);
 
-void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *val);
+unsigned *vtn_fp_math_ctrl_for_base_type(struct vtn_builder *b, enum glsl_base_type base_type);
+
+void vtn_handle_fp_fast_math(struct vtn_builder *b, struct vtn_value *dest_val, struct vtn_value *src0_val);
 
 void vtn_handle_subgroup(struct vtn_builder *b, SpvOp opcode,
                          const uint32_t *w, unsigned count);

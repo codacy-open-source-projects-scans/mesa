@@ -297,6 +297,9 @@ brw_compile_task(const struct brw_compiler *compiler,
 
    NIR_PASS(_, nir, brw_nir_lower_launch_mesh_workgroups);
 
+   NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, compiler->devinfo,
+            NULL);
+
    brw_prog_data_init(&prog_data->base.base, &params->base);
 
    prog_data->base.local_size[0] = nir->info.workgroup_size[0];
@@ -1015,6 +1018,9 @@ brw_compile_mesh(const struct brw_compiler *compiler,
    if (prog_data->map.has_per_primitive_header)
       NIR_PASS(_, nir, brw_nir_initialize_mue, &prog_data->map);
 
+   NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, compiler->devinfo,
+            NULL);
+
    prog_data->autostrip_enable = brw_mesh_autostrip_enable(compiler, nir, &prog_data->map);
 
    prog_data->base.uses_inline_data = brw_nir_uses_inline_data(nir) ||
@@ -1034,6 +1040,7 @@ brw_compile_mesh(const struct brw_compiler *compiler,
       .per_primitive_byte_offsets = prog_data->map.per_primitive_offsets,
    };
    NIR_PASS(_, nir, brw_nir_lower_outputs_to_urb_intrinsics, &cb_data);
+   brw_nir_opt_vectorize_urb(nir, devinfo);
    struct nir_opt_offsets_options offset_options = {};
    NIR_PASS(_, nir, nir_opt_offsets, &offset_options);
 

@@ -325,8 +325,6 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
 
    struct vtn_ssa_value *dest = vtn_create_ssa_value(b, dest_type);
 
-   if (b->exact || vtn_has_decoration(b, dest_val, SpvDecorationNoContraction))
-      b->nb.fp_math_ctrl |= nir_fp_exact;
    switch (entrypoint) {
    case GLSLstd450Radians:
       dest->def = nir_radians(nb, src[0]);
@@ -637,7 +635,6 @@ handle_glsl450_alu(struct vtn_builder *b, enum GLSLstd450 entrypoint,
       break;
    }
    }
-   b->nb.fp_math_ctrl = b->exact ? nir_fp_exact : nir_fp_fast_math;
 
    if (mediump_16bit)
       vtn_mediump_upconvert_value(b, dest);
@@ -714,7 +711,7 @@ bool
 vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
                                const uint32_t *w, unsigned count)
 {
-   vtn_handle_fp_fast_math(b, vtn_untyped_value(b, w[2]));
+   vtn_handle_fp_fast_math(b, vtn_untyped_value(b, w[2]), vtn_untyped_value(b, w[5]));
    switch ((enum GLSLstd450)ext_opcode) {
    case GLSLstd450Determinant: {
       vtn_push_nir_ssa(b, w[2], build_mat_det(b, vtn_ssa_value(b, w[5])));
@@ -734,7 +731,9 @@ vtn_handle_glsl450_instruction(struct vtn_builder *b, SpvOp ext_opcode,
 
    default:
       handle_glsl450_alu(b, (enum GLSLstd450)ext_opcode, w, count);
+      break;
    }
 
+   b->nb.fp_math_ctrl = nir_fp_fast_math;
    return true;
 }
