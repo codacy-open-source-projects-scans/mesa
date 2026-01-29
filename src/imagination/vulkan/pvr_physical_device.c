@@ -155,6 +155,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_relaxed_block_layout = true,
       .KHR_robustness2 = true,
       .KHR_sampler_mirror_clamp_to_edge = true,
+      .KHR_sampler_ycbcr_conversion = true,
       .KHR_separate_depth_stencil_layouts = true,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = false,
@@ -176,6 +177,7 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_custom_border_color = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_enable = true,
+      .EXT_image_drm_format_modifier = true,
       .EXT_extended_dynamic_state = true,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
@@ -270,7 +272,7 @@ static void pvr_physical_device_get_supported_features(
       .storageInputOutput16 = false,
       .variablePointers = false,
       .protectedMemory = false,
-      .samplerYcbcrConversion = false,
+      .samplerYcbcrConversion = true,
 
       /* Vulkan 1.2 */
       .samplerMirrorClampToEdge = true,

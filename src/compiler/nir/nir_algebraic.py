@@ -122,9 +122,6 @@ class SearchExpression(object):
         self.sources = expr[1:]
         self.ignore_exact = False
 
-        assert '{' not in self.opcode, \
-            'Malformed opcode name \"{}\".'.format(self.opcode)
-
     @staticmethod
     def create(val):
         if isinstance(val, tuple):
@@ -398,7 +395,8 @@ class Variable(Value):
 
 
 _opcode_re = re.compile(r"(?P<inexact>~)?(?P<exact>!)?(?P<opcode>\w+)(?:@(?P<bits>\d+))?"
-                        r"(?P<cond>\([^\)]+\))?(?P<swizzle>\.[xyzwabcdefghijklmnop])?")
+                        r"(?P<cond>\([^\)]+\))?(?P<swizzle>\.[xyzwabcdefghijklmnop])?"
+                        r"$")
 
 
 class Expression(Value):

@@ -19,7 +19,25 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::cmp::max;
 use std::ops::Index;
 
+use compiler::bindings::shader_info__bindgen_ty_1__bindgen_ty_5 as shader_info_tess;
+
 fn init_info_from_nir(nak: &nak_compiler, nir: &nir_shader) -> ShaderInfo {
+    let tess_common =
+        |info_tess: &shader_info_tess| TesselationCommonShaderInfo {
+            spacing: match info_tess.spacing() {
+                TESS_SPACING_UNSPECIFIED => None,
+                TESS_SPACING_EQUAL => Some(TessellationSpacing::Integer),
+                TESS_SPACING_FRACTIONAL_ODD => {
+                    Some(TessellationSpacing::FractionalOdd)
+                }
+                TESS_SPACING_FRACTIONAL_EVEN => {
+                    Some(TessellationSpacing::FractionalEven)
+                }
+                _ => panic!("Invalid gl_tess_spacing"),
+            },
+            point_mode: info_tess.point_mode(),
+            ccw: info_tess.ccw(),
+        };
     ShaderInfo {
         max_warps_per_sm: 0,
         num_gprs: 0,
@@ -86,6 +104,7 @@ fn init_info_from_nir(nak: &nak_compiler, nir: &nir_shader) -> ShaderInfo {
                 ShaderStageInfo::TessellationInit(TessellationInitShaderInfo {
                     per_patch_attribute_count: 6,
                     threads_per_patch: info_tess.tcs_vertices_out,
+                    common: tess_common(info_tess),
                 })
             }
             MESA_SHADER_TESS_EVAL => {
@@ -99,27 +118,7 @@ fn init_info_from_nir(nak: &nak_compiler, nir: &nir_shader) -> ShaderInfo {
                         TESS_PRIMITIVE_ISOLINES => TessellationDomain::Isoline,
                         _ => panic!("Invalid tess_primitive_mode"),
                     },
-                    spacing: match info_tess.spacing() {
-                        TESS_SPACING_EQUAL => TessellationSpacing::Integer,
-                        TESS_SPACING_FRACTIONAL_ODD => {
-                            TessellationSpacing::FractionalOdd
-                        }
-                        TESS_SPACING_FRACTIONAL_EVEN => {
-                            TessellationSpacing::FractionalEven
-                        }
-                        _ => panic!("Invalid gl_tess_spacing"),
-                    },
-                    primitives: if info_tess.point_mode() {
-                        TessellationPrimitives::Points
-                    } else if info_tess._primitive_mode
-                        == TESS_PRIMITIVE_ISOLINES
-                    {
-                        TessellationPrimitives::Lines
-                    } else if info_tess.ccw() {
-                        TessellationPrimitives::TrianglesCCW
-                    } else {
-                        TessellationPrimitives::TrianglesCW
-                    },
+                    common: tess_common(info_tess),
                 })
             }
             _ => panic!("Unknown shader stage"),
@@ -825,10 +824,15 @@ impl<'a> ShaderFromNir<'a> {
                 let src_type = FloatType::from_bits(src_bits.into());
                 let dst_type = FloatType::from_bits(dst_bits.into());
 
+                let mut src = srcs(0);
+                if src_bits == 16 {
+                    src = restrict_f16v2_src(src);
+                }
+
                 let dst = b.alloc_ssa_vec(RegFile::GPR, dst_bits.div_ceil(32));
                 b.push_op(OpF2F {
                     dst: dst.clone().into(),
-                    src: srcs(0),
+                    src,
                     src_type: FloatType::from_bits(src_bits.into()),
                     dst_type: dst_type,
                     rnd_mode: match alu.op {
@@ -841,7 +845,7 @@ impl<'a> ShaderFromNir<'a> {
                     } else {
                         self.float_ctl[dst_type].ftz
                     },
-                    high: false,
+                    dst_high: false,
                     integer_rnd: false,
                 });
                 dst
@@ -976,7 +980,7 @@ impl<'a> ShaderFromNir<'a> {
                         rnd_mode,
                         ftz,
                         integer_rnd: true,
-                        high: false,
+                        dst_high: false,
                     });
                 }
                 dst.into()
@@ -1216,7 +1220,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst_type: FloatType::F16,
                     rnd_mode: FRndMode::NearestEven,
                     ftz: true,
-                    high: false,
+                    dst_high: false,
                     integer_rnd: false,
                 });
                 assert!(alu.def.bit_size() == 32);
@@ -1228,7 +1232,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst_type: FloatType::F32,
                     rnd_mode: FRndMode::NearestEven,
                     ftz: true,
-                    high: false,
+                    dst_high: false,
                     integer_rnd: false,
                 });
                 if b.sm() < 70 {
@@ -1574,7 +1578,7 @@ impl<'a> ShaderFromNir<'a> {
                         dst_type: FloatType::F16,
                         rnd_mode: rnd_mode,
                         ftz: false,
-                        high: false,
+                        dst_high: false,
                         integer_rnd: false,
                     });
 
@@ -1588,7 +1592,7 @@ impl<'a> ShaderFromNir<'a> {
                         dst_type: FloatType::F16,
                         rnd_mode: rnd_mode,
                         ftz: false,
-                        high: false,
+                        dst_high: false,
                         integer_rnd: false,
                     });
 
@@ -1734,14 +1738,20 @@ impl<'a> ShaderFromNir<'a> {
                 assert!(alu.def.bit_size() == 32);
                 let dst = b.alloc_ssa(RegFile::GPR);
 
+                let swizzle = if alu.op == nir_op_unpack_half_2x16_split_x {
+                    SrcSwizzle::Xx
+                } else {
+                    SrcSwizzle::Yy
+                };
+
                 b.push_op(OpF2F {
                     dst: dst.into(),
-                    src: srcs(0),
+                    src: srcs(0).swizzle(swizzle),
                     src_type: FloatType::F16,
                     dst_type: FloatType::F32,
                     rnd_mode: FRndMode::NearestEven,
                     ftz: false,
-                    high: alu.op == nir_op_unpack_half_2x16_split_y,
+                    dst_high: false,
                     integer_rnd: false,
                 });
 
@@ -2320,14 +2330,22 @@ impl<'a> ShaderFromNir<'a> {
                             ALUType::FLOAT => {
                                 let src_type =
                                     FloatType::from_bits(src_bit_size.into());
+
+                                let mut src = self.get_src(&srcs[0]);
+                                if src_bit_size == 16
+                                    && intrin.def.num_components() == 1
+                                {
+                                    src = src.swizzle(SrcSwizzle::Xx);
+                                }
+
                                 b.push_op(OpF2F {
                                     dst: dst.clone().into(),
-                                    src: self.get_src(&srcs[0]),
+                                    src,
                                     src_type,
                                     dst_type,
                                     rnd_mode,
                                     ftz: self.float_ctl[src_type].ftz,
-                                    high: false,
+                                    dst_high: false,
                                     integer_rnd: false,
                                 });
                             }

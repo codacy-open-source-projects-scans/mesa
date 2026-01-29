@@ -1605,24 +1605,61 @@ nvk_cmd_bind_graphics_shader(struct nvk_cmd_buffer *cmd,
    cmd->state.gfx.shaders_dirty |= mesa_to_vk_shader_stage(stage);
 }
 
+#define NVK_MME_TESS_PARAMS(domain, spacing, prims) \
+   NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, DOMAIN_TYPE, domain) | \
+   NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, spacing) | \
+   NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, OUTPUT_PRIMITIVES, prims)
+
+#define NVK_MME_TESS_STATE(domain, spacing, flags) \
+   NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, DOMAIN_TYPE, domain) | \
+   NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, spacing) | \
+   flags
+
+#define NVK_MME_FULL_TESS_STATE(ctrl, eval) (ctrl << 8) | (eval)
+
+#define POINT_MODE_BIT 2
+#define CCW_BIT        3
+#define LOWER_LEFT_BIT 6
+
+#define POINT_MODE BITFIELD_BIT(POINT_MODE_BIT)
+#define CCW        BITFIELD_BIT(CCW_BIT)
+#define LOWER_LEFT BITFIELD_BIT(LOWER_LEFT_BIT)
+
 uint32_t
-nvk_mme_tess_params(enum nak_ts_domain domain,
+nvk_mme_tess_params(mesa_shader_stage stage,
+                    enum nak_ts_domain domain,
                     enum nak_ts_spacing spacing,
-                    enum nak_ts_prims prims)
+                    bool ccw, bool point_mode)
 {
    /* This is laid out the same as SET_TESSELLATION_PARAMETERS, only with an
     * extra bit for lower_left
     */
    uint16_t params = ((uint16_t)domain << 0) |
-                     ((uint16_t)spacing << 4) |
-                     ((uint16_t)prims << 8);
-   return nvk_mme_val_mask(params, 0x0fff);
+                     ((uint16_t)spacing << 4);
+   if (ccw)
+      params |= CCW;
+   if (point_mode)
+      params |= POINT_MODE;
+
+   uint16_t mask = DRF_SMASK(NV9097_SET_TESSELLATION_PARAMETERS_DOMAIN_TYPE) |
+                   DRF_SMASK(NV9097_SET_TESSELLATION_PARAMETERS_SPACING) |
+                   POINT_MODE | CCW;
+
+   if (stage == MESA_SHADER_TESS_CTRL) {
+      assert(domain == 0);
+      params <<= 8;
+      mask <<= 8;
+   } else {
+      assert(stage == MESA_SHADER_TESS_EVAL);
+   }
+
+   return nvk_mme_val_mask(params, mask);
 }
 
 static uint32_t
 nvk_mme_tess_lower_left(bool lower_left)
 {
-   return nvk_mme_val_mask((uint16_t)lower_left << 12, 1u << 12);
+   return nvk_mme_val_mask(lower_left ? LOWER_LEFT : 0, LOWER_LEFT);
 }
 
 void
@@ -1636,32 +1673,78 @@ nvk_mme_set_tess_params(struct mme_builder *b)
    mme_if(b, ine, params, old_params) {
       nvk_mme_store_scratch(b, TESS_PARAMS, params);
 
-      /* lower_left lives at bit 12 */
-      struct mme_value lower_left = mme_merge(b, mme_zero(), params, 0, 1, 12);
+      /* Merge tese and tesc state. The state space has been designed so we can
+       * just OR then together - unspecified inputs are zero and where they're
+       * both specifed we're guaranteed that they match by draw time.
+       */
+      struct mme_value tesc = mme_merge(b, mme_zero(), params, 0, 8, 8);
+      mme_or_to(b, params, params, tesc);
+      mme_free_reg(b, tesc);
 
-      /* Only the bottom 12 bits are valid to put in HW */
-      mme_merge_to(b, params, mme_zero(), params, 0, 12, 0);
+      /* Compute primitives value */
+      #define PRIMS(x) \
+         mme_imm(NV9097_SET_TESSELLATION_PARAMETERS_OUTPUT_PRIMITIVES_##x)
+
+      struct mme_value prims = mme_mov(b, PRIMS(TRIANGLES_CW));
 
       /* If we're using a lower-left orientation, we need to flip triangles
        * between CW and CCW.
        */
-      mme_if(b, ine, lower_left, mme_zero()) {
-         struct mme_value prims_cw = mme_imm(NAK_TS_PRIMS_TRIANGLES_CW);
-         struct mme_value prims_ccw = mme_imm(NAK_TS_PRIMS_TRIANGLES_CCW);
+      struct mme_value lower_left =
+         mme_merge(b, mme_zero(), params, 0, 1, LOWER_LEFT_BIT);
+      struct mme_value ccw =
+         mme_merge(b, mme_zero(), params, 0, 1, CCW_BIT);
 
-         struct mme_value prims = mme_merge(b, mme_zero(), params, 0, 4, 8);
-         mme_if(b, ieq, prims, prims_cw) {
-            mme_merge_to(b, params, params, prims_ccw, 8, 4, 0);
-         }
-         mme_if(b, ieq, prims, prims_ccw) {
-            mme_merge_to(b, params, params, prims_cw, 8, 4, 0);
-         }
-         mme_free_reg(b, prims);
-      }
+      mme_xor_to(b, ccw, ccw, lower_left);
       mme_free_reg(b, lower_left);
 
-      mme_mthd(b, NV9097_SET_TESSELLATION_PARAMETERS);
-      mme_emit(b, params);
+      mme_if(b, ine, ccw, mme_zero()) {
+         mme_mov_to(b, prims, PRIMS(TRIANGLES_CCW));
+      }
+      mme_free_reg(b, ccw);
+
+      /* Check for lines */
+      struct mme_value domain =
+         mme_merge(b, mme_zero(), params, 0,
+                   DRF_BITS(NV9097_SET_TESSELLATION_PARAMETERS_DOMAIN_TYPE),
+                   DRF_LO(NV9097_SET_TESSELLATION_PARAMETERS_DOMAIN_TYPE));
+      mme_if(b, ieq, domain, mme_imm(NV9097_SET_TESSELLATION_PARAMETERS_DOMAIN_TYPE_ISOLINE)) {
+         mme_mov_to(b, prims, PRIMS(LINES));
+      }
+      mme_free_reg(b, domain);
+
+      /* Point mode overrides prims */
+      struct mme_value point_mode =
+         mme_merge(b, mme_zero(), params, 0, 1, POINT_MODE_BIT);
+      mme_if(b, ine, point_mode, mme_zero()) {
+         mme_mov_to(b, prims, PRIMS(POINTS));
+      }
+      mme_free_reg(b, point_mode);
+
+      /* Mask off bits that are valid to put in HW */
+      mme_and_to(b, params, params, mme_imm(
+         DRF_SMASK(NV9097_SET_TESSELLATION_PARAMETERS_DOMAIN_TYPE) |
+         DRF_SMASK(NV9097_SET_TESSELLATION_PARAMETERS_SPACING)));
+      mme_merge_to(b, params, params, prims,
+         DRF_LO(NV9097_SET_TESSELLATION_PARAMETERS_OUTPUT_PRIMITIVES),
+         DRF_BITS(NV9097_SET_TESSELLATION_PARAMETERS_OUTPUT_PRIMITIVES), 0);
+      mme_free_reg(b, prims);
+
+      /* If the current state is never used in a draw, we can end up with
+       * temporary invalid values while binding different shaders. Check
+       * for this so we can avoid setting a state that will cause
+       * context loss. This happens when `spacing == 3`. The same cannot
+       * happen with `domain` because we never set it for TESS_CTRL.
+       */
+      struct mme_value spacing =
+         mme_merge(b, mme_zero(), params, 0,
+                   DRF_BITS(NV9097_SET_TESSELLATION_PARAMETERS_SPACING),
+                   DRF_LO(NV9097_SET_TESSELLATION_PARAMETERS_SPACING));
+
+      mme_if(b, ine, spacing, mme_imm(0x3)) {
+         mme_mthd(b, NV9097_SET_TESSELLATION_PARAMETERS);
+         mme_emit(b, params);
+      }
    }
 }
 
@@ -1671,44 +1754,165 @@ const struct nvk_mme_test_case nvk_mme_set_tess_params_tests[] = {{
       { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0 },
       { }
    },
-   .params = (uint32_t[]) { 0xffff0000 },
+   .params = (uint32_t[]) { NVK_MME_VAL_MASK(0, 0xffff) },
    .expected = (struct nvk_mme_mthd_data[]) {
       { }
    },
 }, {
-   /* TRIANGLE, INTEGER, TRIANGLES_CW, lower_left = false */
    .init = (struct nvk_mme_mthd_data[]) {
       { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0 },
       { }
    },
-   .params = (uint32_t[]) { 0xffff0201 },
+   .params = (uint32_t[]) {
+      NVK_MME_VAL_MASK(NVK_MME_TESS_STATE(TRIANGLE, INTEGER, 0), 0xffff)
+   },
    .expected = (struct nvk_mme_mthd_data[]) {
-      { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0x0201 },
-      { NV9097_SET_TESSELLATION_PARAMETERS, 0x0201 },
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, 0)
+      },
+      {
+         NV9097_SET_TESSELLATION_PARAMETERS,
+         NVK_MME_TESS_PARAMS(TRIANGLE, INTEGER, TRIANGLES_CW)
+      },
       { }
    },
 }, {
-   /* TRIANGLE, INTEGER, TRIANGLES_CW, lower_left = true */
    .init = (struct nvk_mme_mthd_data[]) {
-      { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0x0201 },
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, 0)
+      },
       { }
    },
-   .params = (uint32_t[]) { 0x10001000 },
+   .params = (uint32_t[]) { NVK_MME_VAL_MASK(LOWER_LEFT, LOWER_LEFT) },
    .expected = (struct nvk_mme_mthd_data[]) {
-      { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0x1201 },
-      { NV9097_SET_TESSELLATION_PARAMETERS, 0x0301 },
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, LOWER_LEFT)
+      },
+      {
+         NV9097_SET_TESSELLATION_PARAMETERS,
+         NVK_MME_TESS_PARAMS(TRIANGLE, INTEGER, TRIANGLES_CCW)
+      },
       { }
    },
 }, {
-   /* TRIANGLE, INTEGER, TRIANGLES_CCW, lower_left = true */
    .init = (struct nvk_mme_mthd_data[]) {
-      { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0x0301 },
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, CCW)
+      },
       { }
    },
-   .params = (uint32_t[]) { 0x10001000 },
+   .params = (uint32_t[]) { NVK_MME_VAL_MASK(LOWER_LEFT, LOWER_LEFT)},
    .expected = (struct nvk_mme_mthd_data[]) {
-      { NVK_SET_MME_SCRATCH(TESS_PARAMS), 0x1301 },
-      { NV9097_SET_TESSELLATION_PARAMETERS, 0x0201 },
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, LOWER_LEFT | CCW)
+      },
+      {
+         NV9097_SET_TESSELLATION_PARAMETERS,
+         NVK_MME_TESS_PARAMS(TRIANGLE, INTEGER, TRIANGLES_CW)
+      },
+      { }
+   },
+}, {
+   .init = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, CCW)
+      },
+      { }
+   },
+   .params = (uint32_t[]) { NVK_MME_VAL_MASK(POINT_MODE, POINT_MODE)},
+   .expected = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, CCW | POINT_MODE)
+      },
+      {
+         NV9097_SET_TESSELLATION_PARAMETERS,
+         NVK_MME_TESS_PARAMS(TRIANGLE, INTEGER, POINTS)
+      },
+      { }
+   },
+}, {
+   .init = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, 0)
+      },
+      { }
+   },
+   .params = (uint32_t[]) {
+      NVK_MME_VAL_MASK(NVK_MME_TESS_STATE(ISOLINE, INTEGER, 0), 0xffff)
+   },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(ISOLINE, INTEGER, 0)
+      },
+      {
+         NV9097_SET_TESSELLATION_PARAMETERS,
+         NVK_MME_TESS_PARAMS(ISOLINE, INTEGER, LINES)
+      },
+      { }
+   },
+}, {
+   /* Test tese/tesc merge */
+   .init = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, 0)
+      },
+      { }
+   },
+   .params = (uint32_t[]) {
+      NVK_MME_VAL_MASK(NVK_MME_FULL_TESS_STATE(
+         NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, DOMAIN_TYPE, TRIANGLE),
+         NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, FRACTIONAL_ODD)
+      ), 0xffff)
+   },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_FULL_TESS_STATE(
+            NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, DOMAIN_TYPE, TRIANGLE),
+            NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, FRACTIONAL_ODD)
+         )
+      },
+      {
+         NV9097_SET_TESSELLATION_PARAMETERS,
+         NVK_MME_TESS_PARAMS(TRIANGLE, FRACTIONAL_ODD, TRIANGLES_CW)
+      },
+      { }
+   },
+}, {
+   /* Test skipping invalid spacing */
+   .init = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_TESS_STATE(TRIANGLE, INTEGER, 0)
+      },
+      { }
+   },
+   .params = (uint32_t[]) {
+      NVK_MME_VAL_MASK(NVK_MME_FULL_TESS_STATE(
+         NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, DOMAIN_TYPE, TRIANGLE) |
+         NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, FRACTIONAL_EVEN),
+         NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, FRACTIONAL_ODD)
+      ), 0xffff)
+   },
+   .expected = (struct nvk_mme_mthd_data[]) {
+      {
+         NVK_SET_MME_SCRATCH(TESS_PARAMS),
+         NVK_MME_FULL_TESS_STATE(
+            NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, DOMAIN_TYPE, TRIANGLE) |
+            NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, FRACTIONAL_EVEN),
+            NVDEF(NV9097, SET_TESSELLATION_PARAMETERS, SPACING, FRACTIONAL_ODD)
+         )
+      },
       { }
    },
 }, {}};
