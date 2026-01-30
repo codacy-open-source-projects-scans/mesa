@@ -3027,12 +3027,19 @@ vk_get_rt_pipeline_compile_info(struct vk_rt_pipeline_compile_info *info,
       };
 
       if (bin_info == NULL || bin_info->binaryCount == 0) {
-         vk_pipeline_hash_precomp_shader_stage(device, pipeline_flags,
-                                               pCreateInfo->pNext, stage_info,
-                                               &info->stages[i]);
+         vk_pipeline_hash_precomp_shader_stage(
+            device,
+            pipeline_flags &
+            ~VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR,
+            pCreateInfo->pNext, stage_info,
+            &info->stages[i]);
 
-         vk_pipeline_hash_rt_shader(device, pipeline_flags, pipeline_layout,
-                                    &info->stages[i]);
+         vk_pipeline_hash_rt_shader(
+            device,
+            pipeline_flags &
+            ~VK_PIPELINE_CREATE_2_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR,
+            pipeline_layout,
+            &info->stages[i]);
       }
    }
 
@@ -3673,6 +3680,19 @@ vk_create_rt_pipeline(struct vk_device *device,
          }
          group->stage_count++;
          assert(group->stages[s].shader != NULL);
+      }
+
+      /* Activate replay if needed */
+      if (pipeline_flags &
+          VK_PIPELINE_CREATE_RAY_TRACING_SHADER_GROUP_HANDLE_CAPTURE_REPLAY_BIT_KHR) {
+         const struct vk_device_shader_ops *ops = device->shader_ops;
+         struct vk_shader *shaders[3] = {};
+         for (uint32_t s = 0; s < group->stage_count; s++)
+            shaders[s] = group->stages[s].shader;
+         ops->replay_rt_shader_group(
+            device, group_info->type,
+            group->stage_count, shaders,
+            group_info->pShaderGroupCaptureReplayHandle);
       }
 
       pipeline->group_count++;

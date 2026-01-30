@@ -21,6 +21,7 @@
 
 #include "cffdec.h"
 #include "cffdump-pkt-handler.h"
+#include "cffdump-desc-handler.h"
 #include "rnnutil.h"
 #include "script.h"
 
@@ -84,6 +85,7 @@ error(const char *fmt)
  */
 
 struct rnndenum {
+   struct rnnenum *e;
    const char *str;
    int val;
 };
@@ -102,37 +104,32 @@ l_meta_rnn_enum_tostring(lua_State *L)
    return 1;
 }
 
-/* so, this doesn't actually seem to be implemented yet, but hopefully
- * some day lua comes to it's senses
- */
 static int
-l_meta_rnn_enum_tonumber(lua_State *L)
+l_meta_rnn_enum_eq(lua_State *L)
 {
-   struct rnndenum *e = lua_touserdata(L, 1);
-   lua_pushinteger(L, e->val);
+   struct rnndenum *e1 = lua_touserdata(L, 1);
+   struct rnndenum *e2 = lua_touserdata(L, 2);
+
+   /* Do the enum type+value match: */
+   lua_pushboolean(L, (e1->e == e2->e) && (e1->val == e2->val));
+
    return 1;
 }
 
 static const struct luaL_Reg l_meta_rnn_enum[] = {
    {"__tostring", l_meta_rnn_enum_tostring},
-   {"__tonumber", l_meta_rnn_enum_tonumber},
+   {"__eq",       l_meta_rnn_enum_eq},
    {NULL, NULL} /* sentinel */
 };
 
 static void
-pushenum(struct lua_State *L, int val, struct rnnenum *info)
+pushenum(struct lua_State *L, struct rnn *rnn, int val, struct rnnenum *info)
 {
    struct rnndenum *e = lua_newuserdata(L, sizeof(*e));
 
+   e->e = info;
    e->val = val;
-   e->str = NULL;
-
-   for (int i = 0; i < info->valsnum; i++) {
-      if (info->vals[i]->valvalid && (info->vals[i]->value == val)) {
-         e->str = info->vals[i]->name;
-         break;
-      }
-   }
+   e->str = rnn_enumname(rnn, info->name, val);
 
    luaL_newmetatable(L, "rnnmetaenum");
    luaL_setfuncs(L, l_meta_rnn_enum, 0);
@@ -173,7 +170,7 @@ pushdecval(struct lua_State *L, struct rnn *rnn, uint64_t regval,
    switch (rnn_decodelem(rnn, info, regval, &val)) {
    case RNN_TTYPE_ENUM:
    case RNN_TTYPE_INLINE_ENUM:
-      pushenum(L, val.i, info->eenum);
+      pushenum(L, rnn, val.i, info->eenum);
       return 1;
    case RNN_TTYPE_INT:
       lua_pushinteger(L, val.i);
@@ -192,6 +189,47 @@ pushdecval(struct lua_State *L, struct rnn *rnn, uint64_t regval,
    default:
       return 0;
    }
+}
+
+static int
+pushfield(lua_State *L, struct rnntypeinfo *info, struct rnn *rnn,
+          uint64_t offset, const char *name)
+{
+   struct rnnbitfield **bitfields;
+   int bitfieldsnum;
+   int i;
+
+   switch (info->type) {
+   case RNN_TTYPE_BITSET:
+      bitfields = info->ebitset->bitfields;
+      bitfieldsnum = info->ebitset->bitfieldsnum;
+      break;
+   case RNN_TTYPE_INLINE_BITSET:
+      bitfields = info->bitfields;
+      bitfieldsnum = info->bitfieldsnum;
+      break;
+   default:
+      printf("invalid register type: %d\n", info->type);
+      return 0;
+   }
+
+   for (i = 0; i < bitfieldsnum; i++) {
+      struct rnnbitfield *bf = bitfields[i];
+      if (!strcmp(name, bf->name)) {
+         uint32_t regval = rnn_val(rnn, offset);
+
+         regval &= typeinfo_mask(&bf->typeinfo);
+         regval >>= bf->typeinfo.low;
+         regval <<= bf->typeinfo.shr;
+
+         DBG("name=%s, info=%p, type=%d, regval=%x", name, info,
+             bf->typeinfo.type, regval);
+
+         return pushdecval(L, rnn, regval, &bf->typeinfo);
+      }
+   }
+
+   return 0;
 }
 
 static int
@@ -328,42 +366,13 @@ l_rnn_reg_meta_index(lua_State *L)
    const char *name = lua_tostring(L, 2);
    struct rnndelem *elem = rnndoff->elem;
    struct rnntypeinfo *info = &elem->typeinfo;
-   struct rnnbitfield **bitfields;
-   int bitfieldsnum;
-   int i;
 
-   switch (info->type) {
-   case RNN_TTYPE_BITSET:
-      bitfields = info->ebitset->bitfields;
-      bitfieldsnum = info->ebitset->bitfieldsnum;
-      break;
-   case RNN_TTYPE_INLINE_BITSET:
-      bitfields = info->bitfields;
-      bitfieldsnum = info->bitfieldsnum;
-      break;
-   default:
-      printf("invalid register type: %d\n", info->type);
-      return 0;
-   }
+   int ret = pushfield(L, info, rnndoff->rnn, rnndoff->offset, name);
 
-   for (i = 0; i < bitfieldsnum; i++) {
-      struct rnnbitfield *bf = bitfields[i];
-      if (!strcmp(name, bf->name)) {
-         uint32_t regval = rnn_val(rnndoff->rnn, rnndoff->offset);
+   if (!ret)
+      printf("invalid member: %s\n", name);
 
-         regval &= typeinfo_mask(&bf->typeinfo);
-         regval >>= bf->typeinfo.low;
-         regval <<= bf->typeinfo.shr;
-
-         DBG("name=%s, info=%p, subelemsnum=%d, type=%d, regval=%x", name, info,
-             rnndoff->elem->subelemsnum, bf->typeinfo.type, regval);
-
-         return pushdecval(L, rnndoff->rnn, regval, &bf->typeinfo);
-      }
-   }
-
-   printf("invalid member: %s\n", name);
-   return 0;
+   return ret;
 }
 
 static int
@@ -384,22 +393,9 @@ l_rnn_reg_meta_tostring(lua_State *L)
    return 1;
 }
 
-static int
-l_rnn_reg_meta_tonumber(lua_State *L)
-{
-   struct rnndoff *rnndoff = lua_touserdata(L, 1);
-   uint32_t regval = rnn_val(rnndoff->rnn, rnndoff->offset);
-
-   regval <<= rnndoff->elem->typeinfo.shr;
-
-   lua_pushnumber(L, regval);
-   return 1;
-}
-
 static const struct luaL_Reg l_meta_rnn_reg[] = {
    {"__index", l_rnn_reg_meta_index},
    {"__tostring", l_rnn_reg_meta_tostring},
-   {"__tonumber", l_rnn_reg_meta_tonumber},
    {NULL, NULL} /* sentinel */
 };
 
@@ -419,6 +415,52 @@ l_rnn_etype_reg(lua_State *L, struct rnn *rnn, struct rnndelem *elem,
 }
 
 /*
+ * Enum type element
+ */
+
+struct rnndenumtype {
+   struct rnnenum *e;
+   struct rnn *rnn;
+};
+
+static int
+l_rnn_enumtype_meta_index(lua_State *L)
+{
+   struct rnndenumtype *et = lua_touserdata(L, 1);
+   const char *name = lua_tostring(L, 2);
+
+   int val = rnn_enumval(et->rnn, et->e->name, name);
+   if (val < 0)
+      return 0;
+
+   pushenum(L, et->rnn, val, et->e);
+
+   return 1;
+}
+
+static const struct luaL_Reg l_meta_rnn_enumtype[] = {
+   {"__index", l_rnn_enumtype_meta_index},
+   {NULL, NULL} /* sentinel */
+};
+
+static int
+l_rnn_etype_enumtype(lua_State *L, struct rnn *rnn, struct rnnenum *e)
+{
+   struct rnndenumtype *et = lua_newuserdata(L, sizeof(*e));
+
+   et->e = e;
+   et->rnn = rnn;
+
+   luaL_newmetatable(L, "rnnmetaenumtype");
+   luaL_setfuncs(L, l_meta_rnn_enumtype, 0);
+   lua_pop(L, 1);
+
+   luaL_setmetatable(L, "rnnmetaenumtype");
+
+   return 1;
+}
+
+/*
  *
  */
 
@@ -427,13 +469,16 @@ l_rnn_meta_index(lua_State *L)
 {
    struct rnn *rnn = lua_touserdata(L, 1);
    const char *name = lua_tostring(L, 2);
-   struct rnndelem *elem;
 
-   elem = rnn_regelem(rnn, name);
-   if (!elem)
-      return 0;
+   struct rnndelem *elem = rnn_regelem(rnn, name);
+   if (elem)
+      return l_rnn_etype(L, rnn, elem, elem->offset);
 
-   return l_rnn_etype(L, rnn, elem, elem->offset);
+   struct rnnenum *e = rnn_enumelem(rnn, name);
+   if (e)
+      return l_rnn_etype_enumtype(L, rnn, e);
+
+   return 0;
 }
 
 static int
@@ -660,6 +705,18 @@ internal_lua_pkt_handler_load(void)
       fprintf(stderr, "%s\n", lua_tostring(iL, -1));
       exit(1);
    }
+
+   ret = luaL_loadstring(iL, cffdump_desc_handler_lua_src);
+   if (ret) {
+      fprintf(stderr, "%s\n", lua_tostring(iL, -1));
+      exit(1);
+   }
+
+   ret = lua_pcall(iL, 0, LUA_MULTRET, 0);
+   if (ret) {
+      fprintf(stderr, "%s\n", lua_tostring(iL, -1));
+      exit(1);
+   }
 }
 
 void
@@ -728,21 +785,39 @@ script_draw(const char *primtype, uint32_t nindx)
 static int
 l_rnn_meta_dom_index(lua_State *L)
 {
-   struct rnn *rnn = lua_touserdata(L, 1);
-   uint32_t offset = (uint32_t)lua_tonumber(L, 2);
-   struct rnndelem *elem;
+   struct rnndec *rnndec = lua_touserdata(L, 1);
+   struct rnn *rnn = &rnndec->base;
 
-   /* TODO might be nicer if the arg isn't a number, to search the domain
-    * for matching bitfields.. so that the script could do something like
-    * 'pkt.WIDTH' insteadl of 'pkt[1].WIDTH', ie. not have to remember the
-    * offset of the dword containing the bitfield..
-    */
+   if (lua_isnumber(L, 2)) {
+      /* index as an array, is pkt[0].FOO: */
+      uint32_t offset = (uint32_t)lua_tonumber(L, 2);
+      struct rnndelem *elem = rnn_regoff(rnn, offset);
+      if (elem)
+         return l_rnn_etype(L, rnn, elem, elem->offset);
+   } else if (lua_isstring(L, 2)) {
+      /* If not indexed like an array, search thru all
+       * the elements in the domain finding the matching
+       * subelem.
+       *
+       * This handles the pkt.FOO case
+       */
+      const char *name = lua_tostring(L, 2);
 
-   elem = rnn_regoff(rnn, offset);
-   if (!elem)
-      return 0;
+      for (unsigned i = 0; i < rnndec->sizedwords; i++) {
+         struct rnndelem *elem = rnn_regoff(rnn, i);
+         if (!elem)
+            continue;
 
-   return l_rnn_etype(L, rnn, elem, elem->offset);
+         if (!strcmp(name, elem->name))
+            return l_rnn_etype(L, rnn, elem, elem->offset);
+
+         int ret = pushfield(L, &elem->typeinfo, rnn, i, name);
+         if (ret)
+            return ret;
+      }
+   }
+
+   return 0;
 }
 
 /*
@@ -766,18 +841,16 @@ static const struct luaL_Reg l_meta_rnn_dom[] = {
    {NULL, NULL} /* sentinel */
 };
 
-/* called to general pm4 packet decoding, such as texture/sampler state
- */
 static bool
-handle_packet_setup(lua_State *state, uint32_t *dwords, uint32_t sizedwords,
-                    struct rnn *rnn, struct rnndomain *dom)
+setup_call(lua_State *state, uint32_t *dwords, uint32_t sizedwords,
+           const char *name, struct rnn *rnn, struct rnndomain *dom)
 {
    if (!state)
       return false;
 
    assert(state == L || state == iL);
 
-   lua_getglobal(state, dom->name);
+   lua_getglobal(state, name);
 
    /* if no handler for the packet, just ignore it: */
    if (!lua_isfunction(state, -1)) {
@@ -798,6 +871,18 @@ handle_packet_setup(lua_State *state, uint32_t *dwords, uint32_t sizedwords,
    lua_pop(state, 1);
 
    luaL_setmetatable(state, "rnnmetadom");
+
+   return true;
+}
+
+/* called to general pm4 packet decoding, such as texture/sampler state
+ */
+static bool
+handle_packet_setup(lua_State *state, uint32_t *dwords, uint32_t sizedwords,
+                    struct rnn *rnn, struct rnndomain *dom)
+{
+   if (!setup_call(state, dwords, sizedwords, dom->name, rnn, dom))
+      return false;
 
    lua_pushnumber(state, sizedwords);
 
@@ -840,6 +925,33 @@ internal_packet(uint32_t *dwords, uint32_t sizedwords, struct rnn *rnn,
    lua_pop(iL, 1);
 
    return str;
+}
+
+bool
+script_show_descriptor(uint32_t *dwords,
+                       uint32_t sizedwords,
+                       const char *type,
+                       struct rnn *rnn,
+                       struct rnndomain *dom)
+{
+   /* If we cannot call handler, fall back to showing all descriptor variants: */
+   if (!setup_call(iL, dwords, sizedwords, "show_descriptor", rnn, dom))
+      return true;
+
+   struct rnnenum *e = rnn_enumelem(rnn, "desctype");
+   pushenum(iL, rnn, rnn_enumval(rnn, "desctype", type), e);
+
+   /* 2 args, 1 result */
+   if (lua_pcall(iL, 2, 1, 0) != 0) {
+      fprintf(stderr, "error running function `f': %s\n",
+              lua_tostring(iL, -1));
+      exit(1);
+   }
+
+   bool ret = lua_toboolean(iL, -1);
+   lua_pop(iL, 1);
+
+   return ret;
 }
 
 /* helper to call fxn that takes and returns void: */

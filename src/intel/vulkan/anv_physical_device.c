@@ -189,6 +189,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_incremental_present               = true,
 #endif
       .KHR_index_type_uint8                  = true,
+      .KHR_internally_synchronized_queues    = true,
       .KHR_line_rasterization                = true,
       .KHR_load_store_op_none                = true,
       .KHR_maintenance1                      = true,
@@ -715,7 +716,7 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_ray_tracing_pipeline */
       .rayTracingPipeline = rt_enabled,
-      .rayTracingPipelineShaderGroupHandleCaptureReplay = false,
+      .rayTracingPipelineShaderGroupHandleCaptureReplay = true,
       .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
       .rayTracingPipelineTraceRaysIndirect = rt_enabled,
       .rayTraversalPrimitiveCulling = rt_enabled,
@@ -1016,6 +1017,9 @@ get_features(const struct anv_physical_device *pdevice,
       .presentAtRelativeTime = true,
       .presentAtAbsoluteTime = true,
 #endif
+
+      /* VK_KHR_internally_synchronized_queues */
+      .internallySynchronizedQueues = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -1622,7 +1626,8 @@ get_properties(const struct anv_physical_device *pdevice,
       /* MemRay::hitGroupSRBasePtr requires 16B alignment */
       props->shaderGroupBaseAlignment = 16;
       props->shaderGroupHandleAlignment = 16;
-      props->shaderGroupHandleCaptureReplaySize = 32;
+      props->shaderGroupHandleCaptureReplaySize =
+         sizeof(struct anv_shader_group_rt_replay);
       props->maxRayDispatchInvocationCount = 1U << 30; /* required min limit */
       props->maxRayHitAttributeSize = BRW_RT_SIZEOF_HIT_ATTRIB_DATA;
    }

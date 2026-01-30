@@ -4077,7 +4077,8 @@ tu_allocate_transient_attachments(struct tu_cmd_buffer *cmd, bool sysmem)
           (sysmem || rp->attachments[i].load ||
            rp->attachments[i].load_stencil ||
            rp->attachments[i].store ||
-           rp->attachments[i].store_stencil)) {
+           rp->attachments[i].store_stencil ||
+           iview == cmd->state.lrz.image_view)) {
          VkResult result = tu_allocate_lazy_memory(cmd->device,
                                                    iview->image->mem);
          if (result != VK_SUCCESS)
@@ -4983,7 +4984,7 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
                         va += offset;
                      } else {
                         uint32_t desc_offset = pkt_field_get(
-                           A6XX_TEX_CONST_2_STARTOFFSETTEXELS, dst_desc[2]);
+                           A6XX_TEX_MEMOBJ_2_STARTOFFSETTEXELS, dst_desc[2]);
 
                         /* Use descriptor's format to determine the shift amount
                         * that's to be used on the offset value.
@@ -5008,7 +5009,7 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
                         unsigned new_offset = (va & 0x3f) >> offset_shift;
                         va &= ~0x3full;
                         dst_desc[2] =
-                           pkt_field_set(A6XX_TEX_CONST_2_STARTOFFSETTEXELS,
+                           pkt_field_set(A6XX_TEX_MEMOBJ_2_STARTOFFSETTEXELS,
                                        dst_desc[2], new_offset);
                      }
                      tu_desc_set_addr<CHIP>(dst_desc, va);
