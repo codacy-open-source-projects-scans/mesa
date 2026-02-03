@@ -257,6 +257,7 @@ enum zink_debug {
    ZINK_DEBUG_MSAAOPT = (1<<20),
    ZINK_DEBUG_RPLOADS = (1<<21),
    ZINK_DEBUG_NOGENERAL = (1<<22),
+   ZINK_DEBUG_RPSTORES = (1<<23),
 };
 
 enum zink_pv_emulation_primitive {
@@ -1294,6 +1295,7 @@ struct zink_resource {
    uint16_t sampler_bind_count[2]; //gfx, compute
    uint16_t image_bind_count[2]; //gfx, compute
    uint16_t write_bind_count[2]; //gfx, compute
+   VkPipelineStageFlagBits seen_sampler_bind_stages;
    union {
       uint16_t bindless[2]; //tex, img
       uint32_t all_bindless;

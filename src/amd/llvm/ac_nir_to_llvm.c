@@ -129,78 +129,22 @@ static LLVMValueRef emit_float_cmp(struct ac_llvm_context *ctx, LLVMRealPredicat
    return LLVMBuildFCmp(ctx->builder, pred, src0, src1, "");
 }
 
-static LLVMValueRef emit_intrin_1f_param(struct ac_llvm_context *ctx, const char *intrin,
-                                         LLVMTypeRef result_type, LLVMValueRef src0)
+static LLVMValueRef emit_fp_intrinsic(struct ac_llvm_context *ctx, const char *intrin,
+                                      LLVMTypeRef result_type, LLVMValueRef src0,
+                                      LLVMValueRef src1, LLVMValueRef src2)
 {
    char name[64], type[64];
    LLVMValueRef params[] = {
       ac_to_float(ctx, src0),
+      src1 ? ac_to_float(ctx, src1) : NULL,
+      src2 ? ac_to_float(ctx, src2) : NULL,
    };
 
    ac_build_type_name_for_intr(LLVMTypeOf(params[0]), type, sizeof(type));
    ASSERTED const int length = snprintf(name, sizeof(name), "%s.%s", intrin, type);
    assert(length < sizeof(name));
-   return ac_build_intrinsic(ctx, name, result_type, params, 1, 0);
-}
-
-static LLVMValueRef emit_intrin_1f_param_scalar(struct ac_llvm_context *ctx, const char *intrin,
-                                                LLVMTypeRef result_type, LLVMValueRef src0)
-{
-   if (LLVMGetTypeKind(result_type) != LLVMVectorTypeKind)
-      return emit_intrin_1f_param(ctx, intrin, result_type, src0);
-
-   LLVMTypeRef elem_type = LLVMGetElementType(result_type);
-   LLVMValueRef ret = LLVMGetUndef(result_type);
-
-   /* Scalarize the intrinsic, because vectors are not supported. */
-   for (unsigned i = 0; i < LLVMGetVectorSize(result_type); i++) {
-      char name[64], type[64];
-      LLVMValueRef params[] = {
-         ac_to_float(ctx, ac_llvm_extract_elem(ctx, src0, i)),
-      };
-
-      ac_build_type_name_for_intr(LLVMTypeOf(params[0]), type, sizeof(type));
-      ASSERTED const int length = snprintf(name, sizeof(name), "%s.%s", intrin, type);
-      assert(length < sizeof(name));
-      ret = LLVMBuildInsertElement(
-         ctx->builder, ret,
-         ac_build_intrinsic(ctx, name, elem_type, params, 1, 0),
-         LLVMConstInt(ctx->i32, i, 0), "");
-   }
-   return ret;
-}
-
-static LLVMValueRef emit_intrin_2f_param(struct ac_llvm_context *ctx, const char *intrin,
-                                         LLVMTypeRef result_type, LLVMValueRef src0,
-                                         LLVMValueRef src1)
-{
-   char name[64], type[64];
-   LLVMValueRef params[] = {
-      ac_to_float(ctx, src0),
-      ac_to_float(ctx, src1),
-   };
-
-   ac_build_type_name_for_intr(LLVMTypeOf(params[0]), type, sizeof(type));
-   ASSERTED const int length = snprintf(name, sizeof(name), "%s.%s", intrin, type);
-   assert(length < sizeof(name));
-   return ac_build_intrinsic(ctx, name, result_type, params, 2, 0);
-}
-
-static LLVMValueRef emit_intrin_3f_param(struct ac_llvm_context *ctx, const char *intrin,
-                                         LLVMTypeRef result_type, LLVMValueRef src0,
-                                         LLVMValueRef src1, LLVMValueRef src2)
-{
-   char name[64], type[64];
-   LLVMValueRef params[] = {
-      ac_to_float(ctx, src0),
-      ac_to_float(ctx, src1),
-      ac_to_float(ctx, src2),
-   };
-
-   ac_build_type_name_for_intr(LLVMTypeOf(params[0]), type, sizeof(type));
-   ASSERTED const int length = snprintf(name, sizeof(name), "%s.%s", intrin, type);
-   assert(length < sizeof(name));
-   return ac_build_intrinsic(ctx, name, result_type, params, 3, 0);
+   return ac_build_intrinsic(ctx, name, ac_to_float_type(ctx, result_type), params,
+                             src2 ? 3 : src1 ? 2 : 1, 0);
 }
 
 static LLVMValueRef emit_bcsel(struct ac_llvm_context *ctx, LLVMValueRef src0, LLVMValueRef src1,
@@ -328,7 +272,7 @@ static LLVMValueRef emit_f2f16(struct ac_llvm_context *ctx, LLVMValueRef src0)
        * so compare the result and flush to 0 if it's smaller.
        */
       LLVMValueRef temp, cond2;
-      temp = emit_intrin_1f_param(ctx, "llvm.fabs", ctx->f32, result);
+      temp = emit_fp_intrinsic(ctx, "llvm.fabs", ctx->f32, result, NULL, NULL);
       cond = LLVMBuildFCmp(
          ctx->builder, LLVMRealOGT,
          LLVMBuildBitCast(ctx->builder, LLVMConstInt(ctx->i32, 0x38800000, false), ctx->f32, ""),
@@ -649,8 +593,7 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
                                   src, 2, 0);
       break;
    case nir_op_frcp:
-      result = emit_intrin_1f_param_scalar(&ctx->ac, "llvm.amdgcn.rcp",
-                                           ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.amdgcn.rcp", def_type, src[0], NULL, NULL);
       if (ctx->abi->clamp_div_by_zero)
          result = ac_build_fmin(&ctx->ac, result,
                                 LLVMConstReal(ac_to_float_type(&ctx->ac, def_type), FLT_MAX));
@@ -740,8 +683,7 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
       result = emit_float_cmp(&ctx->ac, LLVMRealORD, src[0], src[1]);
       break;
    case nir_op_fabs:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.fabs", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.fabs", def_type, src[0], NULL, NULL);
       break;
    case nir_op_fsat:
       src[0] = ac_to_float(&ctx->ac, src[0]);
@@ -771,51 +713,40 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
       result = ac_build_fsign(&ctx->ac, src[0]);
       break;
    case nir_op_ffloor:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.floor", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.floor", def_type, src[0], NULL, NULL);
       break;
    case nir_op_ftrunc:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.trunc", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.trunc", def_type, src[0], NULL, NULL);
       break;
    case nir_op_fceil:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.ceil", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.ceil", def_type, src[0], NULL, NULL);
       break;
    case nir_op_fround_even:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.rint", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.rint", def_type, src[0], NULL, NULL);
       break;
    case nir_op_ffract:
-      result = emit_intrin_1f_param_scalar(&ctx->ac, "llvm.amdgcn.fract",
-                                           ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.amdgcn.fract", def_type, src[0], NULL, NULL);
       break;
    case nir_op_fsin_amd:
    case nir_op_fcos_amd:
       /* before GFX9, v_sin_f32 and v_cos_f32 had a valid input domain of [-256, +256] */
       if (ctx->ac.gfx_level < GFX9)
-         src[0] = emit_intrin_1f_param_scalar(&ctx->ac, "llvm.amdgcn.fract",
-                                              ac_to_float_type(&ctx->ac, def_type), src[0]);
-      result =
-         emit_intrin_1f_param(&ctx->ac, instr->op == nir_op_fsin_amd ? "llvm.amdgcn.sin" : "llvm.amdgcn.cos",
-                              ac_to_float_type(&ctx->ac, def_type), src[0]);
+         src[0] = emit_fp_intrinsic(&ctx->ac, "llvm.amdgcn.fract", def_type, src[0], NULL, NULL);
+      result = emit_fp_intrinsic(&ctx->ac, instr->op == nir_op_fsin_amd ? "llvm.amdgcn.sin" : "llvm.amdgcn.cos",
+                                 def_type, src[0], NULL, NULL);
       break;
    case nir_op_fsqrt:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.sqrt", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.sqrt", def_type, src[0], NULL, NULL);
       LLVMSetMetadata(result, ctx->ac.fpmath_md_kind, ctx->ac.three_md);
       break;
    case nir_op_fexp2:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.exp2", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.exp2", def_type, src[0], NULL, NULL);
       break;
    case nir_op_flog2:
-      result =
-         emit_intrin_1f_param(&ctx->ac, "llvm.log2", ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.log2", def_type, src[0], NULL, NULL);
       break;
    case nir_op_frsq:
-      result = emit_intrin_1f_param_scalar(&ctx->ac, "llvm.amdgcn.rsq",
-                                           ac_to_float_type(&ctx->ac, def_type), src[0]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.amdgcn.rsq", def_type, src[0], NULL, NULL);
       if (ctx->abi->clamp_div_by_zero)
          result = ac_build_fmin(&ctx->ac, result,
                                 LLVMConstReal(ac_to_float_type(&ctx->ac, def_type), FLT_MAX));
@@ -831,16 +762,14 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
       result = ac_build_frexp_mant(&ctx->ac, src[0], instr->def.bit_size);
       break;
    case nir_op_fmax:
-      result = emit_intrin_2f_param(&ctx->ac, "llvm.maxnum", ac_to_float_type(&ctx->ac, def_type),
-                                    src[0], src[1]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.maxnum", def_type, src[0], src[1], NULL);
       if (ctx->ac.gfx_level < GFX9 && instr->def.bit_size == 32) {
          /* Only pre-GFX9 chips do not flush denorms. */
          result = ac_build_canonicalize(&ctx->ac, result, instr->def.bit_size);
       }
       break;
    case nir_op_fmin:
-      result = emit_intrin_2f_param(&ctx->ac, "llvm.minnum", ac_to_float_type(&ctx->ac, def_type),
-                                    src[0], src[1]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.minnum", def_type, src[0], src[1], NULL);
       if (ctx->ac.gfx_level < GFX9 && instr->def.bit_size == 32) {
          /* Only pre-GFX9 chips do not flush denorms. */
          result = ac_build_canonicalize(&ctx->ac, result, instr->def.bit_size);
@@ -849,8 +778,7 @@ static bool visit_alu(struct ac_nir_context *ctx, const nir_alu_instr *instr)
    case nir_op_ffma:
       /* FMA is slow on gfx6-8, so it shouldn't be used. */
       assert(instr->def.bit_size != 32 || ctx->ac.gfx_level >= GFX9);
-      result = emit_intrin_3f_param(&ctx->ac, "llvm.fma", ac_to_float_type(&ctx->ac, def_type),
-                                    src[0], src[1], src[2]);
+      result = emit_fp_intrinsic(&ctx->ac, "llvm.fma", def_type, src[0], src[1], src[2]);
       break;
    case nir_op_ffmaz:
       assert(ctx->ac.gfx_level >= GFX10_3);
@@ -1465,19 +1393,7 @@ static LLVMValueRef build_tex_intrinsic(struct ac_nir_context *ctx, const nir_te
                                         struct ac_image_args *args)
 {
    assert((!args->tfe || !args->d16) && "unsupported");
-
-   if (instr->sampler_dim == GLSL_SAMPLER_DIM_BUF) {
-      unsigned mask = nir_def_components_read(&instr->def);
-
-      /* Buffers don't support A16. */
-      if (args->a16)
-         args->coords[0] = LLVMBuildZExt(ctx->ac.builder, args->coords[0], ctx->ac.i32, "");
-
-      return ac_build_buffer_load_format(&ctx->ac, args->resource, args->coords[0], ctx->ac.i32_0,
-                                         util_last_bit(mask), 0, true,
-                                         instr->def.bit_size == 16,
-                                         args->tfe);
-   }
+   assert(instr->sampler_dim != GLSL_SAMPLER_DIM_BUF);
 
    args->opcode = ac_image_sample;
 
@@ -2275,26 +2191,9 @@ static LLVMValueRef visit_image_load(struct ac_nir_context *ctx, const nir_intri
    args.access = nir_intrinsic_access(instr);
    args.tfe = instr->intrinsic == nir_intrinsic_bindless_image_sparse_load;
 
-   if (dim == GLSL_SAMPLER_DIM_BUF) {
-      unsigned num_channels = util_last_bit(nir_def_components_read(&instr->def));
-      if (instr->def.bit_size == 64)
-         num_channels = num_channels < 4 ? 2 : 4;
-      LLVMValueRef rsrc, vindex;
+   assert(dim != GLSL_SAMPLER_DIM_BUF);
 
-      rsrc = ctx->abi->load_sampler_desc(ctx->abi, dynamic_index, AC_DESC_BUFFER);
-      vindex =
-         LLVMBuildExtractElement(ctx->ac.builder, get_src(ctx, instr->src[1]), ctx->ac.i32_0, "");
-
-      bool can_speculate = access & ACCESS_CAN_REORDER;
-      res = ac_build_buffer_load_format(&ctx->ac, rsrc, vindex, ctx->ac.i32_0, num_channels,
-                                        args.access, can_speculate,
-                                        instr->def.bit_size == 16,
-                                        args.tfe);
-      res = ac_build_expand(&ctx->ac, res, num_channels, args.tfe ? 5 : 4);
-
-      res = ac_trim_vector(&ctx->ac, res, instr->def.num_components);
-      res = ac_to_integer(&ctx->ac, res);
-   } else if (instr->intrinsic == nir_intrinsic_bindless_image_fragment_mask_load_amd) {
+   if (instr->intrinsic == nir_intrinsic_bindless_image_fragment_mask_load_amd) {
       assert(ctx->ac.gfx_level < GFX11);
 
       args.opcode = ac_image_load;
@@ -2380,7 +2279,8 @@ static void visit_image_store(struct ac_nir_context *ctx, const nir_intrinsic_in
       vindex =
          LLVMBuildExtractElement(ctx->ac.builder, get_src(ctx, instr->src[1]), ctx->ac.i32_0, "");
 
-      ac_build_buffer_store_format(&ctx->ac, rsrc, src, vindex, ctx->ac.i32_0, args.access, true);
+      ac_build_buffer_store_format(&ctx->ac, rsrc, src, vindex, ctx->ac.i32_0, ctx->ac.i32_0,
+                                   args.access, true);
    } else {
       bool level_zero = nir_src_is_const(instr->src[4]) && nir_src_as_uint(instr->src[4]) == 0;
 
@@ -3117,7 +3017,10 @@ static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
    case nir_intrinsic_store_buffer_amd: {
       unsigned src_base = instr->intrinsic == nir_intrinsic_store_buffer_amd ? 1 : 0;
       bool idxen = !nir_src_is_const(instr->src[src_base + 3]) ||
-                   nir_src_as_uint(instr->src[src_base + 3]);
+                   nir_src_as_uint(instr->src[src_base + 3]) ||
+                   /* GFX9 uses IDXEN to select bounds checking behavior */
+                   (ctx->ac.gfx_level == GFX9 &&
+                    nir_intrinsic_access(instr) & ACCESS_USES_FORMAT_AMD);
 
       LLVMValueRef store_data = get_src(ctx, instr->src[0]);
       LLVMValueRef descriptor = get_src(ctx, instr->src[src_base + 0]);
@@ -3129,19 +3032,21 @@ static bool visit_intrinsic(struct ac_nir_context *ctx, nir_intrinsic_instr *ins
       bool reorder = nir_intrinsic_can_reorder(instr);
       enum gl_access_qualifier access = nir_intrinsic_access(instr);
       bool uses_format = access & ACCESS_USES_FORMAT_AMD;
+      bool is_sparse = access & ACCESS_SPARSE;
 
       LLVMValueRef voffset = LLVMBuildAdd(ctx->ac.builder, addr_voffset,
                                           LLVMConstInt(ctx->ac.i32, const_offset, 0), "");
 
       if (instr->intrinsic == nir_intrinsic_load_buffer_amd && uses_format) {
          assert(instr->def.bit_size == 16 || instr->def.bit_size == 32);
-         result = ac_build_buffer_load_format(&ctx->ac, descriptor, vidx, voffset, num_components,
-                                              access, reorder,
-                                              instr->def.bit_size == 16, false);
+         result = ac_build_buffer_load_format(&ctx->ac, descriptor, vidx, voffset, addr_soffset,
+                                              num_components - is_sparse, access, reorder,
+                                              instr->def.bit_size == 16, is_sparse);
          result = ac_to_integer(&ctx->ac, result);
       } else if (instr->intrinsic == nir_intrinsic_store_buffer_amd && uses_format) {
          assert(instr->src[0].ssa->bit_size == 16 || instr->src[0].ssa->bit_size == 32);
-         ac_build_buffer_store_format(&ctx->ac, descriptor, store_data, vidx, voffset, access, true);
+         ac_build_buffer_store_format(&ctx->ac, descriptor, store_data, vidx, voffset,
+                                      addr_soffset, access, true);
       } else if (instr->intrinsic == nir_intrinsic_load_buffer_amd ||
                  instr->intrinsic == nir_intrinsic_load_typed_buffer_amd) {
          /* LLVM is unable to select instructions for larger than 32-bit channel types.
@@ -3549,8 +3454,7 @@ static void tex_fetch_ptrs(struct ac_nir_context *ctx, nir_tex_instr *instr,
       }
    }
 
-   enum ac_descriptor_type main_descriptor =
-      instr->sampler_dim == GLSL_SAMPLER_DIM_BUF ? AC_DESC_BUFFER : AC_DESC_IMAGE;
+   enum ac_descriptor_type main_descriptor = AC_DESC_IMAGE;
 
    if (plane >= 0) {
       assert(instr->op != nir_texop_txf_ms);
@@ -3745,10 +3649,8 @@ static void visit_tex(struct ac_nir_context *ctx, nir_tex_instr *instr)
       args.dmask = BITFIELD_MASK(num_components);
    }
 
-   if (instr->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
-      args.dim = ac_get_sampler_dim(ctx->ac.gfx_level, instr->sampler_dim, instr->is_array);
-      args.unorm = instr->sampler_dim == GLSL_SAMPLER_DIM_RECT;
-   }
+   args.dim = ac_get_sampler_dim(ctx->ac.gfx_level, instr->sampler_dim, instr->is_array);
+   args.unorm = instr->sampler_dim == GLSL_SAMPLER_DIM_RECT;
 
    /* Adjust the number of coordinates because we only need (x,y) for 2D
     * multisampled images and (x,y,layer) for 2D multisampled layered

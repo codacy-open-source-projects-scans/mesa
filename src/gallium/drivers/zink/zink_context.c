@@ -2408,6 +2408,7 @@ zink_set_sampler_views(struct pipe_context *pctx,
                   ctx->di.cubes[shader_type] |= BITFIELD_BIT(start_slot + i);
                }
 
+               res->seen_sampler_bind_stages |= res->gfx_barrier;
                if (general_layout) {
                   if (!ctx->blitting)
                      zink_screen(ctx->base.screen)->image_barrier(ctx, res, VK_IMAGE_LAYOUT_GENERAL, VK_ACCESS_SHADER_READ_BIT, res->gfx_barrier);
@@ -3519,6 +3520,32 @@ zink_batch_no_rp_safe(struct zink_context *ctx)
    if (!ctx->queries_disabled)
       zink_query_renderpass_suspend(ctx);
    VKCTX(CmdEndRendering)(ctx->bs->cmdbuf);
+   if (zink_debug & ZINK_DEBUG_RPSTORES) {
+      bool zap = false;
+      for (unsigned i = 0; i < ARRAY_SIZE(ctx->dynamic_fb.attachments); i++) {
+         if (ctx->dynamic_fb.attachments[i].storeOp != VK_ATTACHMENT_STORE_OP_DONT_CARE) {
+            ctx->dynamic_fb.attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_NONE;
+            ctx->dynamic_fb.attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_NONE;
+            continue;
+         }
+         zap = true;
+         ctx->dynamic_fb.attachments[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+         ctx->dynamic_fb.attachments[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+         if (i >= PIPE_MAX_COLOR_BUFS) {
+            ctx->dynamic_fb.attachments[i].clearValue.depthStencil.depth = 0.0;
+            ctx->dynamic_fb.attachments[i].clearValue.depthStencil.stencil = 0;
+         } else {
+            ctx->dynamic_fb.attachments[i].clearValue.color.float32[0] = 1.0;
+            ctx->dynamic_fb.attachments[i].clearValue.color.float32[1] = 0.0;
+            ctx->dynamic_fb.attachments[i].clearValue.color.float32[2] = 0.0;
+            ctx->dynamic_fb.attachments[i].clearValue.color.float32[3] = 1.0;
+         }
+      }
+      if (zap) {
+         VKCTX(CmdBeginRendering)(ctx->bs->cmdbuf, &ctx->dynamic_fb.info);
+         VKCTX(CmdEndRendering)(ctx->bs->cmdbuf);
+      }
+   }
    ctx->in_rp = false;
    for (unsigned i = 0; i < ctx->fb_state.nr_cbufs; i++)
       ctx->dynamic_fb.attachments[i].resolveImageView = VK_NULL_HANDLE;
@@ -3886,10 +3913,11 @@ pre_sync_transfer_barrier(struct zink_context *ctx, struct zink_resource *res, b
                            VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL :
                            /* assume that all color buffers which are not swapchain images will be used for sampling to avoid splitting renderpasses */
                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+   VkPipelineStageFlags stages = res->seen_sampler_bind_stages | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
    if (unsync)
-      screen->image_barrier_unsync(ctx, res, layout, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+      screen->image_barrier_unsync(ctx, res, layout, VK_ACCESS_SHADER_READ_BIT, stages);
    else
-      screen->image_barrier(ctx, res, layout, VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+      screen->image_barrier(ctx, res, layout, VK_ACCESS_SHADER_READ_BIT, stages);
 }
 
 static void

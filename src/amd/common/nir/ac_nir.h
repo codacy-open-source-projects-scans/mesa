@@ -36,6 +36,13 @@ enum {
    AC_EXP_FLAG_VALID_MASK = (1 << 2),
 };
 
+enum {
+   /* Whether nir_tex_instr should treat the deref or handle as an image binding
+    * (image_load lowered to tex, etc.).
+    */
+   AC_NIR_TEX_BACKEND_FLAG_IS_IMAGE = BITFIELD_BIT(0),
+};
+
 struct ac_nir_config {
    enum amd_gfx_level gfx_level;
    bool uses_aco;
@@ -394,10 +401,10 @@ typedef struct {
     */
    bool fix_derivs_in_divergent_cf;
    unsigned max_wqm_vgprs;
-} ac_nir_lower_tex_options;
+} ac_nir_lower_image_tex_options;
 
 bool
-ac_nir_lower_tex(nir_shader *nir, const ac_nir_lower_tex_options *options);
+ac_nir_lower_image_tex(nir_shader *nir, const ac_nir_lower_image_tex_options *options);
 
 void
 ac_nir_store_debug_log_amd(nir_builder *b, nir_def *uvec4);

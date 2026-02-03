@@ -1848,7 +1848,10 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
    const struct wsi_image_create_info *wsi_info =
       vk_find_struct_const(pCreateInfo->pNext, WSI_IMAGE_CREATE_INFO_MESA);
    image->from_wsi = wsi_info != NULL;
-   image->wsi_blit_src = wsi_info && wsi_info->blit_src;
+
+   /* Non-intermediate WSI images are displayable. */
+   if (wsi_info && !wsi_info->blit_src)
+      isl_extra_usage_flags |= ISL_SURF_USAGE_DISPLAY_BIT;
 
    /* The Vulkan 1.2.165 glossary says:
     *
@@ -1909,10 +1912,6 @@ anv_image_init(struct anv_device *device, struct anv_image *image,
       anv_perf_warn(VK_LOG_OBJS(&image->vk.base), "Enable multi-LOD HiZ");
       isl_extra_usage_flags |= ISL_SURF_USAGE_DISABLE_AUX_BIT;
    }
-
-   /* Mark WSI images with the right surf usage. */
-   if (image->from_wsi)
-      isl_extra_usage_flags |= ISL_SURF_USAGE_DISPLAY_BIT;
 
    const VkImageFormatListCreateInfo *fmt_list =
       vk_find_struct_const(pCreateInfo->pNext,
@@ -3479,40 +3478,41 @@ anv_layout_to_aux_state(const struct intel_device_info * const devinfo,
    case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR: {
       assert(image->vk.aspects == VK_IMAGE_ASPECT_COLOR_BIT);
 
-      /* Handle transition to present layout for non wsi images just like
-       * normal images. Some apps like gfx-reconstruct incorrectly use this
-       * layout on non-wsi image which is against spec. It's easy enough to
-       * deal with it here and potentially avoid unnecessary resolve
-       * operations.
+      /* If this is a WSI blit source, it will never be scanout directly to
+       * display but will be copied to a dma-buf that can be scanout.
+       *
+       * GFXReconstruct's Virtual Swapchain feature behaves in a similar
+       * manner. Although this is against spec, it's easy enough to deal with
+       * it here.
        */
-      if (!image->from_wsi)
-         break;
+      const isl_surf_usage_flags_t surf_usage =
+         image->planes[plane].primary_surface.isl.usage;
+      if (!image->from_wsi || !isl_surf_usage_is_display(surf_usage)) {
+         return anv_layout_to_aux_state(devinfo, image, aspect,
+                                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                        queue_flags);
+      }
 
+      assert(image->vk.tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT);
       enum isl_aux_state aux_state =
          isl_drm_modifier_get_default_aux_state(image->vk.drm_format_mod);
 
       switch (aux_state) {
       case ISL_AUX_STATE_AUX_INVALID:
          /* The modifier does not support compression. But, if we arrived
-          * here, then we have enabled compression on it anyway. If this is a
-          * WSI blit source, keep compression as we can do a compressed to
-          * uncompressed copy.
-          */
-         assert(devinfo->ver <= 11);
-         if (image->wsi_blit_src)
-            return ISL_AUX_STATE_COMPRESSED_CLEAR;
-
-         /* If this is not a WSI blit source, we must resolve the aux surface
-          * before we release ownership to the presentation engine (because,
-          * having no modifier, the presentation engine will not be aware of
-          * the aux surface). The presentation engine will not access the aux
-          * surface (because it is unware of it), and so the aux surface will
-          * still be resolved when we re-acquire ownership.
+          * here, then we have enabled compression on it anyway, in which case
+          * we must resolve the aux surface before we release ownership to the
+          * presentation engine (because, having no modifier, the presentation
+          * engine will not be aware of the aux surface). The presentation
+          * engine will not access the aux surface (because it is unware of
+          * it), and so the aux surface will still be resolved when we
+          * re-acquire ownership.
           *
           * Therefore, at ownership transfers in either direction, there does
           * exist an aux surface despite the lack of modifier and its state is
           * pass-through.
           */
+         assert(devinfo->ver <= 11);
          return ISL_AUX_STATE_PASS_THROUGH;
       case ISL_AUX_STATE_COMPRESSED_CLEAR:
          return ISL_AUX_STATE_COMPRESSED_CLEAR;
