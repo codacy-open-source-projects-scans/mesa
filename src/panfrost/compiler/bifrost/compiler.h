@@ -1196,6 +1196,21 @@ bi_temp(bi_context *ctx)
 }
 
 static inline bi_index
+bi_temp_like(bi_context *ctx, bi_index idx)
+{
+   idx.value = ctx->ssa_alloc++;
+   /* Reset the fields which don't make sense on a destination.
+    * When the temp replaces a source, bi_replace_index copies these from the
+    * old index.
+    */
+   idx.abs = false;
+   idx.neg = false;
+   idx.swizzle = BI_SWIZZLE_H01;
+   idx.discard = false;
+   return idx;
+}
+
+static inline bi_index
 bi_def_index(nir_def *def)
 {
    return bi_get_index(def->index);
@@ -1473,8 +1488,19 @@ unsigned bi_calc_register_demand(bi_context *ctx);
 void bi_postra_liveness(bi_context *ctx);
 uint64_t MUST_CHECK bi_postra_liveness_ins(uint64_t live, bi_instr *ins);
 
-/* SSA spilling; returns number of spilled registers */
-unsigned bi_spill_ssa(bi_context *ctx, unsigned num_registers, unsigned tls_size);
+/* Record sizes of SSA values into the provided array. */
+void bi_record_sizes(bi_context *ctx, uint32_t *sizes);
+
+/* SSA spilling */
+void bi_spill_ssa(bi_context *ctx, unsigned num_registers);
+
+void bi_repair_ssa(bi_context *ctx);
+
+/* Reindex SSA to reduce memory usage */
+void bi_reindex_ssa(bi_context *ctx);
+
+/* Lower memory operands created during spilling. */
+unsigned bi_lower_spill(bi_context* ctx, uint32_t tls_base);
 
 /* Layout */
 

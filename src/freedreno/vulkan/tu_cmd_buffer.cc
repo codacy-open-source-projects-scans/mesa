@@ -7300,8 +7300,6 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
    };
    vk_cmd_set_rendering_attachment_locations(&cmd->vk, &ral_info);
 
-   cmd->patchpoints_ctx = ralloc_context(NULL);
-
    a = cmd->dynamic_subpasses[0].fsr_attachment;
    if (a != VK_ATTACHMENT_UNUSED) {
       const VkRenderingFragmentShadingRateAttachmentInfoKHR *fsr_info =
@@ -7362,6 +7360,7 @@ tu_CmdBeginRendering(VkCommandBuffer commandBuffer,
    tu_fill_render_pass_state(&cmd->state.vk_rp, cmd->state.pass, cmd->state.subpass);
 
    if (!resuming) {
+      cmd->patchpoints_ctx = ralloc_context(NULL);
       tu_emit_renderpass_begin(cmd);
       tu_emit_subpass_begin<CHIP>(cmd);
    }
@@ -8435,8 +8434,13 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
       const struct tu_shader *tcs = cmd->state.shaders[MESA_SHADER_TESS_CTRL];
 
       /* maximum number of patches that can fit in tess factor/param buffers */
-      uint32_t subdraw_size = MIN2(TU_TESS<CHIP>::FACTOR_SIZE / ir3_tess_factor_stride(tes->variant->key.tessellation),
-                           TU_TESS<CHIP>::PARAM_SIZE / (tcs->variant->output_size * 4));
+      uint32_t subdraw_size =
+         tcs->variant->output_size != 0
+            ? MIN2(
+                 TU_TESS<CHIP>::FACTOR_SIZE /
+                    ir3_tess_factor_stride(tes->variant->key.tessellation),
+                 TU_TESS<CHIP>::PARAM_SIZE / (tcs->variant->output_size * 4))
+            : 0;
       /* convert from # of patches to draw count */
       subdraw_size *= cmd->vk.dynamic_graphics_state.ts.patch_control_points;
 

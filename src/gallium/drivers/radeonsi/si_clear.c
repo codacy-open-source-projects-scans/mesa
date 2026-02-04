@@ -573,52 +573,10 @@ static void si_set_optimal_micro_tile_mode(struct si_screen *sscreen, struct si_
 
 static uint32_t si_get_htile_clear_value(struct si_texture *tex, float depth)
 {
-   /* Maximum 14-bit UINT value. */
-   const uint32_t max_z_value = 0x3FFF;
-
-   /* For clears, Zmask and Smem will always be set to zero. */
-   const uint32_t zmask = 0;
-   const uint32_t smem  = 0;
-
-   /* Convert depthValue to 14-bit zmin/zmax uint values. */
-   const uint32_t zmin = lroundf(depth * max_z_value);
-   const uint32_t zmax = zmin;
-
-   if (tex->htile_stencil_disabled) {
-      /* Z-only HTILE is laid out as follows:
-       * |31     18|17      4|3     0|
-       * +---------+---------+-------+
-       * |  Max Z  |  Min Z  | ZMask |
-       */
-      return ((zmax & 0x3FFF) << 18) |
-             ((zmin & 0x3FFF) << 4) |
-             ((zmask & 0xF) << 0);
-   } else {
-      /* Z+S HTILE is laid out as-follows:
-       * |31       12|11 10|9    8|7   6|5   4|3     0|
-       * +-----------+-----+------+-----+-----+-------+
-       * |  Z Range  |     | SMem | SR1 | SR0 | ZMask |
-       *
-       * The base value for zRange is either zMax or zMin, depending on ZRANGE_PRECISION.
-       * For a fast clear, zMin == zMax == clearValue. This means that the base will
-       * always be the clear value (converted to 14-bit UINT).
-       *
-       * When abs(zMax-zMin) < 16, the delta is equal to the difference. In the case of
-       * fast clears, where zMax == zMin, the delta is always zero.
-       */
-      const uint32_t delta = 0;
-      const uint32_t zrange = (zmax << 6) | delta;
-
-      /* SResults 0 & 1 are set based on the stencil compare state.
-       * For fast-clear, the default value of sr0 and sr1 are both 0x3.
-       */
-      const uint32_t sresults = 0xf;
-
-      return ((zrange & 0xFFFFF) << 12) |
-             ((smem & 0x3) <<  8) |
-             ((sresults & 0xF) <<  4) |
-             ((zmask & 0xF) <<  0);
-   }
+   if (tex->htile_stencil_disabled)
+      return HTILE_Z_CLEAR_REG(depth);
+   else
+      return HTILE_ZS_CLEAR_REG(depth);
 }
 
 static bool si_can_fast_clear_depth(struct si_texture *zstex, unsigned level, float depth,
@@ -766,12 +724,15 @@ static void si_fast_clear(struct si_context *sctx, unsigned *buffers,
             num_clears++;
          }
 
-         /* DCC fast clear with MSAA should clear CMASK to 0xC. */
+         /* DCC fast clear with MSAA should clear FMASK by clearing CMASK to
+          * CMASK_MSAA_FMASK_CLEAR_0_COLOR_EXPANDED.
+          */
          if (tex->buffer.b.b.nr_samples >= 2 && tex->cmask_buffer) {
             assert(sctx->gfx_level < GFX11); /* no FMASK/CMASK on GFX11 */
             assert(num_clears < ARRAY_SIZE(info));
             si_init_buffer_clear(&info[num_clears++], &tex->cmask_buffer->b.b,
-                                 tex->surface.cmask_offset, tex->surface.cmask_size, 0xCCCCCCCC);
+                                 tex->surface.cmask_offset, tex->surface.cmask_size,
+                                 CMASK_MSAA_FMASK_CLEAR_0_COLOR_EXPANDED);
             clear_types |= SI_CLEAR_TYPE_CMASK;
             fmask_decompress_needed = true;
          }
@@ -858,7 +819,10 @@ static void si_fast_clear(struct si_context *sctx, unsigned *buffers,
          /* Do the fast clear. */
          assert(num_clears < ARRAY_SIZE(info));
          si_init_buffer_clear(&info[num_clears++], &tex->cmask_buffer->b.b,
-                              cmask_offset, clear_size, 0);
+                              cmask_offset, clear_size,
+                              tex->buffer.b.b.nr_samples >= 2 ?
+                                 CMASK_MSAA_FMASK_CLEAR_0_COLOR_CLEAR_REG :
+                                 CMASK_NOAA_COLOR_CLEAR_REG);
          clear_types |= SI_CLEAR_TYPE_CMASK;
          eliminate_needed = true;
          /* If we allocated a cmask buffer for this tex we need to re-emit
@@ -1372,12 +1336,13 @@ bool si_compute_fast_clear_image(struct si_context *sctx, struct pipe_resource *
       num_clears++;
    }
 
-   /* DCC fast clear with MSAA should clear CMASK to 0xC. */
+   /* DCC fast clear with MSAA should clear CMASK to CMASK_MSAA_FMASK_CLEAR_0_COLOR_EXPANDED. */
    if (dst->nr_samples >= 2 && sdst->cmask_buffer) {
       assert(sctx->gfx_level < GFX11); /* no FMASK/CMASK on GFX11 */
       assert(num_clears < ARRAY_SIZE(info));
       si_init_buffer_clear(&info[num_clears++], &sdst->cmask_buffer->b.b,
-                           sdst->surface.cmask_offset, sdst->surface.cmask_size, 0xCCCCCCCC);
+                           sdst->surface.cmask_offset, sdst->surface.cmask_size,
+                           CMASK_MSAA_FMASK_CLEAR_0_COLOR_EXPANDED);
       clear_types |= SI_CLEAR_TYPE_CMASK;
 
       if (!(sdst->dirty_level_mask & BITFIELD_BIT(level))) {

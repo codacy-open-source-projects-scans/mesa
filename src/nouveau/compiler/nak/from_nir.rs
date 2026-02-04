@@ -460,35 +460,6 @@ impl<'a> ShaderFromNir<'a> {
         self.get_ssa_ref(src).into()
     }
 
-    fn get_io_addr_offset(
-        &mut self,
-        addr: &nir_src,
-        imm_bits: u8,
-    ) -> (Src, i32) {
-        let addr = addr.as_def();
-        let addr_offset = unsafe {
-            nak_get_io_addr_offset(addr as *const _ as *mut _, imm_bits)
-        };
-
-        if let Some(base_def) = std::ptr::NonNull::new(addr_offset.base.def) {
-            let base_def = unsafe { base_def.as_ref() };
-            let base_comp = u8::try_from(addr_offset.base.comp).unwrap();
-            let (base, _) = self.get_ssa_comp(base_def, base_comp);
-            (base.into(), addr_offset.offset)
-        } else {
-            (SrcRef::Zero.into(), addr_offset.offset)
-        }
-    }
-
-    fn get_cbuf_addr_offset(&mut self, addr: &nir_src) -> (Src, u16) {
-        let (off, off_imm) = self.get_io_addr_offset(addr, 16);
-        if let Ok(off_imm_u16) = u16::try_from(off_imm) {
-            (off, off_imm_u16)
-        } else {
-            (self.get_src(addr), 0)
-        }
-    }
-
     fn set_dst(&mut self, def: &nir_def, ssa: SSARef) {
         self.set_ssa(def, (*ssa).into());
     }
@@ -2969,9 +2940,9 @@ impl<'a> ShaderFromNir<'a> {
                 let cond = self.get_ssa(srcs[0].as_def())[0];
                 b.predicate(cond.into()).push_op(OpKill {});
             }
-            nir_intrinsic_global_atomic => {
+            nir_intrinsic_global_atomic_nv => {
                 let bit_size = intrin.def.bit_size();
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let data = self.get_src(&srcs[1]);
                 let atom_type = self.get_atomic_type(intrin);
                 let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Separate);
@@ -2993,17 +2964,17 @@ impl<'a> ShaderFromNir<'a> {
                     data: data,
                     atom_op: atom_op,
                     atom_type: atom_type,
-                    addr_offset: offset,
+                    addr_offset: intrin.base(),
                     mem_space: MemSpace::Global(MemAddrType::A64),
                     mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: MemEvictionPriority::Normal, // Note: no intrinic access
                 });
                 self.set_dst(&intrin.def, dst);
             }
-            nir_intrinsic_global_atomic_swap => {
+            nir_intrinsic_global_atomic_swap_nv => {
                 assert!(intrin.atomic_op() == nir_atomic_op_cmpxchg);
                 let bit_size = intrin.def.bit_size();
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let cmpr = self.get_src(&srcs[1]);
                 let data = self.get_src(&srcs[2]);
                 let atom_type = AtomType::U(bit_size);
@@ -3018,7 +2989,7 @@ impl<'a> ShaderFromNir<'a> {
                     data: data,
                     atom_op: AtomOp::CmpExch(AtomCmpSrc::Separate),
                     atom_type: atom_type,
-                    addr_offset: offset,
+                    addr_offset: intrin.base(),
                     mem_space: MemSpace::Global(MemAddrType::A64),
                     mem_order: MemOrder::Strong(MemScope::GPU),
                     mem_eviction_priority: MemEvictionPriority::Normal, // Note: no intrinic access
@@ -3093,12 +3064,11 @@ impl<'a> ShaderFromNir<'a> {
             }
             nir_intrinsic_vild_nv => {
                 let dst = b.alloc_ssa(RegFile::GPR);
-
-                let (idx, off) = self.get_io_addr_offset(&srcs[0], 8);
+                let idx = self.get_src(&srcs[0]);
                 b.push_op(OpViLd {
                     dst: dst.into(),
                     idx,
-                    off: off.try_into().unwrap(),
+                    off: intrin.base().try_into().unwrap(),
                 });
                 self.set_dst(&intrin.def, dst.into());
             }
@@ -3106,14 +3076,11 @@ impl<'a> ShaderFromNir<'a> {
             nir_intrinsic_load_barycentric_centroid => (),
             nir_intrinsic_load_barycentric_pixel => (),
             nir_intrinsic_load_barycentric_sample => (),
-            nir_intrinsic_load_global | nir_intrinsic_load_global_constant => {
+            nir_intrinsic_load_global_nv => {
                 let size_B =
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 assert!(u32::from(size_B) <= intrin.align());
-                let order = if intrin.intrinsic
-                    == nir_intrinsic_load_global_constant
-                    || (intrin.access() & ACCESS_CAN_REORDER) != 0
-                {
+                let order = if intrin.access() & ACCESS_CAN_REORDER != 0 {
                     MemOrder::Constant
                 } else {
                     MemOrder::Strong(MemScope::GPU)
@@ -3125,13 +3092,13 @@ impl<'a> ShaderFromNir<'a> {
                     eviction_priority: self
                         .get_eviction_priority(intrin.access()),
                 };
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
 
                 b.push_op(OpLd {
                     dst: dst.clone().into(),
                     addr: addr,
-                    offset: offset,
+                    offset: intrin.base(),
                     access: access,
                 });
                 self.set_dst(&intrin.def, dst);
@@ -3224,7 +3191,7 @@ impl<'a> ShaderFromNir<'a> {
                 });
                 self.set_dst(&intrin.def, dst);
             }
-            nir_intrinsic_load_scratch => {
+            nir_intrinsic_load_scratch_nv => {
                 let size_B =
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 assert!(u32::from(size_B) <= intrin.align());
@@ -3234,18 +3201,18 @@ impl<'a> ShaderFromNir<'a> {
                     order: MemOrder::Strong(MemScope::CTA),
                     eviction_priority: MemEvictionPriority::Normal,
                 };
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
 
                 b.push_op(OpLd {
                     dst: dst.clone().into(),
                     addr: addr,
-                    offset: offset,
+                    offset: intrin.base(),
                     access: access,
                 });
                 self.set_dst(&intrin.def, dst);
             }
-            nir_intrinsic_load_shared => {
+            nir_intrinsic_load_shared_nv => {
                 let size_B =
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 assert!(u32::from(size_B) <= intrin.align());
@@ -3255,14 +3222,13 @@ impl<'a> ShaderFromNir<'a> {
                     order: MemOrder::Strong(MemScope::CTA),
                     eviction_priority: MemEvictionPriority::Normal,
                 };
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
-                let offset = offset + intrin.base();
+                let addr = self.get_src(&srcs[0]);
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
 
                 b.push_op(OpLd {
                     dst: dst.clone().into(),
                     addr: addr,
-                    offset: offset,
+                    offset: intrin.base(),
                     access: access,
                 });
                 self.set_dst(&intrin.def, dst);
@@ -3271,7 +3237,7 @@ impl<'a> ShaderFromNir<'a> {
                 let size_B = intrin.def.bit_size() / 8;
                 let mem_type = MemType::from_size(size_B, false);
 
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
                 let locked = b.alloc_ssa(RegFile::Pred);
 
@@ -3279,7 +3245,7 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.clone().into(),
                     locked: locked.into(),
                     addr,
-                    offset,
+                    offset: intrin.base(),
                     mem_type,
                 });
                 let locked_gpr = b.sel(locked.into(), 1.into(), 0.into());
@@ -3322,7 +3288,8 @@ impl<'a> ShaderFromNir<'a> {
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
                 let idx = &srcs[0];
 
-                let (off, off_imm) = self.get_cbuf_addr_offset(&srcs[1]);
+                let off = self.get_src(&srcs[1]);
+                let off_imm = intrin.base() as u16;
 
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
 
@@ -3332,7 +3299,7 @@ impl<'a> ShaderFromNir<'a> {
                         buf: CBuf::Binding(idx_imm),
                         offset: off_imm,
                     };
-                    if off.is_zero() {
+                    if srcs[1].is_zero() {
                         for (i, comp) in dst.iter().enumerate() {
                             let i = u16::try_from(i).unwrap();
                             b.copy_to(
@@ -3379,15 +3346,15 @@ impl<'a> ShaderFromNir<'a> {
                     (intrin.def.bit_size() / 8) * intrin.def.num_components();
 
                 let handle = self.get_ssa_ref(&srcs[0]);
-                let (off, off_imm) = self.get_cbuf_addr_offset(&srcs[1]);
+                let off = self.get_src(&srcs[1]);
 
                 let cb = CBufRef {
                     buf: CBuf::BindlessSSA(handle[..].try_into().unwrap()),
-                    offset: off_imm,
+                    offset: intrin.base() as u16,
                 };
 
                 let dst = b.alloc_ssa_vec(RegFile::GPR, size_B.div_ceil(4));
-                if off.is_zero() {
+                if srcs[1].is_zero() {
                     for (i, comp) in dst.iter().enumerate() {
                         let i = u16::try_from(i).unwrap();
                         b.copy_to(
@@ -3566,9 +3533,9 @@ impl<'a> ShaderFromNir<'a> {
                 });
                 self.set_dst(&intrin.def, dst.into());
             }
-            nir_intrinsic_shared_atomic => {
+            nir_intrinsic_shared_atomic_nv => {
                 let bit_size = intrin.def.bit_size();
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let data = self.get_src(&srcs[1]);
                 let atom_type = self.get_atomic_type(intrin);
                 let atom_op = self.get_atomic_op(intrin, AtomCmpSrc::Separate);
@@ -3583,17 +3550,17 @@ impl<'a> ShaderFromNir<'a> {
                     data: data,
                     atom_op: atom_op,
                     atom_type: atom_type,
-                    addr_offset: offset,
+                    addr_offset: intrin.base(),
                     mem_space: MemSpace::Shared,
                     mem_order: MemOrder::Strong(MemScope::CTA),
                     mem_eviction_priority: MemEvictionPriority::Normal,
                 });
                 self.set_dst(&intrin.def, dst);
             }
-            nir_intrinsic_shared_atomic_swap => {
+            nir_intrinsic_shared_atomic_swap_nv => {
                 assert!(intrin.atomic_op() == nir_atomic_op_cmpxchg);
                 let bit_size = intrin.def.bit_size();
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
+                let addr = self.get_src(&srcs[0]);
                 let cmpr = self.get_src(&srcs[1]);
                 let data = self.get_src(&srcs[2]);
                 let atom_type = AtomType::U(bit_size);
@@ -3608,7 +3575,7 @@ impl<'a> ShaderFromNir<'a> {
                     data: data,
                     atom_op: AtomOp::CmpExch(AtomCmpSrc::Separate),
                     atom_type: atom_type,
-                    addr_offset: offset,
+                    addr_offset: intrin.base(),
                     mem_space: MemSpace::Shared,
                     mem_order: MemOrder::Strong(MemScope::CTA),
                     mem_eviction_priority: MemEvictionPriority::Normal,
@@ -3619,7 +3586,7 @@ impl<'a> ShaderFromNir<'a> {
                 let src = self.get_src(&srcs[0]);
                 b.push_op(OpSrcBar { src });
             }
-            nir_intrinsic_store_global => {
+            nir_intrinsic_store_global_nv => {
                 let data = self.get_src(&srcs[0]);
                 let size_B =
                     (srcs[0].bit_size() / 8) * srcs[0].num_components();
@@ -3631,12 +3598,12 @@ impl<'a> ShaderFromNir<'a> {
                     eviction_priority: self
                         .get_eviction_priority(intrin.access()),
                 };
-                let (addr, offset) = self.get_io_addr_offset(&srcs[1], 24);
+                let addr = self.get_src(&srcs[1]);
 
                 b.push_op(OpSt {
                     addr: addr,
                     data: data,
-                    offset: offset,
+                    offset: intrin.base(),
                     access: access,
                 });
             }
@@ -3650,7 +3617,7 @@ impl<'a> ShaderFromNir<'a> {
 
                 self.fs_out_regs[usize::from(addr / 4)] = Some(data);
             }
-            nir_intrinsic_store_scratch => {
+            nir_intrinsic_store_scratch_nv => {
                 let data = self.get_src(&srcs[0]);
                 let size_B =
                     (srcs[0].bit_size() / 8) * srcs[0].num_components();
@@ -3661,16 +3628,16 @@ impl<'a> ShaderFromNir<'a> {
                     order: MemOrder::Strong(MemScope::CTA),
                     eviction_priority: MemEvictionPriority::Normal,
                 };
-                let (addr, offset) = self.get_io_addr_offset(&srcs[1], 24);
+                let addr = self.get_src(&srcs[1]);
 
                 b.push_op(OpSt {
                     addr: addr,
                     data: data,
-                    offset: offset,
+                    offset: intrin.base(),
                     access: access,
                 });
             }
-            nir_intrinsic_store_shared => {
+            nir_intrinsic_store_shared_nv => {
                 let data = self.get_src(&srcs[0]);
                 let size_B =
                     (srcs[0].bit_size() / 8) * srcs[0].num_components();
@@ -3681,13 +3648,12 @@ impl<'a> ShaderFromNir<'a> {
                     order: MemOrder::Strong(MemScope::CTA),
                     eviction_priority: MemEvictionPriority::Normal,
                 };
-                let (addr, offset) = self.get_io_addr_offset(&srcs[1], 24);
-                let offset = offset + intrin.base();
+                let addr = self.get_src(&srcs[1]);
 
                 b.push_op(OpSt {
                     addr: addr,
                     data: data,
-                    offset: offset,
+                    offset: intrin.base(),
                     access: access,
                 });
             }
@@ -3697,14 +3663,14 @@ impl<'a> ShaderFromNir<'a> {
                     (srcs[0].bit_size() / 8) * srcs[0].num_components();
                 let mem_type = MemType::from_size(size_B, false);
 
-                let (addr, offset) = self.get_io_addr_offset(&srcs[1], 24);
+                let addr = self.get_src(&srcs[1]);
                 let locked = b.alloc_ssa(RegFile::Pred);
 
                 b.push_op(OpStSCheckUnlock {
                     locked: locked.into(),
                     addr,
                     data,
-                    offset,
+                    offset: intrin.base(),
                     mem_type,
                 });
                 let locked_gpr = b.sel(locked.into(), 1.into(), 0.into());
@@ -3798,14 +3764,13 @@ impl<'a> ShaderFromNir<'a> {
                     LdsmSize::M8N8
                 };
                 let dst = b.alloc_ssa_vec(RegFile::GPR, comps);
-                let (addr, offset) = self.get_io_addr_offset(&srcs[0], 24);
-                let offset = offset + intrin.base();
+                let addr = self.get_src(&srcs[0]);
                 b.push_op(OpLdsm {
                     dst: dst.clone().into(),
                     mat_size,
                     mat_count,
                     addr,
-                    offset,
+                    offset: intrin.base(),
                 });
                 self.set_dst(&intrin.def, dst);
             }

@@ -40,9 +40,9 @@ run_tes(brw_shader &s)
    if (s.failed)
       return false;
 
-   s.emit_urb_writes();
-
    brw_calculate_cfg(s);
+
+   s.emit_tes_terminate();
 
    brw_optimize(s);
 
@@ -111,6 +111,15 @@ brw_compile_tes(const struct brw_compiler *compiler,
                                nir->info.patch_inputs_read,
                                key->separate_tess_vue_layout);
    }
+
+   const uint32_t pos_slots =
+      (nir->info.per_view_outputs & VARYING_BIT_POS) ?
+      MAX2(1, util_bitcount(key->base.view_mask)) : 1;
+
+   brw_compute_vue_map(devinfo, &prog_data->base.vue_map,
+                       nir->info.outputs_written,
+                       key->base.vue_layout, pos_slots);
+
    brw_nir_apply_key(pt, &key->base, dispatch_width);
    brw_nir_lower_tes_inputs(nir, devinfo, &input_vue_map);
    brw_nir_lower_vue_outputs(nir);
@@ -121,13 +130,8 @@ brw_compile_tes(const struct brw_compiler *compiler,
 
    brw_postprocess_nir(pt, debug_enabled, key->base.robust_flags);
 
-   const uint32_t pos_slots =
-      (nir->info.per_view_outputs & VARYING_BIT_POS) ?
-      MAX2(1, util_bitcount(key->base.view_mask)) : 1;
-
-   brw_compute_vue_map(devinfo, &prog_data->base.vue_map,
-                       nir->info.outputs_written,
-                       key->base.vue_layout, pos_slots);
+   BRW_NIR_PASS(brw_nir_lower_deferred_urb_writes, devinfo,
+                &prog_data->base.vue_map, 0, 0);
 
    unsigned output_size_bytes = prog_data->base.vue_map.num_slots * 4 * 4;
 
