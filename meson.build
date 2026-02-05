@@ -17,6 +17,8 @@ project(
   ],
 )
 
+project_version = meson.project_version()
+
 if host_machine.system() == 'darwin'
   add_languages('objc', native : false)
   libname_prefix = 'lib'
@@ -39,6 +41,16 @@ null_dep = dependency('', required : false)
 
 if get_option('layout') != 'mirror'
   error('`mirror` is the only build directory layout supported')
+endif
+
+if get_option('b_lto')
+  project_version += '-lto'
+  # LTO causes random issues that are nearly impossible to debug, so bug reports from LTO builds have been
+  # rejected for a long time now.
+  # Explicitly reject LTO when building to prevent more people from running into bugs that end up inactionable.
+  if not get_option('allow-broken-lto')
+     error('Building Mesa with LTO is not supported. Please disable LTO for building Mesa.')
+  endif
 endif
 
 with_llvm = get_option('llvm')
@@ -78,7 +90,7 @@ pre_args = [
   '-D__STDC_CONSTANT_MACROS',
   '-D__STDC_FORMAT_MACROS',
   '-D__STDC_LIMIT_MACROS',
-  '-DPACKAGE_VERSION="@0@"'.format(meson.project_version()),
+  '-DPACKAGE_VERSION="@0@"'.format(project_version),
   '-DPACKAGE_BUGREPORT="https://gitlab.freedesktop.org/mesa/mesa/-/issues"',
 ]
 # Arguments for c or cpp compiler, can be compiler options

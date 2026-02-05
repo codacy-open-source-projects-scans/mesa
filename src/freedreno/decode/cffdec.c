@@ -88,6 +88,9 @@ static int ib;
 static int draw_count;
 static int current_draw_count;
 
+/* Name of current pm4 packet being parsed: */
+static const char *current_pkt;
+
 /* query mode.. to handle symbolic register name queries, we need to
  * defer parsing query string until after gpu_id is know and rnn db
  * loaded:
@@ -152,6 +155,27 @@ static void disable_all_groups(void);
 static void dump_tex_samp(uint32_t *texsamp, enum state_src_t src, int num_unit,
                           int level);
 static void dump_tex_const(uint32_t *texsamp, int num_unit, int level);
+
+static struct shader_stats shader_stats[MESA_SHADER_STAGES];
+
+static void
+decode_shader_ir3(uint32_t *dwords, uint32_t sizedwords, int level,
+                  enum mesa_shader_stage stage)
+{
+   try_disasm_a3xx_stat(dwords, sizedwords, level, stdout,
+                        options->info->chip * 100,
+                        &shader_stats[stage]);
+}
+
+struct shader_stats *
+get_shader_stats(enum mesa_shader_stage stage)
+{
+   /* TODO in summary mode we might need to trigger silent shader disasm
+    * to have up to date stats?  Maybe we need to track whether the stats
+    * are valid?
+    */
+   return &shader_stats[stage];
+}
 
 static bool
 highlight_addr(uint32_t *hostaddr)
@@ -437,23 +461,36 @@ disasm_gpuaddr(const char *name, uint64_t gpuaddr, int level)
    buf = hostptr(gpuaddr);
    if (buf) {
       uint32_t sizedwords = hostlen(gpuaddr) / 4;
+      enum mesa_shader_stage stage = 0;
       const char *ext;
 
       dump_hex(buf, MIN2(64, sizedwords), level + 1);
-      try_disasm_a3xx(buf, sizedwords, level + 2, stdout, options->info->chip * 100);
 
       /* this is a bit ugly way, but oh well.. */
-      if (strstr(name, "SP_VS_OBJ")) {
+      if (strstr(name, "SP_VS")) {
          ext = "vo3";
-      } else if (strstr(name, "SP_FS_OBJ")) {
-         ext = "fo3";
-      } else if (strstr(name, "SP_GS_OBJ")) {
+         stage = MESA_SHADER_VERTEX;
+      } else if (strstr(name, "SP_HS")) {
+         ext = "ho3";
+         stage = MESA_SHADER_TESS_CTRL;
+      } else if (strstr(name, "SP_DS")) {
+         ext = "do3";
+         stage = MESA_SHADER_TESS_EVAL;
+      } else if (strstr(name, "SP_GS")) {
          ext = "go3";
-      } else if (strstr(name, "SP_CS_OBJ")) {
+         stage = MESA_SHADER_GEOMETRY;
+      } else if (strstr(name, "SP_FS") ||
+                 strstr(name, "SP_PS")) {
+         ext = "fo3";
+         stage = MESA_SHADER_FRAGMENT;
+      } else if (strstr(name, "SP_CS")) {
          ext = "co3";
+         stage = MESA_SHADER_COMPUTE;
       } else {
          ext = NULL;
       }
+
+      decode_shader_ir3(buf, sizedwords, level + 2, stage);
 
       if (ext)
          dump_shader(ext, buf, sizedwords * 4);
@@ -1239,7 +1276,7 @@ __do_query(const char *primtype, uint32_t num_indices)
 {
    int n = 0;
 
-   if ((5 <= options->info->chip) && (options->info->chip < 7)) {
+   if ((5 <= options->info->chip) && (options->info->chip < 9)) {
       uint32_t scissor_tl = reg_val(regbase("GRAS_SC_WINDOW_SCISSOR_TL"));
       uint32_t scissor_br = reg_val(regbase("GRAS_SC_WINDOW_SCISSOR_BR"));
 
@@ -1595,32 +1632,59 @@ dump_tex_samp(uint32_t *texsamp, enum state_src_t src, int num_unit, int level)
    }
 }
 
-static void
-dump_tex_descriptor_type(uint32_t *texmemobj, int idx, int level, const char *domain, const char *type)
+/* base=0 for bindful, N+1 for bindless .baseN
+ */
+static bool
+show_descriptor(uint32_t *desc, int sizedwords, int base, int idx,
+                const char *domain, const char *type)
 {
+   if (options->dump_all_bindless)
+      return true;
+
    struct rnndomain *dom = rnn_finddomain(rnn->db, domain);
 
+   /* Earlier gens don't have bindless, or use descriptor variants.  And
+    * extracting info about used (or maybe used) descriptors from the
+    * shaders is not well tested for the pre-a6xx instruction encodings.
+    */
+   assert(options->info->chip >= 6);
+
    if (!dom)
-      return;
+      return false;
+
+   if (!script_show_descriptor)
+      return true;
 
    rnn_varadd(rnn, "desctype", type);
-   if (script_show_descriptor && !script_show_descriptor(texmemobj, 16, type, rnn, dom))
-      return;
+   bool ret = script_show_descriptor(desc, sizedwords, base, idx, type,
+                                     current_pkt, rnn, dom);
+   rnn_varadd(rnn, "desctype", "DESC_NONE");
 
-   printl(2, "%sSTORAGE/TEXEL/IMAGE[%u]: (%s)\n", levels[level + 1], idx, type);
-   dump_domain(texmemobj, 16, level + 2, domain);
+   return ret;
 }
 
 static void
-dump_tex_descriptor(uint32_t *texmemobj, int idx, int level, const char *domain)
+dump_tex_descriptor_type(uint32_t *texmemobj, int base, int idx, int level,
+                         const char *domain, const char *type)
 {
-   dump_tex_descriptor_type(texmemobj, idx, level, domain, "DESC_SINGLE_PLANE");
-   dump_tex_descriptor_type(texmemobj, idx, level, domain, "DESC_MULTI_PLANE");
-   dump_tex_descriptor_type(texmemobj, idx, level, domain, "DESC_BUFFER");
+   if (!show_descriptor(texmemobj, 16, base, idx, domain, type))
+      return;
+
+   printl(2, "%sSTORAGE/TEXEL/IMAGE[%u]: (%s)\n", levels[level + 1], idx, type);
+   rnn_varadd(rnn, "desctype", type);
+   dump_domain(texmemobj, 16, level + 2, domain);
+   rnn_varadd(rnn, "desctype", "DESC_NONE");
+}
+
+static void
+dump_tex_descriptor(uint32_t *texmemobj, int base, int idx, int level, const char *domain)
+{
+   dump_tex_descriptor_type(texmemobj, base, idx, level, domain, "DESC_SINGLE_PLANE");
+   dump_tex_descriptor_type(texmemobj, base, idx, level, domain, "DESC_MULTI_PLANE");
+   dump_tex_descriptor_type(texmemobj, base, idx, level, domain, "DESC_BUFFER");
    /* Don't bother dumping weight descriptors if unsupported by GPU: */
    if (options->info->props.has_image_processing)
-      dump_tex_descriptor_type(texmemobj, idx, level, domain, "DESC_WEIGHT");
-   rnn_varadd(rnn, "desctype", "DESC_NONE");
+      dump_tex_descriptor_type(texmemobj, base, idx, level, domain, "DESC_WEIGHT");
 }
 
 static void
@@ -1656,7 +1720,7 @@ dump_tex_const(uint32_t *texconst, int num_unit, int level)
          dump_hex(texconst, 12, level + 1);
          texconst += 12;
       } else if ((6 <= options->info->chip) && (options->info->chip < 8)) {
-         dump_tex_descriptor(texconst, i, level, "A6XX_TEX_MEMOBJ");
+         dump_tex_descriptor(texconst, 0, i, level, "A6XX_TEX_MEMOBJ");
          if (options->dump_textures) {
             uint64_t addr =
                (((uint64_t)texconst[5] & 0x1ffff) << 32) | texconst[4];
@@ -1665,7 +1729,7 @@ dump_tex_const(uint32_t *texconst, int num_unit, int level)
          dump_hex(texconst, 16, level + 1);
          texconst += 16;
       } else if ((8 <= options->info->chip) && (options->info->chip < 9)) {
-         dump_tex_descriptor(texconst, i, level, "A8XX_TEX_MEMOBJ");
+         dump_tex_descriptor(texconst, 0, i, level, "A8XX_TEX_MEMOBJ");
          if (options->dump_textures) {
             uint64_t addr =
                (((uint64_t)texconst[1] & 0x1ffff) << 32) | texconst[0];
@@ -1680,9 +1744,6 @@ dump_tex_const(uint32_t *texconst, int num_unit, int level)
 static void
 dump_bindless_descriptors(bool is_compute, int level)
 {
-   if (!options->dump_bindless)
-      return;
-
    /* Skip for devices which do not support bindless: */
    if (options->info->chip < 6)
       return;
@@ -1726,17 +1787,27 @@ dump_bindless_descriptors(bool is_compute, int level)
       unsigned desc_count = length / (16 * sizeof(uint32_t));
       for (unsigned desc_idx = 0; desc_idx < desc_count; desc_idx++) {
          if (memcmp(contents, empty_contents, sizeof(empty_contents))) {
-            printl(2, "%sUBO[%u]:\n", levels[level + 1], desc_idx);
-            dump_domain(contents, 2, level + 2, "A6XX_UBO");
 
-            if ((6 <= options->info->chip) && (options->info->chip < 8)) {
-               dump_tex_descriptor(contents, desc_idx, level, "A6XX_TEX_MEMOBJ");
-            } else if ((8 <= options->info->chip) && (options->info->chip < 9)) {
-               dump_tex_descriptor(contents, desc_idx, level, "A8XX_TEX_MEMOBJ");
+            if (show_descriptor(contents, 2, i + 1, desc_idx, "A6XX_UBO", "DESC_UBO")) {
+               printl(2, "%sUBO[%u]:\n", levels[level + 1], desc_idx);
+               dump_domain(contents, 2, level + 2, "A6XX_UBO");
             }
 
-            printl(2, "%sSAMPLER[%u]:\n", levels[level + 1], desc_idx);
-            dump_tex_samp(contents, STATE_SRC_BINDLESS, 1, level);
+            if ((6 <= options->info->chip) && (options->info->chip < 8)) {
+               dump_tex_descriptor(contents, i + 1, desc_idx, level, "A6XX_TEX_MEMOBJ");
+
+               if (show_descriptor(contents, 16, i + 1, desc_idx, "A6XX_TEX_SAMP", "DESC_SAMPLER")) {
+                  printl(2, "%sSAMPLER[%u]:\n", levels[level + 1], desc_idx);
+                  dump_tex_samp(contents, STATE_SRC_BINDLESS, 1, level);
+               }
+            } else if ((8 <= options->info->chip) && (options->info->chip < 9)) {
+               dump_tex_descriptor(contents, i + 1, desc_idx, level, "A8XX_TEX_MEMOBJ");
+
+               if (show_descriptor(contents, 4, i + 1, desc_idx, "A8XX_TEX_SAMP", "DESC_SAMPLER")) {
+                  printl(2, "%sSAMPLER[%u]:\n", levels[level + 1], desc_idx);
+                  dump_tex_samp(contents, STATE_SRC_BINDLESS, 1, level);
+               }
+            }
          }
          contents += 16;
       }
@@ -1832,8 +1903,7 @@ cp_load_state(uint32_t *dwords, uint32_t sizedwords, int level)
       }
 
       if (contents)
-         try_disasm_a3xx(contents, num_unit * 2, level + 2, stdout,
-                         options->info->chip * 100);
+         decode_shader_ir3(contents, num_unit * 2, level + 2, stage);
 
       /* dump raw shader: */
       if (ext)
@@ -3235,7 +3305,9 @@ dump_commands(uint32_t *dwords, uint32_t sizedwords, int level)
          assert(val < regcnt());
          printl(3, "%swrite %s (%04x)\n", levels[level + 1], regname(val, 1),
                 val);
+         current_pkt = "PKT4";
          dump_registers(val, dwords + 1, count - 1, level + 2);
+         current_pkt = NULL;
          if (!quiet(3))
             dump_hex(dwords, count, level + 1);
 #if 0
@@ -3269,7 +3341,9 @@ dump_commands(uint32_t *dwords, uint32_t sizedwords, int level)
                name = "CP_LOAD_STATE6";
             dump_domain(dwords + 1, count - 1, level + 2, name);
          }
+         current_pkt = name;
          op->fxn(dwords + 1, count - 1, level + 1);
+         current_pkt = NULL;
          if (!quiet(2))
             dump_hex(dwords, count, level + 1);
       } else if (pkt_is_type2(dwords[0])) {

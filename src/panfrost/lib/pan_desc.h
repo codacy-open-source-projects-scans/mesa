@@ -154,6 +154,33 @@ struct pan_fb_info {
    bool pls_enabled;
 };
 
+struct pan_clean_tile {
+   /* clean_tile_write_enable mask on the 8 color attachments. */
+   uint8_t write_rt_mask;
+
+   /* clean_tile_write_enable flag on the depth/stencil attachment. */
+   uint8_t write_zs : 1;
+};
+
+static inline bool
+pan_clean_tile_write_rt_enabled(struct pan_clean_tile clean_tile,
+                                unsigned index)
+{
+   return (clean_tile.write_rt_mask >> index) & 1;
+}
+
+static inline bool
+pan_clean_tile_write_zs_enabled(struct pan_clean_tile clean_tile)
+{
+   return clean_tile.write_zs;
+}
+
+static inline bool
+pan_clean_tile_write_any_set(struct pan_clean_tile clean_tile)
+{
+   return clean_tile.write_rt_mask || clean_tile.write_zs;
+}
+
 static inline unsigned
 pan_wls_instances(const struct pan_compute_dim *dim)
 {
@@ -245,6 +272,18 @@ pan_sample_pattern(unsigned samples)
    default:
       UNREACHABLE("Unsupported sample count");
    }
+}
+
+static inline struct pan_image_block_size
+pan_effective_tile_block_size(unsigned tile_size)
+{
+   /* Tile is either a square or a rect whose width is twice the height. */
+   unsigned shift_h = util_logbase2(tile_size);
+   unsigned shift_w = shift_h + 1;
+   unsigned h = 1 << (shift_h >> 1);
+   unsigned w = 1 << (shift_w >> 1);
+
+   return (struct pan_image_block_size){w, h};
 }
 
 void GENX(pan_select_tile_size)(struct pan_fb_info *fb);

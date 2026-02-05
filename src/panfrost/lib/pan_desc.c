@@ -435,13 +435,21 @@ pan_prepare_crc(const struct pan_fb_info *fb, int rt_crc,
 
 static void
 pan_emit_zs_crc_ext(const struct pan_fb_info *fb, unsigned layer_idx,
-                    int rt_crc, struct mali_zs_crc_extension_packed *zs_crc_ext)
+                    int rt_crc,
+                    struct mali_zs_crc_extension_packed *zs_crc_ext,
+                    struct pan_clean_tile clean_tile)
 {
    struct mali_zs_crc_extension_packed desc;
 
    pan_pack(&desc, ZS_CRC_EXTENSION, cfg) {
       pan_prepare_crc(fb, rt_crc, &cfg.crc);
-      cfg.zs.clean_pixel_write_enable = fb->zs.clear.z || fb->zs.clear.s;
+#if PAN_ARCH == 5
+      cfg.zs.clean_pixel_write_enable =
+         pan_clean_tile_write_zs_enabled(clean_tile);
+#elif PAN_ARCH >= 6
+      cfg.zs.clean_tile_write_enable =
+         pan_clean_tile_write_zs_enabled(clean_tile);
+#endif
    }
 
    if (fb->zs.view.zs) {
@@ -646,52 +654,6 @@ get_rt_formats(enum pipe_format pfmt, uint32_t *writeback, uint32_t *internal,
    *pswizzle = pan_translate_swizzle_4(swizzle);
 }
 
-/* forward declaration */
-static bool pan_force_clean_write_on(const struct pan_image *img, unsigned tile_size);
-
-static struct MALI_RT_CLEAR
-rt_clear(const struct pan_fb_color_attachment *rt)
-{
-   if (!rt || !rt->clear)
-      return (struct MALI_RT_CLEAR){0};
-
-   return (struct MALI_RT_CLEAR){
-      .color_0 = rt->clear_value[0],
-      .color_1 = rt->clear_value[1],
-      .color_2 = rt->clear_value[2],
-      .color_3 = rt->clear_value[3],
-   };
-}
-
-static bool
-rt_clean_pixel_write(const struct pan_fb_color_attachment *rt,
-                     unsigned tile_size)
-{
-   if (rt->clear)
-      return true;
-
-#if PAN_ARCH >= 6
-   const struct pan_image_plane_ref pref =
-      pan_image_view_get_color_plane(rt->view);
-
-   if (pan_force_clean_write_on(pref.image, tile_size))
-      return true;
-#endif
-
-   return false;
-}
-
-#define rt_common_cfg(rt__, cbuf_offset__, tile_size__, cfg__)                 \
-   do {                                                                        \
-      assert((rt__)->view != NULL);                                            \
-      (cfg__).clean_pixel_write_enable =                                       \
-         rt_clean_pixel_write(rt__, tile_size__);                              \
-      (cfg__).internal_buffer_offset = cbuf_offset__;                          \
-      (cfg__).clear = rt_clear(rt__);                                          \
-      (cfg__).dithering_enable = true;                                         \
-      (cfg__).writeback_msaa = mali_sampling_mode((rt__)->view);               \
-   } while (0)
-
 void
 GENX(pan_emit_afbc_color_attachment)(const struct pan_fb_info *fb,
                                      unsigned rt_idx,
@@ -710,7 +672,6 @@ GENX(pan_emit_afbc_color_attachment)(const struct pan_fb_info *fb,
    /* TODO: YUV RT. */
    assert(!pan_format_is_yuv(iview->format));
    pan_cast_and_pack(payload, AFBC_RGB_RENDER_TARGET, cfg) {
-      rt_common_cfg(rt, cbuf_offset, fb->tile_size, cfg);
       cfg.write_enable = true;
       get_rt_formats(iview->format, &cfg.writeback_format, &cfg.internal_format,
                      &cfg.swizzle);
@@ -775,7 +736,6 @@ GENX(pan_emit_u_tiled_color_attachment)(const struct pan_fb_info *fb,
    /* TODO: YUV RT. */
    assert(!pan_format_is_yuv(iview->format));
    pan_cast_and_pack(payload, RGB_RENDER_TARGET, cfg) {
-      rt_common_cfg(rt, cbuf_offset, fb->tile_size, cfg);
       cfg.write_enable = true;
       cfg.writeback_block_format = MALI_BLOCK_FORMAT_TILED_U_INTERLEAVED;
       get_rt_formats(iview->format, &cfg.writeback_format, &cfg.internal_format,
@@ -804,7 +764,6 @@ GENX(pan_emit_linear_color_attachment)(const struct pan_fb_info *fb,
    /* TODO: YUV RT. */
    assert(!pan_format_is_yuv(iview->format));
    pan_cast_and_pack(payload, RGB_RENDER_TARGET, cfg) {
-      rt_common_cfg(rt, cbuf_offset, fb->tile_size, cfg);
       cfg.write_enable = true;
       cfg.writeback_block_format = MALI_BLOCK_FORMAT_LINEAR;
       get_rt_formats(iview->format, &cfg.writeback_format, &cfg.internal_format,
@@ -834,7 +793,6 @@ GENX(pan_emit_interleaved_64k_color_attachment)(const struct pan_fb_info *fb,
    /* TODO: YUV RT. */
    assert(!pan_format_is_yuv(iview->format));
    pan_cast_and_pack(payload, RGB_RENDER_TARGET, cfg) {
-      rt_common_cfg(rt, cbuf_offset, fb->tile_size, cfg);
       cfg.write_enable = true;
       cfg.writeback_block_format = MALI_BLOCK_FORMAT_INTERLEAVED_64K;
       get_rt_formats(iview->format, &cfg.writeback_format, &cfg.internal_format,
@@ -866,7 +824,6 @@ GENX(pan_emit_afrc_color_attachment)(const struct pan_fb_info *fb,
    /* TODO: YUV RT. */
    assert(!pan_format_is_yuv(iview->format));
    pan_cast_and_pack(payload, AFRC_RGB_RENDER_TARGET, cfg) {
-      rt_common_cfg(rt, cbuf_offset, fb->tile_size, cfg);
       cfg.writeback_mode = MALI_WRITEBACK_MODE_AFRC_RGB;
       cfg.afrc_block_size = pan_afrc_block_size(image->props.modifier, 0);
       cfg.afrc_format = pan_afrc_format(finfo, image->props.modifier, 0);
@@ -956,15 +913,36 @@ pan_emit_midgard_tiler(const struct pan_fb_info *fb,
 #endif
 
 #if PAN_ARCH >= 5
+static struct MALI_RT_CLEAR
+rt_clear(const struct pan_fb_color_attachment *rt)
+{
+   if (!rt->clear)
+      return (struct MALI_RT_CLEAR){0};
+
+   return (struct MALI_RT_CLEAR){
+      .color_0 = rt->clear_value[0],
+      .color_1 = rt->clear_value[1],
+      .color_2 = rt->clear_value[2],
+      .color_3 = rt->clear_value[3],
+   };
+}
+
 static void
 pan_emit_rt(const struct pan_fb_info *fb, unsigned layer_idx, unsigned idx,
-            unsigned cbuf_offset, struct mali_render_target_packed *out)
+            unsigned cbuf_offset, struct mali_render_target_packed *out,
+            struct pan_clean_tile clean_tile)
 {
    const struct pan_image_view *rt = fb->rts[idx].view;
 
    if (!rt || fb->rts[idx].discard) {
       pan_cast_and_pack(out, RGB_RENDER_TARGET, cfg) {
-         cfg.clean_pixel_write_enable = fb->rts[idx].clear;
+#if PAN_ARCH == 5
+         cfg.clean_pixel_write_enable =
+            pan_clean_tile_write_rt_enabled(clean_tile, idx);
+#elif PAN_ARCH >= 6
+         cfg.clean_tile_write_enable =
+            pan_clean_tile_write_rt_enabled(clean_tile, idx);
+#endif
          cfg.internal_buffer_offset = cbuf_offset;
          cfg.clear = rt_clear(&fb->rts[idx]);
          cfg.dithering_enable = true;
@@ -975,6 +953,22 @@ pan_emit_rt(const struct pan_fb_info *fb, unsigned layer_idx, unsigned idx,
       }
 
       return;
+   }
+
+   struct mali_rgb_render_target_packed common;
+   pan_pack(&common, RGB_RENDER_TARGET, cfg) {
+      assert(fb->rts[idx].view != NULL);
+#if PAN_ARCH == 5
+      cfg.clean_pixel_write_enable =
+         pan_clean_tile_write_rt_enabled(clean_tile, idx);
+#elif PAN_ARCH >= 6
+      cfg.clean_tile_write_enable =
+         pan_clean_tile_write_rt_enabled(clean_tile, idx);
+#endif
+      cfg.internal_buffer_offset = cbuf_offset;
+      cfg.clear = rt_clear(&fb->rts[idx]);
+      cfg.dithering_enable = true;
+      cfg.writeback_msaa = mali_sampling_mode(fb->rts[idx].view);
    }
 
    struct pan_image_plane_ref pref = pan_image_view_get_color_plane(rt);
@@ -989,18 +983,24 @@ pan_emit_rt(const struct pan_fb_info *fb, unsigned layer_idx, unsigned idx,
    assert(rt->last_level == rt->first_level);
    assert(layer_idx < layer_count);
 
+   struct mali_render_target_packed desc;
    mod_handler->emit_color_attachment(fb, idx, layer_idx + rt->first_layer,
-                                      cbuf_offset, out);
+                                      cbuf_offset, &desc);
+
+   /* Avoid mixing loads and stores on write-combined memory. */
+   pan_merge(&desc, &common, RGB_RENDER_TARGET);
+   *out = desc;
 }
 
 #if PAN_ARCH >= 6
-/* All Bifrost and Valhall GPUs are affected by issue TSIX-2033:
+/* All GPUs starting from Bifrost are affected by issue TSIX-2033:
  *
  *      Forcing clean_tile_writes breaks INTERSECT readbacks
  *
- * To workaround, use the frame shader mode ALWAYS instead of INTERSECT if
- * clean tile writes is forced. Since INTERSECT is a hint that the hardware may
- * ignore, this cannot affect correctness, only performance */
+ * To workaround, use the pre-frame shader mode ALWAYS instead of INTERSECT if
+ * clean_tile_write_enable is set on either one of the color, depth or stencil
+ * buffers. Since INTERSECT is a hint that the hardware may ignore, this
+ * cannot affect correctness, only performance. */
 
 static enum mali_pre_post_frame_shader_mode
 pan_fix_frame_shader_mode(enum mali_pre_post_frame_shader_mode mode,
@@ -1011,61 +1011,71 @@ pan_fix_frame_shader_mode(enum mali_pre_post_frame_shader_mode mode,
    else
       return mode;
 }
+#endif
 
-/* Regardless of clean_tile_write_enable, the hardware writes clean tiles if
- * the effective tile size differs from the superblock size of any enabled AFBC
- * render target. Check this condition. */
+/* Clean tiles must be written back for AFBC buffers (color, z/s) when either
+ * one of the effective tile size dimension is smaller than the superblock
+ * dimension. */
 
 static bool
 pan_force_clean_write_on(const struct pan_image *image, unsigned tile_size)
 {
+#if PAN_ARCH >= 6
    if (!image)
       return false;
 
    if (!drm_is_afbc(image->props.modifier))
       return false;
 
-   struct pan_image_block_size renderblk_sz =
-      pan_afbc_renderblock_size(image->props.modifier);
-
-   assert(renderblk_sz.width >= 16 && renderblk_sz.height >= 16);
    assert(tile_size <= pan_max_effective_tile_size(PAN_ARCH));
 
-   return tile_size != renderblk_sz.width * renderblk_sz.height;
+   struct pan_image_block_size tileblk_sz =
+      pan_effective_tile_block_size(tile_size);
+   struct pan_image_block_size superblk_sz =
+      pan_afbc_superblock_size(image->props.modifier);
+
+   return tileblk_sz.width < superblk_sz.width ||
+      tileblk_sz.height < superblk_sz.height;
+#else
+   return false;
+#endif
 }
 
-static bool
-pan_force_clean_write(const struct pan_fb_info *fb, unsigned tile_size)
+static struct pan_clean_tile
+pan_get_clean_tile_info(const struct pan_fb_info *fb)
 {
-   /* Maximum tile size */
-   assert(tile_size <= pan_max_effective_tile_size(PAN_ARCH));
+   struct pan_clean_tile clean_tile = { 0, };
+   const struct pan_image *img;
+
+   /* Force write-back of each color, depth and stencil attachment if cleared
+    * or forced, unless it's discarded. */
 
    for (unsigned i = 0; i < fb->rt_count; ++i) {
-      if (!fb->rts[i].view || fb->rts[i].discard)
+      if (fb->rts[i].discard)
          continue;
 
-      const struct pan_image_plane_ref pref =
-         pan_image_view_get_color_plane(fb->rts[i].view);
-      const struct pan_image *img = pref.image;
-
-      if (pan_force_clean_write_on(img, tile_size))
-         return true;
+      img = fb->rts[i].view ?
+         pan_image_view_get_color_plane(fb->rts[i].view).image : NULL;
+      if (fb->rts[i].clear || pan_force_clean_write_on(img, fb->tile_size))
+         clean_tile.write_rt_mask |= 1 << i;
    }
 
-   if (fb->zs.view.zs && !fb->zs.discard.z &&
-       pan_force_clean_write_on(
-          pan_image_view_get_zs_plane(fb->zs.view.zs).image, tile_size))
-      return true;
+   if (!fb->zs.discard.z) {
+      img = fb->zs.view.zs ?
+         pan_image_view_get_zs_plane(fb->zs.view.zs).image : NULL;
+      if (fb->zs.clear.z || pan_force_clean_write_on(img, fb->tile_size))
+         clean_tile.write_zs = 1;
+   }
 
-   if (fb->zs.view.s && !fb->zs.discard.s &&
-       pan_force_clean_write_on(pan_image_view_get_s_plane(fb->zs.view.s).image,
-                                tile_size))
-      return true;
+   if (!fb->zs.discard.s) {
+      img = fb->zs.view.s ?
+         pan_image_view_get_s_plane(fb->zs.view.s).image : NULL;
+      if (fb->zs.clear.s || pan_force_clean_write_on(img, fb->tile_size))
+         clean_tile.write_zs = 1;
+   }
 
-   return false;
+   return clean_tile;
 }
-
-#endif
 
 static void
 check_fb_attachments(const struct pan_fb_info *fb)
@@ -1105,18 +1115,16 @@ GENX(pan_emit_fbd)(const struct pan_fb_info *fb, unsigned layer_idx,
 
    int crc_rt = GENX(pan_select_crc_rt)(fb, fb->tile_size);
    bool has_zs_crc_ext = (fb->zs.view.zs || fb->zs.view.s || crc_rt >= 0);
+   struct pan_clean_tile clean_tile = pan_get_clean_tile_info(fb);
 
    pan_section_pack(fbd, FRAMEBUFFER, PARAMETERS, cfg) {
 #if PAN_ARCH >= 6
-      bool force_clean_write = pan_force_clean_write(fb, fb->tile_size);
-
       cfg.sample_locations = fb->sample_positions;
       cfg.pre_frame_0 = pan_fix_frame_shader_mode(fb->bifrost.pre_post.modes[0],
-                                                  force_clean_write);
+                                                  pan_clean_tile_write_any_set(clean_tile));
       cfg.pre_frame_1 = pan_fix_frame_shader_mode(fb->bifrost.pre_post.modes[1],
-                                                  force_clean_write);
-      cfg.post_frame = pan_fix_frame_shader_mode(fb->bifrost.pre_post.modes[2],
-                                                 force_clean_write);
+                                                  pan_clean_tile_write_any_set(clean_tile));
+      cfg.post_frame = fb->bifrost.pre_post.modes[2];
 #if PAN_ARCH < 9
       /* On Bifrost, the layer_id is passed through a push_uniform, which forces
        * us to have one pre/post DCD array per layer. */
@@ -1186,18 +1194,12 @@ GENX(pan_emit_fbd)(const struct pan_fb_info *fb, unsigned layer_idx,
          bool full = !fb->draw_extent.minx && !fb->draw_extent.miny &&
                      fb->draw_extent.maxx == (fb->width - 1) &&
                      fb->draw_extent.maxy == (fb->height - 1);
-         bool clean_tile_write = fb->rts[crc_rt].clear;
-
-#if PAN_ARCH >= 6
-         clean_tile_write |= pan_force_clean_write_on(
-            pan_image_view_get_color_plane(fb->rts[crc_rt].view).image,
-            fb->tile_size);
-#endif
 
          /* If the CRC was valid it stays valid, if it wasn't, we must ensure
           * the render operation covers the full frame, and clean tiles are
           * pushed to memory. */
-         bool new_valid = *valid | (full && clean_tile_write);
+         bool new_valid = *valid |
+            (full && pan_clean_tile_write_rt_enabled(clean_tile, crc_rt));
 
          cfg.crc_read_enable = *valid;
 
@@ -1241,14 +1243,14 @@ GENX(pan_emit_fbd)(const struct pan_fb_info *fb, unsigned layer_idx,
       struct mali_zs_crc_extension_packed *zs_crc_ext =
          out + pan_size(FRAMEBUFFER);
 
-      pan_emit_zs_crc_ext(fb, layer_idx, crc_rt, zs_crc_ext);
+      pan_emit_zs_crc_ext(fb, layer_idx, crc_rt, zs_crc_ext, clean_tile);
       rtd += pan_size(ZS_CRC_EXTENSION);
    }
 
    unsigned rt_count = MAX2(fb->rt_count, 1);
    unsigned cbuf_offset = 0;
    for (unsigned i = 0; i < rt_count; i++) {
-      pan_emit_rt(fb, layer_idx, i, cbuf_offset, rtd);
+      pan_emit_rt(fb, layer_idx, i, cbuf_offset, rtd, clean_tile);
       rtd += pan_size(RENDER_TARGET);
       if (!fb->rts[i].view)
          continue;
@@ -1306,9 +1308,9 @@ GENX(pan_emit_fbd)(const struct pan_fb_info *fb, unsigned layer_idx,
       cfg.bound_max_x = fb->width - 1;
       cfg.bound_max_y = fb->height - 1;
       cfg.dithering_enable = true;
-      cfg.clean_pixel_write_enable = true;
       cfg.tie_break_rule = MALI_TIE_BREAK_RULE_MINUS_180_IN_0_OUT;
       if (fb->rts[0].clear) {
+         cfg.clean_pixel_write_enable = true;
          cfg.clear_color_0 = fb->rts[0].clear_value[0];
          cfg.clear_color_1 = fb->rts[0].clear_value[1];
          cfg.clear_color_2 = fb->rts[0].clear_value[2];

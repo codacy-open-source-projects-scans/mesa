@@ -22,6 +22,7 @@
 #include "cffdec.h"
 #include "cffdump-pkt-handler.h"
 #include "cffdump-desc-handler.h"
+#include "disasm.h"
 #include "rnnutil.h"
 #include "script.h"
 
@@ -39,9 +40,10 @@ static lua_State *iL;
    } while (0)
 #endif
 
+static int l_rnn_shaderstat(lua_State *L, struct rnn *rnn);
+
 /* An rnn based decoder, which can either be decoding current register
  * values, or domain based decoding of a pm4 packet.
- *
  */
 struct rnndec {
    struct rnn base;
@@ -461,6 +463,154 @@ l_rnn_etype_enumtype(lua_State *L, struct rnn *rnn, struct rnnenum *e)
 }
 
 /*
+ * rnn domain based decoding of _something_ (a pm4 packet,
+ * a descriptor, etc)
+ */
+
+static int
+l_rnn_meta_dom_index(lua_State *L)
+{
+   struct rnndec *rnndec = lua_touserdata(L, 1);
+   struct rnn *rnn = &rnndec->base;
+
+   if (lua_isnumber(L, 2)) {
+      /* index as an array, is pkt[0].FOO: */
+      uint32_t offset = (uint32_t)lua_tonumber(L, 2);
+      struct rnndelem *elem = rnn_regoff(rnn, offset);
+      if (elem)
+         return l_rnn_etype(L, rnn, elem, elem->offset);
+   } else if (lua_isstring(L, 2)) {
+      const char *name = lua_tostring(L, 2);
+
+      struct rnndelem *elem = rnn_regelem(rnn, name);
+      if (elem)
+         return l_rnn_etype(L, rnn, elem, elem->offset);
+
+      /* If not indexed like an array, search thru all
+       * the elements in the domain finding the matching
+       * subelem.
+       *
+       * This handles the pkt.FOO case
+       */
+
+      for (unsigned i = 0; i < rnndec->sizedwords; i++) {
+         elem = rnn_regoff(rnn, i);
+         if (!elem)
+            continue;
+
+         if (!strcmp(name, elem->name))
+            return l_rnn_etype(L, rnn, elem, elem->offset);
+
+         /* Try to find and push named field within the element: */
+         int ret = pushfield(L, &elem->typeinfo, rnn, i, name);
+         if (ret)
+            return ret;
+      }
+   }
+
+   return 0;
+}
+
+/*
+ * A wrapper object for rnndomain based decoding of an array of dwords
+ * (ie. for pm4 packet decoding).  Mostly re-uses the register-value
+ * decoding for the individual dwords and bitfields.
+ */
+
+static int
+l_rnn_meta_dom_gc(lua_State *L)
+{
+   // TODO
+   // struct rnn *rnn = lua_touserdata(L, 1);
+   // rnn_deinit(rnn);
+   return 0;
+}
+
+static const struct luaL_Reg l_meta_rnn_dom[] = {
+   {"__index", l_rnn_meta_dom_index},
+   {"__gc", l_rnn_meta_dom_gc},
+   {NULL, NULL} /* sentinel */
+};
+
+static int
+l_rnn_dom(lua_State *L, uint32_t *dwords, uint32_t sizedwords,
+          struct rnn *rnn, struct rnndomain *dom)
+{
+   struct rnndec *rnndec = lua_newuserdata(L, sizeof(*rnndec));
+
+   rnndec->base = *rnn;
+   rnndec->base.dom[0] = dom;
+   rnndec->base.dom[1] = NULL;
+   rnndec->dwords = dwords;
+   rnndec->sizedwords = sizedwords;
+
+   luaL_newmetatable(L, "rnnmetadom");
+   luaL_setfuncs(L, l_meta_rnn_dom, 0);
+   lua_pop(L, 1);
+
+   luaL_setmetatable(L, "rnnmetadom");
+
+   return 1;
+}
+
+/*
+ * Shader stats object
+ */
+
+static int
+l_rnn_meta_shaderstat_index(lua_State *L)
+{
+   struct rnn *rnn = lua_touserdata(L, 1);
+   const char *name = lua_tostring(L, 2);
+   enum mesa_shader_stage stage;
+   struct rnndomain *dom = rnn_finddomain(rnn->db, "ir3_shader_stats");
+
+   if (!dom)
+      error("No domain: ir3_shader_stats");
+
+   if (!strcmp(name, "vs")) {
+      stage = MESA_SHADER_VERTEX;
+   } else if (!strcmp(name, "hs")) {
+      stage = MESA_SHADER_TESS_CTRL;
+   } else if (!strcmp(name, "ds")) {
+      stage = MESA_SHADER_TESS_EVAL;
+   } else if (!strcmp(name, "gs")) {
+      stage = MESA_SHADER_GEOMETRY;
+   } else if (!strcmp(name, "fs")) {
+      stage = MESA_SHADER_FRAGMENT;
+   } else if (!strcmp(name, "cs")) {
+      stage = MESA_SHADER_COMPUTE;
+   } else {
+      return 0;
+   }
+
+   struct shader_stats *stats = get_shader_stats(stage);
+
+   return l_rnn_dom(L, (uint32_t *)stats, DIV_ROUND_UP(sizeof(*stats), 4), rnn, dom);
+}
+
+static const struct luaL_Reg l_meta_rnn_shaderstat[] = {
+   {"__index", l_rnn_meta_shaderstat_index},
+   {NULL, NULL} /* sentinel */
+};
+
+static int
+l_rnn_shaderstat(lua_State *L, struct rnn *rnn)
+{
+   struct rnndec *rnndec = lua_newuserdata(L, sizeof(*rnndec));
+
+   rnndec->base = *rnn;
+
+   luaL_newmetatable(L, "rnnmetadom");
+   luaL_setfuncs(L, l_meta_rnn_shaderstat, 0);
+   lua_pop(L, 1);
+
+   luaL_setmetatable(L, "rnnmetadom");
+
+   return 1;
+}
+
+/*
  *
  */
 
@@ -469,6 +619,9 @@ l_rnn_meta_index(lua_State *L)
 {
    struct rnn *rnn = lua_touserdata(L, 1);
    const char *name = lua_tostring(L, 2);
+
+   if (!strcmp(name, "shaderstat"))
+      return l_rnn_shaderstat(L, rnn);
 
    struct rnndelem *elem = rnn_regelem(rnn, name);
    if (elem)
@@ -782,64 +935,9 @@ script_draw(const char *primtype, uint32_t nindx)
       error("error running function `f': %s\n");
 }
 
-static int
-l_rnn_meta_dom_index(lua_State *L)
-{
-   struct rnndec *rnndec = lua_touserdata(L, 1);
-   struct rnn *rnn = &rnndec->base;
-
-   if (lua_isnumber(L, 2)) {
-      /* index as an array, is pkt[0].FOO: */
-      uint32_t offset = (uint32_t)lua_tonumber(L, 2);
-      struct rnndelem *elem = rnn_regoff(rnn, offset);
-      if (elem)
-         return l_rnn_etype(L, rnn, elem, elem->offset);
-   } else if (lua_isstring(L, 2)) {
-      /* If not indexed like an array, search thru all
-       * the elements in the domain finding the matching
-       * subelem.
-       *
-       * This handles the pkt.FOO case
-       */
-      const char *name = lua_tostring(L, 2);
-
-      for (unsigned i = 0; i < rnndec->sizedwords; i++) {
-         struct rnndelem *elem = rnn_regoff(rnn, i);
-         if (!elem)
-            continue;
-
-         if (!strcmp(name, elem->name))
-            return l_rnn_etype(L, rnn, elem, elem->offset);
-
-         int ret = pushfield(L, &elem->typeinfo, rnn, i, name);
-         if (ret)
-            return ret;
-      }
-   }
-
-   return 0;
-}
-
 /*
- * A wrapper object for rnndomain based decoding of an array of dwords
- * (ie. for pm4 packet decoding).  Mostly re-uses the register-value
- * decoding for the individual dwords and bitfields.
+ * Packet/etc handlers:
  */
-
-static int
-l_rnn_meta_dom_gc(lua_State *L)
-{
-   // TODO
-   // struct rnn *rnn = lua_touserdata(L, 1);
-   // rnn_deinit(rnn);
-   return 0;
-}
-
-static const struct luaL_Reg l_meta_rnn_dom[] = {
-   {"__index", l_rnn_meta_dom_index},
-   {"__gc", l_rnn_meta_dom_gc},
-   {NULL, NULL} /* sentinel */
-};
 
 static bool
 setup_call(lua_State *state, uint32_t *dwords, uint32_t sizedwords,
@@ -858,21 +956,7 @@ setup_call(lua_State *state, uint32_t *dwords, uint32_t sizedwords,
       return false;
    }
 
-   struct rnndec *rnndec = lua_newuserdata(state, sizeof(*rnndec));
-
-   rnndec->base = *rnn;
-   rnndec->base.dom[0] = dom;
-   rnndec->base.dom[1] = NULL;
-   rnndec->dwords = dwords;
-   rnndec->sizedwords = sizedwords;
-
-   luaL_newmetatable(state, "rnnmetadom");
-   luaL_setfuncs(state, l_meta_rnn_dom, 0);
-   lua_pop(state, 1);
-
-   luaL_setmetatable(state, "rnnmetadom");
-
-   return true;
+   return l_rnn_dom(state, dwords, sizedwords, rnn, dom);
 }
 
 /* called to general pm4 packet decoding, such as texture/sampler state
@@ -930,7 +1014,9 @@ internal_packet(uint32_t *dwords, uint32_t sizedwords, struct rnn *rnn,
 bool
 script_show_descriptor(uint32_t *dwords,
                        uint32_t sizedwords,
+                       int base, int idx,
                        const char *type,
+                       const char *pm4_pkt,
                        struct rnn *rnn,
                        struct rnndomain *dom)
 {
@@ -939,10 +1025,18 @@ script_show_descriptor(uint32_t *dwords,
       return true;
 
    struct rnnenum *e = rnn_enumelem(rnn, "desctype");
+   assert(e);
    pushenum(iL, rnn, rnn_enumval(rnn, "desctype", type), e);
 
-   /* 2 args, 1 result */
-   if (lua_pcall(iL, 2, 1, 0) != 0) {
+   e = rnn_enumelem(rnn, "adreno_pm4_type3_packets");
+   assert(e);
+   pushenum(iL, rnn, rnn_enumval(rnn, "adreno_pm4_type3_packets", pm4_pkt), e);
+
+   lua_pushinteger(iL, base);
+   lua_pushinteger(iL, idx);
+
+   /* 5 args, 1 result */
+   if (lua_pcall(iL, 5, 1, 0) != 0) {
       fprintf(stderr, "error running function `f': %s\n",
               lua_tostring(iL, -1));
       exit(1);

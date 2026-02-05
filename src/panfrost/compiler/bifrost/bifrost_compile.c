@@ -47,6 +47,7 @@ static const struct debug_named_value bifrost_debug_options[] = {
    {"nossara",    BIFROST_DBG_NOSSARA,    "Disable SSA in register allocation"},
    {"statsabs",   BIFROST_DBG_STATSABS,   "Don't normalize statistics"},
    {"statsfull",  BIFROST_DBG_STATSFULL,  "Print verbose statistics"},
+   {"debuginfo",  BIFROST_DBG_DEBUGINFO,  "Print debug information"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -65,6 +66,13 @@ bifrost_will_dump_shaders(void)
 {
    bifrost_debug = debug_get_option_bifrost_debug();
    return bifrost_debug & BIFROST_DBG_SHADERS;
+}
+
+bool
+bifrost_want_debug_info(void)
+{
+   bifrost_debug = debug_get_option_bifrost_debug();
+   return bifrost_debug & BIFROST_DBG_DEBUGINFO;
 }
 
 static bi_block *emit_cf_list(bi_context *ctx, struct exec_list *list);
@@ -4990,6 +4998,7 @@ emit_block(bi_context *ctx, nir_block *block)
    ctx->indexed_nir_blocks[block->index] = ctx->current_block;
 
    nir_foreach_instr(instr, block) {
+      _b.debug_info = instr->has_debug_info ? nir_instr_get_debug_info(instr) : NULL;
       bi_emit_instr(&_b, instr);
    }
 
@@ -6629,8 +6638,13 @@ bi_compile_variant_nir(nir_shader *nir,
    bool skip_internal = nir->info.internal;
    skip_internal &= !(bifrost_debug & BIFROST_DBG_INTERNAL);
 
-   if (bifrost_debug & BIFROST_DBG_SHADERS && !skip_internal)
+   if (bifrost_debug & BIFROST_DBG_SHADERS && !skip_internal) {
+      /* Assign lines. Must be done last. */
+      if (bifrost_debug & BIFROST_DBG_DEBUGINFO)
+         ralloc_free(nir_shader_gather_debug_info(nir, "", 1));
+
       nir_print_shader(nir, stderr);
+   }
 
    ctx->allocated_vec = _mesa_hash_table_u64_create(ctx);
 
@@ -6719,7 +6733,7 @@ bi_compile_variant_nir(nir_shader *nir,
 
       util_qsort_r(sorted, const_amount, sizeof(uint32_t), compare_u32, NULL);
       uint32_t max_amount = MIN2(const_amount, ctx->inputs->fau_consts.max_amount);
-      uint32_t min_count_for_fau = max_amount > 0 ? sorted[max_amount - 1] : 0; 
+      uint32_t min_count_for_fau = max_amount > 0 ? sorted[max_amount - 1] : 0;
       ralloc_free(sorted);
 
       bi_foreach_instr_global_safe(ctx, I) {
