@@ -117,6 +117,8 @@ pipe_to_pan_bind_flags(uint32_t pipe_bind_flags)
       pan_bind_flags |= PAN_BIND_VERTEX_BUFFER;
    if (pipe_bind_flags & PIPE_BIND_SAMPLER_VIEW)
       pan_bind_flags |= PAN_BIND_SAMPLER_VIEW;
+   if (pipe_bind_flags & PIPE_BIND_SHADER_IMAGE)
+      pan_bind_flags |= PAN_BIND_STORAGE_IMAGE;
 
    return pan_bind_flags;
 }
@@ -751,6 +753,8 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
    caps->buffer_sampler_view_rgba_only = true;
    caps->packed_uniforms = true;
    caps->image_load_formatted = true;
+   caps->image_store_formatted = true;
+   caps->image_atomic_inc_wrap = true;
    caps->cube_map_array = true;
    caps->compute = true;
    caps->int64 = true;
@@ -898,8 +902,6 @@ panfrost_init_screen_caps(struct panfrost_screen *screen)
 
    caps->supported_prim_modes =
    caps->supported_prim_modes_with_restart = modes;
-
-   caps->image_store_formatted = true;
 
    caps->native_fence_fd = true;
 

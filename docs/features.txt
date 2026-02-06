@@ -208,7 +208,7 @@ GL 4.4, GLSL 4.40 -- all DONE: freedreno/a6xx, nvc0, r600, radeonsi, llvmpipe, v
   GL_ARB_query_buffer_object                            DONE (freedreno/a6xx)
   GL_ARB_texture_mirror_clamp_to_edge                   DONE (freedreno, nv50, softpipe, v3d, panfrost, crocus, svga)
   GL_ARB_texture_stencil8                               DONE (freedreno, nv50, softpipe, v3d, panfrost, etnaviv/HALTI5)
-  GL_ARB_vertex_type_10f_11f_11f_rev                    DONE (freedreno, nv50, softpipe, panfrost, crocus)
+  GL_ARB_vertex_type_10f_11f_11f_rev                    DONE (freedreno, nv50, softpipe, panfrost, crocus, svga)
   GL_NV_shader_atomic_int64                             DONE (radeonsi, panfrost/v9+)
 
 GL 4.5, GLSL 4.50 -- all DONE: freedreno/a6xx, nvc0, r600, radeonsi, llvmpipe, virgl, zink, iris, crocus/gen7.5+, d3d12, asahi
@@ -684,7 +684,7 @@ Khronos extensions that are not part of any Vulkan version:
   VK_EXT_vertex_attribute_divisor                       DONE (anv, dzn, hasvk, hk, kk, lvp, nvk, panvk, pvr, radv, tu, v3dv, vn)
   VK_EXT_vertex_input_dynamic_state                     DONE (anv, hk, lvp, nvk, panvk, radv, tu, vn)
   VK_EXT_ycbcr_image_arrays                             DONE (anv, hasvk, hk, lvp, nvk, panvk/v10+, radv, vn)
-  VK_EXT_zero_initialize_device_memory                  DONE (lvp, nvk, pvr, radv, tu)
+  VK_EXT_zero_initialize_device_memory                  DONE (lvp, nvk, panvk, pvr, radv, tu)
   VK_ANDROID_external_memory_android_hardware_buffer    DONE (anv, lvp, panvk, radv, tu, v3dv, vn)
   VK_ANDROID_native_buffer                              DONE (anv, lvp, panvk, radv, tu, v3dv, vn)
   VK_GOOGLE_decorate_string                             DONE (anv, hasvk, hk, kk, lvp, nvk, panvk, radv, tu, vn)

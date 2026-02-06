@@ -33,6 +33,15 @@
 
 #define SLOT_UNSET ((unsigned char) -1)
 
+static const SpvFPFastMathModeMask default_fp_mode =
+   SpvFPFastMathModeNSZMask |
+   SpvFPFastMathModeNotInfMask |
+   SpvFPFastMathModeNotNaNMask |
+   SpvFPFastMathModeAllowRecipMask |
+   SpvFPFastMathModeAllowContractMask |
+   SpvFPFastMathModeAllowReassocMask |
+   SpvFPFastMathModeAllowTransformMask;
+
 struct ntv_context {
    void *mem_ctx;
 
@@ -2094,8 +2103,8 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
       result = emit_builtin_binop(ctx, spirv_op, dest_type, src[0], src[1]); \
       break;
 
-   BUILTIN_BINOP(nir_op_fmin, GLSLstd450FMin)
-   BUILTIN_BINOP(nir_op_fmax, GLSLstd450FMax)
+   BUILTIN_BINOP(nir_op_fmin, nir_alu_instr_is_nan_preserve(alu) ? GLSLstd450NMin : GLSLstd450FMin)
+   BUILTIN_BINOP(nir_op_fmax, nir_alu_instr_is_nan_preserve(alu) ? GLSLstd450NMax : GLSLstd450FMax)
    BUILTIN_BINOP(nir_op_imin, GLSLstd450SMin)
    BUILTIN_BINOP(nir_op_imax, GLSLstd450SMax)
    BUILTIN_BINOP(nir_op_umin, GLSLstd450UMin)
@@ -2286,8 +2295,39 @@ emit_alu(struct ntv_context *ctx, nir_alu_instr *alu)
       UNREACHABLE("unsupported opcode");
       return;
    }
-   if (nir_alu_instr_is_exact(alu))
-      spirv_builder_emit_decoration(&ctx->builder, result, SpvDecorationNoContraction);
+
+   if (ctx->sinfo->have_float_controls2) {
+      bool any_float = nir_alu_type_get_base_type(atype) == nir_type_float;
+      for (unsigned i = 0; i < nir_op_infos[alu->op].num_inputs; i++)
+         any_float |= nir_alu_type_get_base_type(stype[i]) == nir_type_float;
+
+      if (any_float) {
+         SpvFPFastMathModeMask fp_mode = 0;
+
+         if (!nir_alu_instr_is_signed_zero_preserve(alu))
+            fp_mode |= SpvFPFastMathModeNSZMask;
+
+         if (!nir_alu_instr_is_inf_preserve(alu))
+            fp_mode |= SpvFPFastMathModeNotInfMask;
+
+         if (!nir_alu_instr_is_nan_preserve(alu))
+            fp_mode |= SpvFPFastMathModeNotNaNMask;
+
+         if (!nir_alu_instr_is_exact(alu)) {
+            fp_mode |=
+               SpvFPFastMathModeAllowRecipMask |
+               SpvFPFastMathModeAllowContractMask |
+               SpvFPFastMathModeAllowReassocMask |
+               SpvFPFastMathModeAllowTransformMask;
+         }
+
+         if (fp_mode != default_fp_mode)
+            spirv_builder_emit_fp_fast_math_mode(&ctx->builder, result, fp_mode);
+      }
+   } else {
+      if (nir_alu_instr_is_exact(alu))
+         spirv_builder_emit_decoration(&ctx->builder, result, SpvDecorationNoContraction);
+   }
 
    store_alu_result(ctx, alu, result, atype);
 }
@@ -5163,7 +5203,8 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
          emit_image(&ctx, var, get_bare_image_type(&ctx, var, false));
    }
 
-   if (sinfo->float_controls.flush_denorms) {
+   if (sinfo->float_controls.flush_denorms ||
+       sinfo->float_controls.preserve_denorms) {
       unsigned execution_mode = s->info.float_controls_execution_mode;
       bool flush_16_bit = nir_is_denorm_flush_to_zero(execution_mode, 16);
       bool flush_32_bit = nir_is_denorm_flush_to_zero(execution_mode, 32);
@@ -5228,6 +5269,20 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
          spirv_builder_emit_cap(&ctx.builder, SpvCapabilityDenormFlushToZero);
       if (emit_cap_preserve)
          spirv_builder_emit_cap(&ctx.builder, SpvCapabilityDenormPreserve);
+   }
+
+   if (sinfo->have_float_controls2 && s->info.bit_sizes_float) {
+      spirv_builder_emit_extension(&ctx.builder, "SPV_KHR_float_controls2");
+      spirv_builder_emit_cap(&ctx.builder, SpvCapabilityFloatControls2);
+
+      SpvId defaults = spirv_builder_const_uint(&ctx.builder, 32, default_fp_mode);
+      u_foreach_bit(log_size, s->info.bit_sizes_float) {
+         SpvId float_type = spirv_builder_type_float(&ctx.builder, 1 << log_size);
+         SpvId params[2] = {float_type, defaults};
+         spirv_builder_emit_exec_mode_id(&ctx.builder, entry_point,
+                                          SpvExecutionModeFPFastMathDefault,
+                                          params, 2);
+      }
    }
 
    switch (s->info.stage) {
@@ -5316,9 +5371,9 @@ nir_to_spirv(struct nir_shader *s, const struct ntv_info *sinfo)
 
          /* WorkgroupSize is deprecated in SPIR-V 1.6 */
          if (sinfo->spirv_version >= SPIRV_VERSION(1, 6)) {
-            spirv_builder_emit_exec_mode_id3(&ctx.builder, entry_point,
-                                                  SpvExecutionModeLocalSizeId,
-                                                  sizes);
+            spirv_builder_emit_exec_mode_id(&ctx.builder, entry_point,
+                                            SpvExecutionModeLocalSizeId,
+                                            sizes, 3);
          } else {
             spirv_builder_emit_builtin(&ctx.builder, ctx.local_group_size_var, SpvBuiltInWorkgroupSize);
          }

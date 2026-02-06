@@ -549,7 +549,8 @@ pvr_copy_or_resolve_image_region(struct pvr_cmd_buffer *cmd_buffer,
    uint32_t max_slices;
    uint32_t flags = 0U;
 
-   if (src->vk.format == VK_FORMAT_D24_UNORM_S8_UINT &&
+   if (pvr_vk_format_is_combined_ds(src->vk.format) &&
+       pvr_vk_format_is_combined_ds(dst->vk.format) &&
        region->srcSubresource.aspectMask !=
           (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
       /* Takes the stencil of the source and the depth of the destination and
@@ -597,19 +598,20 @@ pvr_copy_or_resolve_image_region(struct pvr_cmd_buffer *cmd_buffer,
    }
 
    if (src->vk.samples > dst->vk.samples) {
-      /* Resolve op needs to know the actual format. */
-      dst_format =
-         vk_format_get_plane_aspect_format(dst->vk.format,
-                                           region->dstSubresource.aspectMask);
+      src_format = src->vk.format;
+      if (pvr_vk_format_is_combined_ds(src->vk.format) &&
+          dst->vk.format != VK_FORMAT_X8_D24_UNORM_PACK32) {
+         dst_format = dst->vk.format;
+      } else {
+         dst_format = src_format;
+      }
    } else {
       /* We don't care what format dst is as it's guaranteed to be size
        * compatible with src.
        */
-      dst_format = pvr_get_raw_copy_format(
-         vk_format_get_plane_aspect_format(src->vk.format,
-                                           region->srcSubresource.aspectMask));
+      dst_format = pvr_get_raw_copy_format(src->vk.format);
+      src_format = dst_format;
    }
-   src_format = dst_format;
 
    src_layers =
       vk_image_subresource_layer_count(&src->vk, &region->srcSubresource);

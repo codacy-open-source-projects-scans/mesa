@@ -92,7 +92,8 @@ pipe_iris_create_screen(int fd, const struct pipe_screen_config *config)
 const driOptionDescription iris_driconf[] = {
       #include "iris/driinfo_iris.h"
 };
-DRM_DRIVER_DESCRIPTOR(iris, iris_driconf, ARRAY_SIZE(iris_driconf))
+DRM_DRIVER_DESCRIPTOR(iris, iris_driconf, ARRAY_SIZE(iris_driconf),
+                      .probe_nctx = iris_drm_probe_nctx)
 
 #else
 DRM_DRIVER_DESCRIPTOR_STUB(iris)
@@ -113,7 +114,8 @@ pipe_crocus_create_screen(int fd, const struct pipe_screen_config *config)
 const driOptionDescription crocus_driconf[] = {
       #include "crocus/driinfo_crocus.h"
 };
-DRM_DRIVER_DESCRIPTOR(crocus, crocus_driconf, ARRAY_SIZE(crocus_driconf))
+DRM_DRIVER_DESCRIPTOR(crocus, crocus_driconf, ARRAY_SIZE(crocus_driconf),
+                      .probe_nctx = crocus_drm_probe_nctx)
 #else
 DRM_DRIVER_DESCRIPTOR_STUB(crocus)
 #endif

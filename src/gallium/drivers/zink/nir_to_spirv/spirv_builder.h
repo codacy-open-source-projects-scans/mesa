@@ -110,6 +110,10 @@ spirv_builder_emit_decoration(struct spirv_builder *b, SpvId target,
                               SpvDecoration decoration);
 
 void
+spirv_builder_emit_fp_fast_math_mode(struct spirv_builder *b, SpvId target,
+                                     SpvFPFastMathModeMask fp_mode);
+
+void
 spirv_builder_emit_rounding_mode(struct spirv_builder *b, SpvId target,
                                  SpvFPRoundingMode rounding);
 
@@ -185,8 +189,9 @@ void
 spirv_builder_emit_exec_mode_literal3(struct spirv_builder *b, SpvId entry_point,
                                      SpvExecutionMode exec_mode, uint32_t param[3]);
 void
-spirv_builder_emit_exec_mode_id3(struct spirv_builder *b, SpvId entry_point,
-                                 SpvExecutionMode exec_mode, SpvId param[3]);
+spirv_builder_emit_exec_mode_id(struct spirv_builder *b, SpvId entry_point,
+                                SpvExecutionMode exec_mode,
+                                SpvId *param, size_t num_params);
 void
 spirv_builder_emit_exec_mode(struct spirv_builder *b, SpvId entry_point,
                              SpvExecutionMode exec_mode);

@@ -479,6 +479,12 @@ l_rnn_meta_dom_index(lua_State *L)
       struct rnndelem *elem = rnn_regoff(rnn, offset);
       if (elem)
          return l_rnn_etype(L, rnn, elem, elem->offset);
+
+      /* Just return the raw value if not defined as an element */
+      if (offset < rnndec->sizedwords) {
+         lua_pushnumber(L, rnndec->dwords[offset]);
+         return 1;
+      }
    } else if (lua_isstring(L, 2)) {
       const char *name = lua_tostring(L, 2);
 
@@ -772,6 +778,7 @@ static const struct luaL_Reg l_priv[] = {
 
 uint64_t gpubaseaddr(uint64_t gpuaddr);
 unsigned hostlen(uint64_t gpuaddr);
+void *hostptr(uint64_t gpuaddr);
 
 /* given address, return base-address of buffer: */
 static int
@@ -791,8 +798,37 @@ l_bo_size(lua_State *L)
    return 1;
 }
 
+static int
+l_bo_write(lua_State *L)
+{
+   uint64_t addr = (uint64_t)lua_tonumber(L, 1);
+   uint32_t val = (uint32_t)lua_tonumber(L, 2);
+   uint32_t *ptr = hostptr(addr);
+
+   if (ptr)
+      *ptr = val;
+
+   lua_pushboolean(L, !!ptr);
+   return 1;
+}
+
+static int
+l_bo_index(lua_State *L)
+{
+   uint64_t addr = (uint64_t)lua_tonumber(L, 1);
+   uint32_t *ptr = hostptr(addr);
+   if (!ptr)
+      return 0;
+   lua_pushnumber(L, *ptr);
+   return 1;
+}
+
 static const struct luaL_Reg l_bos[] = {
-   {"base", l_bo_base}, {"size", l_bo_size}, {NULL, NULL} /* sentinel */
+   {"base", l_bo_base},
+   {"size", l_bo_size},
+   {"write", l_bo_write},
+   {"__index", l_bo_index},
+   {NULL, NULL} /* sentinel */
 };
 
 static void
