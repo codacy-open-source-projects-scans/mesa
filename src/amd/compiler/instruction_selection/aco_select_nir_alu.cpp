@@ -30,12 +30,9 @@ enum sgpr_extract_mode {
 };
 
 Temp
-extract_8_16_bit_sgpr_element(isel_context* ctx, Temp dst, nir_alu_src* src, sgpr_extract_mode mode)
+extract_8_16_bit_sgpr_element(isel_context* ctx, Temp dst, Temp vec, unsigned src_size,
+                              unsigned swizzle, sgpr_extract_mode mode)
 {
-   Temp vec = get_ssa_temp(ctx, src->src.ssa);
-   unsigned src_size = src->src.ssa->bit_size;
-   unsigned swizzle = src->swizzle[0];
-
    if (vec.size() > 1) {
       unsigned factor = 32 / src_size;
       vec = emit_extract_vector(ctx, vec, swizzle / factor, s1);
@@ -76,22 +73,30 @@ get_alu_src(struct isel_context* ctx, nir_alu_src src, unsigned size = 1)
 
    Temp vec = get_ssa_temp(ctx, src.src.ssa);
    unsigned elem_size = src.src.ssa->bit_size / 8u;
-   bool identity_swizzle = true;
 
-   for (unsigned i = 0; identity_swizzle && i < size; i++) {
-      if (src.swizzle[i] != i)
-         identity_swizzle = false;
+   /* Combine continuous and aligned subdword components. */
+   while (size % 2 == 0 && elem_size < 4) {
+      bool continuous = true;
+      for (unsigned i = 0; continuous && i < size; i += 2) {
+         if (src.swizzle[i] % 2 != 0 || src.swizzle[i + 1] != (src.swizzle[i] + 1))
+            continuous = false;
+      }
+
+      if (!continuous)
+         break;
+
+      elem_size *= 2;
+      size /= 2;
+      for (unsigned i = 0; i < size; i++)
+         src.swizzle[i] = src.swizzle[i * 2] / 2;
    }
-   if (identity_swizzle)
-      return emit_extract_vector(ctx, vec, 0, RegClass::get(vec.type(), elem_size * size));
 
    assert(elem_size > 0);
    assert(vec.bytes() % elem_size == 0);
 
    if (elem_size < 4 && vec.type() == RegType::sgpr && size == 1) {
-      assert(src.src.ssa->bit_size == 8 || src.src.ssa->bit_size == 16);
-      return extract_8_16_bit_sgpr_element(ctx, ctx->program->allocateTmp(s1), &src,
-                                           sgpr_extract_undef);
+      return extract_8_16_bit_sgpr_element(ctx, ctx->program->allocateTmp(s1), vec, elem_size * 8,
+                                           src.swizzle[0], sgpr_extract_undef);
    }
 
    bool as_uniform = elem_size < 4 && vec.type() == RegType::sgpr;
@@ -3025,7 +3030,9 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          sgpr_extract_mode mode = trunc  ? sgpr_extract_undef
                                   : sext ? sgpr_extract_sext
                                          : sgpr_extract_zext;
-         extract_8_16_bit_sgpr_element(ctx, dst, &instr->src[0], mode);
+         Temp vec = get_ssa_temp(ctx, instr->src[0].src.ssa);
+         unsigned swizzle = instr->src[0].swizzle[0];
+         extract_8_16_bit_sgpr_element(ctx, dst, vec, input_bitsize, swizzle, mode);
       } else {
          convert_int(ctx, bld, get_alu_src(ctx, instr->src[0]), input_bitsize, output_bitsize,
                      sext && !trunc, dst);
@@ -3211,40 +3218,6 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       aco_opcode opcode = instr->op == nir_op_pack_uint_2x16 ? aco_opcode::v_cvt_pk_u16_u32
                                                              : aco_opcode::v_cvt_pk_i16_i32;
       bld.vop3(opcode, Definition(dst), src0, as_vgpr(ctx, src1));
-      break;
-   }
-   case nir_op_unpack_half_2x16_split_x: {
-      Temp src = get_alu_src(ctx, instr->src[0]);
-      if (dst.regClass() == s1) {
-         bld.sop1(aco_opcode::s_cvt_f32_f16, Definition(dst), src);
-         break;
-      }
-      if (src.regClass() == v1)
-         src = bld.pseudo(aco_opcode::p_split_vector, bld.def(v2b), bld.def(v2b), src);
-      if (dst.regClass() == v1) {
-         bld.vop1(aco_opcode::v_cvt_f32_f16, Definition(dst), src);
-      } else {
-         isel_err(&instr->instr, "Unimplemented NIR instr bit size");
-      }
-      break;
-   }
-   case nir_op_unpack_half_2x16_split_y: {
-      Temp src = get_alu_src(ctx, instr->src[0]);
-      if (dst.regClass() == s1) {
-         bld.sop1(aco_opcode::s_cvt_hi_f32_f16, Definition(dst), src);
-         break;
-      }
-      if (src.regClass() == s1)
-         src = bld.pseudo(aco_opcode::p_extract, bld.def(s1), bld.def(s1, scc), src,
-                          Operand::c32(1u), Operand::c32(16u), Operand::zero());
-      else
-         src =
-            bld.pseudo(aco_opcode::p_split_vector, bld.def(v2b), bld.def(v2b), src).def(1).getTemp();
-      if (dst.regClass() == v1) {
-         bld.vop1(aco_opcode::v_cvt_f32_f16, Definition(dst), src);
-      } else {
-         isel_err(&instr->instr, "Unimplemented NIR instr bit size");
-      }
       break;
    }
    case nir_op_msad_4x8: {

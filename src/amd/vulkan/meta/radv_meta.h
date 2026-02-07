@@ -97,6 +97,7 @@ enum radv_meta_object_key_type {
    RADV_META_OBJECT_KEY_CLEAR_HIZ,
    RADV_META_OBJECT_KEY_FAST_CLEAR_ELIMINATE,
    RADV_META_OBJECT_KEY_DCC_DECOMPRESS,
+   RADV_META_OBJECT_KEY_DCC_DECOMPRESS_CS,
    RADV_META_OBJECT_KEY_DCC_RETILE,
    RADV_META_OBJECT_KEY_HTILE_EXPAND_GFX,
    RADV_META_OBJECT_KEY_HTILE_EXPAND_CS,
@@ -233,9 +234,6 @@ void radv_meta_resolve_fragment_image(struct radv_cmd_buffer *cmd_buffer, struct
                                       VkFormat src_format, VkImageLayout src_image_layout, struct radv_image *dst_image,
                                       VkFormat dst_format, VkImageLayout dst_image_layout,
                                       const VkImageResolve2 *region);
-
-void radv_decompress_resolve_src(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image,
-                                 VkImageLayout src_image_layout, const VkImageResolve2 *region);
 
 uint32_t radv_clear_cmask(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                           const VkImageSubresourceRange *range, uint32_t value);

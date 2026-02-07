@@ -515,14 +515,6 @@ dst.x = unpack_half_1x16((uint16_t)(src0.x & 0xffff), nir_is_denorm_flush_to_zer
 dst.y = unpack_half_1x16((uint16_t)(src0.x >> 16), nir_is_denorm_flush_to_zero(execution_mode, 16));
 """)
 
-# Lowered floating point unpacking operations.
-
-unop_convert("unpack_half_2x16_split_x", tfloat32, tuint32,
-             "unpack_half_1x16((uint16_t)(src0 & 0xffff), nir_is_denorm_flush_to_zero(execution_mode, 16))")
-unop_convert("unpack_half_2x16_split_y", tfloat32, tuint32,
-             "unpack_half_1x16((uint16_t)(src0 >> 16), nir_is_denorm_flush_to_zero(execution_mode, 16))")
-
-
 unop_convert("unpack_32_2x16_split_x", tuint16, tuint32, "src0")
 unop_convert("unpack_32_2x16_split_y", tuint16, tuint32, "src0 >> 16")
 
@@ -1701,6 +1693,11 @@ unop_horiz("pack_double_2x32_dxil", 1, tuint64, 2, tuint32,
            "dst.x = src0.x | ((uint64_t)src0.y << 32);")
 unop_horiz("unpack_double_2x32_dxil", 2, tuint32, 1, tuint64,
            "dst.x = src0.x; dst.y = src0.x >> 32;")
+
+# DXIL has to support targets without native 16bit support,
+# so it needs a special f2f32 opcode that uses the low half of 32bit value.
+unop_convert("unpack_half_x_dxil", tfloat32, tuint32,
+             "unpack_half_1x16((uint16_t)(src0 & 0xffff), nir_is_denorm_flush_to_zero(execution_mode, 16))")
 
 # src0 and src1 are i8vec4 packed in an int32, and src2 is an int32.  The int8
 # components are sign-extended to 32-bits, and a dot-product is performed on

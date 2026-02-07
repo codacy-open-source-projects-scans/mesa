@@ -449,7 +449,7 @@ compile_image_function(struct llvmpipe_context *ctx, struct lp_static_texture_st
    LLVMPositionBuilderAtEnd(gallivm->builder, block);
 
    LLVMValueRef outdata[5] = { 0 };
-   lp_build_img_op_soa(&local_texture, lp_build_image_soa_dynamic_state(image_soa), gallivm, &params, outdata);
+   lp_build_img_op_soa(&local_texture, lp_build_image_soa_dynamic_state(image_soa), gallivm, &params, is64, outdata);
 
    for (uint32_t i = 1; i < 4; i++)
       if (!outdata[i])
@@ -591,8 +591,17 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_texture_handle_s
          offsets[i] = LLVMGetParam(function, arg_index++);
 
    LLVMValueRef lod = NULL;
-   if (lod_control == LP_SAMPLER_LOD_BIAS || lod_control == LP_SAMPLER_LOD_EXPLICIT)
+   struct lp_derivatives derivs;
+   struct lp_derivatives *deriv_ptr = NULL;
+   if (lod_control == LP_SAMPLER_LOD_BIAS || lod_control == LP_SAMPLER_LOD_EXPLICIT) {
       lod = LLVMGetParam(function, arg_index++);
+   } else if (lod_control == LP_SAMPLER_LOD_DERIVATIVES) {
+      for (unsigned i = 0; i < 3; i++) {
+         derivs.ddx[i] = LLVMGetParam(function, arg_index++);
+         derivs.ddy[i] = LLVMGetParam(function, arg_index++);
+      }
+      deriv_ptr = &derivs;
+   }
 
    LLVMValueRef min_lod = NULL;
    if (sample_key & LP_SAMPLER_MIN_LOD)
@@ -609,7 +618,7 @@ compile_sample_function(struct llvmpipe_context *ctx, struct lp_texture_handle_s
    if (supported) {
       lp_build_sample_soa_code(gallivm, &texture->static_state, sampler, lp_build_sampler_soa_dynamic_state(sampler_soa),
                                type, sample_key, 0, 0, cs.jit_resources_type, NULL, cs.jit_cs_thread_data_type,
-                               NULL, coords, offsets, NULL, lod, min_lod, ms_index, texel_out);
+                               NULL, coords, offsets, deriv_ptr, lod, min_lod, ms_index, texel_out);
    } else {
       lp_build_sample_nop(gallivm, lp_build_texel_type(type, util_format_description(texture->static_state.format)), coords, texel_out);
    }

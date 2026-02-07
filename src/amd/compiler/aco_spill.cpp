@@ -298,7 +298,7 @@ is_spillable(spill_ctx& ctx, Temp var)
    if (var.regClass().is_linear_vgpr())
       return false;
    auto is_current_var = [var](const Temp& test) { return var == test; };
-   return var != ctx.program->stack_ptr && var != ctx.program->static_scratch_rsrc &&
+   return var != ctx.program->stack_ptr &&
           std::none_of(ctx.program->scratch_offsets.begin(), ctx.program->scratch_offsets.end(),
                        is_current_var) &&
           std::none_of(ctx.program->private_segment_buffers.begin(),
@@ -1750,21 +1750,7 @@ spill(Program* program)
 
    const RegisterDemand limit = get_addr_regs_from_waves(program, program->min_waves);
    if (program->is_callee) {
-      BITSET_DECLARE(preserved_regs, 512);
-      RegisterDemand callee_limit = RegisterDemand();
-      program->callee_abi.preservedRegisters(preserved_regs);
-      for (int16_t i = 0; i < 512; ++i) {
-         if (i < 256 && i >= limit.sgpr)
-            i = 256;
-         if (i >= 256 + limit.vgpr)
-            break;
-         if (BITSET_TEST(preserved_regs, i))
-            continue;
-         if (i < 256)
-            ++callee_limit.sgpr;
-         else
-            ++callee_limit.vgpr;
-      }
+      RegisterDemand callee_limit = program->callee_abi.numClobbered(limit);
 
       auto return_it = std::find_if(
          program->blocks.back().instructions.rbegin(), program->blocks.back().instructions.rend(),
