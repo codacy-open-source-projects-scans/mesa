@@ -1988,7 +1988,7 @@ enum anv_gfx_state_bits {
    ANV_GFX_STATE_WA_18038825448, /* Fake state to implement workaround */
    ANV_GFX_STATE_WA_14024997852, /* Fake state to implement workaround */
    ANV_GFX_STATE_TBIMR_TILE_PASS_INFO,
-   ANV_GFX_STATE_FS_MSAA_FLAGS,
+   ANV_GFX_STATE_FS_CONFIG,
    ANV_GFX_STATE_TESS_CONFIG,
    ANV_GFX_STATE_MESH_PROVOKING_VERTEX,
 
@@ -2383,10 +2383,10 @@ struct anv_gfx_dynamic_state {
 
    /**
     * Dynamic msaa flags, this value can be different from
-    * anv_push_constants::gfx::fs_msaa_flags, as the push constant value only
+    * anv_push_constants::gfx::fs_config, as the push constant value only
     * needs to be updated for fragment shaders dynamically checking the value.
     */
-   enum intel_msaa_flags fs_msaa_flags;
+   enum intel_fs_config fs_config;
 
    /**
     * Dynamic tesselation configuration (see enum intel_tess_config).
@@ -4286,7 +4286,7 @@ struct anv_push_constants {
    union {
       struct {
          /** Dynamic MSAA value */
-         uint32_t fs_msaa_flags;
+         uint32_t fs_config;
 
          /** Dynamic TCS/TES configuration */
          uint32_t tess_config;
@@ -5397,7 +5397,7 @@ ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(vs, MESA_SHADER_VERTEX)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(tcs, MESA_SHADER_TESS_CTRL)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(tes, MESA_SHADER_TESS_EVAL)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(gs, MESA_SHADER_GEOMETRY)
-ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(wm, MESA_SHADER_FRAGMENT)
+ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(fs, MESA_SHADER_FRAGMENT)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(mesh, MESA_SHADER_MESH)
 ANV_DECL_GET_GRAPHICS_PROG_DATA_FUNC(task, MESA_SHADER_TASK)
 

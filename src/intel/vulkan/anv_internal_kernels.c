@@ -167,20 +167,20 @@ compile_shader(struct anv_device *device,
             .stats = stats,
             .mem_ctx = temp_ctx,
          },
-         .key = &key.wm,
-         .prog_data = &prog_data.wm,
+         .key = &key.fs,
+         .prog_data = &prog_data.fs,
       };
       program = brw_compile_fs(compiler, &params);
 
       if (!INTEL_DEBUG(DEBUG_SHADER_PRINT)) {
          unsigned stat_idx = 0;
-         if (prog_data.wm.dispatch_8) {
+         if (prog_data.fs.dispatch_8) {
             check_sends(&stats[stat_idx++], sends_count_expectation);
          }
-         if (prog_data.wm.dispatch_16) {
+         if (prog_data.fs.dispatch_16) {
             check_sends(&stats[stat_idx++], sends_count_expectation);
          }
-         if (prog_data.wm.dispatch_32) {
+         if (prog_data.fs.dispatch_32) {
             check_sends(&stats[stat_idx++], sends_count_expectation *
                                             (device->info->ver < 20 ? 2 : 1));
          }
