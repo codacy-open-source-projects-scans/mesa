@@ -139,19 +139,8 @@ pan_kmod_bo_put(struct pan_kmod_bo *bo)
    simple_mtx_unlock(&dev->handle_to_bo.lock);
 }
 
-static bool
-pan_kmod_bo_check_import_flags(struct pan_kmod_bo *bo, uint32_t flags)
-{
-   uint32_t mask = PAN_KMOD_BO_FLAG_EXECUTABLE |
-                   PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT | PAN_KMOD_BO_FLAG_NO_MMAP |
-                   PAN_KMOD_BO_FLAG_GPU_UNCACHED;
-
-   /* If the BO exists, make sure the import flags match the original flags. */
-   return (bo->flags & mask) == (flags & mask);
-}
-
 struct pan_kmod_bo *
-pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd, uint32_t flags)
+pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd)
 {
    struct pan_kmod_bo *bo = NULL;
    struct pan_kmod_bo **slot;
@@ -168,11 +157,6 @@ pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd, uint32_t flags)
       goto err_close_handle;
 
    if (*slot) {
-      if (!pan_kmod_bo_check_import_flags(*slot, flags)) {
-         mesa_loge("invalid import flags");
-         goto err_unlock;
-      }
-
       bo = *slot;
 
       p_atomic_inc(&bo->refcnt);
@@ -183,7 +167,7 @@ pan_kmod_bo_import(struct pan_kmod_dev *dev, int fd, uint32_t flags)
          goto err_close_handle;
       }
 
-      bo = dev->ops->bo_import(dev, handle, size, flags);
+      bo = dev->ops->bo_import(dev, handle, size);
       if (!bo)
          goto err_close_handle;
 

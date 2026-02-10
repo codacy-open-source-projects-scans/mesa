@@ -2942,9 +2942,11 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       return;
    }
 
+   case nir_op_unpack_32_4x8:
    case nir_op_unpack_32_2x16: {
       /* Should have been scalarized */
-      assert(comps == 2 && sz == 16);
+      assert(sz == 8 || sz == 16);
+      assert(comps * sz == 32);
 
       bi_index vec = bi_src_index(&instr->src[0].src);
       unsigned chan = instr->src[0].swizzle[0];
@@ -2967,6 +2969,14 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       };
 
       bi_make_vec_to(b, dst, srcs, channels, comps, 16);
+      return;
+   }
+
+   case nir_op_unpack_64_2x32: {
+      unsigned chan = (instr->src[0].swizzle[0] * 2) + 0;
+      bi_index idx = bi_src_index(&instr->src[0].src);
+      bi_collect_v2i32_to(b, dst, bi_extract(b, idx, chan + 0),
+                                  bi_extract(b, idx, chan + 1));
       return;
    }
 
@@ -5577,8 +5587,12 @@ bi_vectorize_filter(const nir_instr *instr, const void *data)
       break;
    }
 
-   int dst_bit_size = alu->def.bit_size;
-   if (dst_bit_size == 8)
+   const uint8_t bit_size = nir_alu_instr_is_comparison(alu)
+                            ? nir_src_bit_size(alu->src[0].src)
+                            : alu->def.bit_size;
+   if (bit_size == 1)
+      return 0;
+   else if (bit_size == 8)
       switch (alu->op) {
       case nir_op_imul:
       case nir_op_i2i8:
@@ -5587,7 +5601,7 @@ bi_vectorize_filter(const nir_instr *instr, const void *data)
       default:
          return 2;
       }
-   else if (dst_bit_size == 16)
+   else if (bit_size == 16)
       return 2;
    else
       return 1;
@@ -5829,7 +5843,6 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
       vectorize_opts.modes |= nir_var_mem_ubo;
 
    NIR_PASS(_, nir, nir_opt_load_store_vectorize, &vectorize_opts);
-   NIR_PASS(_, nir, nir_lower_pack);
 
    /* nir_lower_pack can generate split operations, execute algebraic again to
     * handle them */
@@ -5849,6 +5862,7 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
    while (late_algebraic) {
       late_algebraic = false;
       NIR_PASS(late_algebraic, nir, nir_opt_algebraic_late);
+      NIR_PASS(_, nir, nir_lower_alu_width, bi_vectorize_filter, &gpu_id);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);
@@ -5859,9 +5873,9 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
    if (pan_arch(gpu_id) < 9)
       NIR_PASS(_, nir, bifrost_nir_opt_boolean_bitwise);
 
+   NIR_PASS(_, nir, nir_lower_bool_to_bitsize);
    NIR_PASS(_, nir, nir_lower_alu_width, bi_vectorize_filter, &gpu_id);
    NIR_PASS(_, nir, nir_opt_vectorize, bi_vectorize_filter, &gpu_id);
-   NIR_PASS(_, nir, nir_lower_bool_to_bitsize);
 
    /* Prepass to simplify instruction selection */
    bool late_algebraic_progress = true;
@@ -5875,6 +5889,7 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
    while (late_algebraic) {
       late_algebraic = false;
       NIR_PASS(late_algebraic, nir, nir_opt_algebraic_late);
+      NIR_PASS(_, nir, nir_lower_alu_width, bi_vectorize_filter, &gpu_id);
       NIR_PASS(_, nir, nir_opt_constant_folding);
       NIR_PASS(_, nir, nir_opt_copy_prop);
       NIR_PASS(_, nir, nir_opt_dce);

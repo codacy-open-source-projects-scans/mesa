@@ -3649,7 +3649,6 @@ brw_interp_reg(const brw_builder &bld, unsigned location,
 
    assert(prog_data->urb_setup[location] >= 0);
    unsigned nr = prog_data->urb_setup[location];
-   channel += prog_data->urb_setup_channel[location];
 
    const unsigned per_vertex_start = prog_data->num_per_primitive_inputs;
    const unsigned regnr = per_vertex_start + (nr * 4) + channel;
@@ -4330,7 +4329,7 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
           */
          const unsigned num_components = nir_src_num_components(nsrc);
          const unsigned bit_size = nir_src_bit_size(nsrc);
-         const nir_const_value *nval = nir_src_as_const_value(instr->src[0]);
+         const nir_const_value *nval = nir_src_as_const_value(nsrc);
 
          assert(bit_size <= 32);
          for (unsigned j = 1; j < num_components; j++)

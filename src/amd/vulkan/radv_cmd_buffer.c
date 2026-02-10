@@ -1237,7 +1237,7 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
    return VK_SUCCESS;
 }
 
-void
+static void
 radv_cmd_buffer_reset_rendering(struct radv_cmd_buffer *cmd_buffer)
 {
    memset(&cmd_buffer->state.render, 0, sizeof(cmd_buffer->state.render));
@@ -4713,7 +4713,7 @@ radv_gfx11_emit_fb_ds_state(struct radv_cmd_buffer *cmd_buffer, const struct rad
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   uint32_t db_render_control = ds->db_render_control | cmd_buffer->state.db_render_control;
+   uint32_t db_render_control = ds->db_render_control;
    struct radv_cmd_stream *cs = cmd_buffer->cs;
 
    if (!depth_compressed)
@@ -4774,7 +4774,7 @@ radv_gfx6_emit_fb_ds_state(struct radv_cmd_buffer *cmd_buffer, const struct radv
    const struct radv_physical_device *pdev = radv_device_physical(device);
    uint64_t db_htile_data_base = ds->ac.u.gfx6.db_htile_data_base;
    uint32_t db_htile_surface = ds->ac.u.gfx6.db_htile_surface;
-   uint32_t db_render_control = ds->db_render_control | cmd_buffer->state.db_render_control;
+   uint32_t db_render_control = ds->db_render_control;
    uint32_t db_z_info = ds->ac.db_z_info;
 
    if (!depth_compressed)
@@ -5653,6 +5653,9 @@ radv_gfx12_emit_hiz_wa_full(struct radv_cmd_buffer *cmd_buffer)
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
    const struct radv_image_view *iview = render->ds_att.iview;
    const struct radv_dynamic_state *d = &cmd_buffer->state.dynamic;
+
+   if (pdev->gfx12_hiz_wa != RADV_GFX12_HIZ_WA_FULL)
+      return;
 
    if (!iview || !iview->image->hiz_valid_offset)
       return;
@@ -8819,11 +8822,6 @@ radv_bind_graphics_pipeline(struct radv_cmd_buffer *cmd_buffer, struct radv_grap
 
    radv_bind_custom_blend_mode(cmd_buffer, graphics_pipeline->custom_blend_mode);
 
-   if (cmd_buffer->state.db_render_control != graphics_pipeline->db_render_control) {
-      cmd_buffer->state.db_render_control = graphics_pipeline->db_render_control;
-      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FRAMEBUFFER;
-   }
-
    if (cmd_buffer->state.uses_out_of_order_rast != graphics_pipeline->uses_out_of_order_rast ||
        cmd_buffer->state.uses_vrs_attachment != graphics_pipeline->uses_vrs_attachment) {
       cmd_buffer->state.uses_out_of_order_rast = graphics_pipeline->uses_out_of_order_rast;
@@ -9494,16 +9492,12 @@ radv_CmdSetRenderingInputAttachmentIndices(VkCommandBuffer commandBuffer,
 }
 
 static void
-radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, uint32_t index)
+radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, struct radv_attachment *att, uint32_t layer_count,
+                                 uint32_t view_mask)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_rendering_state *render = &cmd_buffer->state.render;
-   struct radv_attachment *att = &render->color_att[index];
 
-   if (!att->iview)
-      return;
-
-   if (!(att->flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR))
+   if (!device->vk.enabled_features.dynamicRenderingLocalRead)
       return;
 
    const struct radv_image *image = att->iview->image;
@@ -9525,9 +9519,9 @@ radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, uint32_t in
    radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
 
    /* Force a transition to FEEDBACK_LOOP_OPTIMAL to decompress DCC. */
-   radv_handle_image_transition(cmd_buffer, att->iview->image, att->layout,
-                                VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, RADV_QUEUE_GENERAL,
-                                RADV_QUEUE_GENERAL, &range, NULL);
+   radv_handle_rendering_image_transition(
+      cmd_buffer, att->iview, layer_count, view_mask, att->layout, VK_IMAGE_LAYOUT_UNDEFINED,
+      VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, VK_IMAGE_LAYOUT_UNDEFINED, NULL);
 
    radv_describe_barrier_end(cmd_buffer);
 
@@ -9539,16 +9533,12 @@ radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, uint32_t in
 }
 
 static void
-radv_handle_depth_fbfetch_output(struct radv_cmd_buffer *cmd_buffer)
+radv_handle_depth_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, struct radv_attachment *att, uint32_t layer_count,
+                                 uint32_t view_mask, struct radv_sample_locations_state *sample_locs)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_rendering_state *render = &cmd_buffer->state.render;
-   struct radv_attachment *att = &render->ds_att;
 
-   if (!att->iview)
-      return;
-
-   if (!(att->flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR))
+   if (!device->vk.enabled_features.dynamicRenderingLocalRead)
       return;
 
    if (!radv_layout_is_htile_compressed(
@@ -9566,9 +9556,9 @@ radv_handle_depth_fbfetch_output(struct radv_cmd_buffer *cmd_buffer)
    radv_describe_barrier_start(cmd_buffer, RGP_BARRIER_UNKNOWN_REASON);
 
    /* Force a transition to FEEDBACK_LOOP_OPTIMAL to decompress HTILE. */
-   radv_handle_image_transition(cmd_buffer, att->iview->image, att->layout,
-                                VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, RADV_QUEUE_GENERAL,
-                                RADV_QUEUE_GENERAL, &range, NULL);
+   radv_handle_rendering_image_transition(cmd_buffer, att->iview, layer_count, view_mask, att->layout,
+                                          att->stencil_layout, VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
+                                          VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, sample_locs);
 
    radv_describe_barrier_end(cmd_buffer);
 
@@ -9579,20 +9569,6 @@ radv_handle_depth_fbfetch_output(struct radv_cmd_buffer *cmd_buffer)
       radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                             VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT, 0,
                             att->iview->image, &range);
-}
-
-static void
-radv_handle_fbfetch_output(struct radv_cmd_buffer *cmd_buffer)
-{
-   const struct radv_rendering_state *render = &cmd_buffer->state.render;
-
-   /* Check if any color attachments are compressed and also used as input attachments. */
-   for (uint32_t i = 0; i < render->color_att_count; i++) {
-      radv_handle_color_fbfetch_output(cmd_buffer, i);
-   }
-
-   /* Check if the depth/stencil attachment is compressed and also used as input attachment. */
-   radv_handle_depth_fbfetch_output(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -9648,13 +9624,7 @@ radv_CmdExecuteCommands(VkCommandBuffer commandBuffer, uint32_t commandBufferCou
       primary->shader_upload_seq = MAX2(primary->shader_upload_seq, secondary->shader_upload_seq);
 
       if (!secondary->state.render.has_image_views) {
-         if (primary->state.render.active && (primary->state.dirty & RADV_CMD_DIRTY_FRAMEBUFFER)) {
-            /* Emit the framebuffer state from primary if secondary
-             * has been recorded without a framebuffer, otherwise
-             * fast color/depth clears can't work.
-             */
-            radv_emit_framebuffer_state(primary);
-
+         if (primary->state.render.active && (primary->state.dirty & RADV_CMD_DIRTY_GFX12_HIZ_WA_STATE)) {
             if (pdev->gfx12_hiz_wa == RADV_GFX12_HIZ_WA_FULL) {
                const struct radv_rendering_state *render = &primary->state.render;
                const struct radv_image_view *iview = render->ds_att.iview;
@@ -9868,7 +9838,6 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
    VkExtent2D screen_scissor = {pdev->image_props.max_dims.width, pdev->image_props.max_dims.height};
-   bool has_input_attachment_concurrent_writes = false;
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    bool disable_constant_encode_ac01 = false;
 
@@ -9926,7 +9895,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
          assert(!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT));
          radv_handle_rendering_image_transition(cmd_buffer, color_att[i].iview, pRenderingInfo->layerCount,
                                                 pRenderingInfo->viewMask, initial_layout, VK_IMAGE_LAYOUT_UNDEFINED,
-                                                color_att[i].layout, VK_IMAGE_LAYOUT_UNDEFINED, &sample_locations);
+                                                color_att[i].layout, VK_IMAGE_LAYOUT_UNDEFINED, NULL);
       }
 
       if (pdev->info.gfx_level >= GFX9 && iview->image->dcc_sign_reinterpret) {
@@ -9939,8 +9908,10 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
       screen_scissor.width = MIN2(screen_scissor.width, iview->vk.extent.width);
       screen_scissor.height = MIN2(screen_scissor.height, iview->vk.extent.height);
 
-      if (color_att[i].flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR)
-         has_input_attachment_concurrent_writes = true;
+      if (color_att[i].flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR) {
+         radv_handle_color_fbfetch_output(cmd_buffer, &color_att[i], pRenderingInfo->layerCount,
+                                          pRenderingInfo->viewMask);
+      }
    }
 
    struct radv_attachment ds_att = {.iview = NULL};
@@ -10011,16 +9982,18 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
       if (initial_depth_layout != ds_att.layout || initial_stencil_layout != ds_att.stencil_layout) {
          assert(!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT));
-         radv_handle_rendering_image_transition(cmd_buffer, ds_att.iview, pRenderingInfo->layerCount,
-                                                pRenderingInfo->viewMask, initial_depth_layout, initial_stencil_layout,
-                                                ds_att.layout, ds_att.stencil_layout, &sample_locations);
+         radv_handle_rendering_image_transition(
+            cmd_buffer, ds_att.iview, pRenderingInfo->layerCount, pRenderingInfo->viewMask, initial_depth_layout,
+            initial_stencil_layout, ds_att.layout, ds_att.stencil_layout, sample_locs_info ? &sample_locations : NULL);
       }
 
       screen_scissor.width = MIN2(screen_scissor.width, ds_att.iview->vk.extent.width);
       screen_scissor.height = MIN2(screen_scissor.height, ds_att.iview->vk.extent.height);
 
-      if (ds_att.flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR)
-         has_input_attachment_concurrent_writes = true;
+      if (ds_att.flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR) {
+         radv_handle_depth_fbfetch_output(cmd_buffer, &ds_att, pRenderingInfo->layerCount, pRenderingInfo->viewMask,
+                                          sample_locs_info ? &sample_locations : NULL);
+      }
    }
    if (cmd_buffer->vk.render_pass)
       radv_describe_barrier_end(cmd_buffer);
@@ -10062,15 +10035,17 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
    render->gfx12_has_hiz = gfx12_has_hiz;
    render->vrs_att = vrs_att;
    render->vrs_texel_size = vrs_texel_size;
-   cmd_buffer->state.dirty |=
-      RADV_CMD_DIRTY_FRAMEBUFFER | RADV_CMD_DIRTY_BINNING_STATE | RADV_CMD_DIRTY_DEPTH_BIAS_STATE |
-      RADV_CMD_DIRTY_DEPTH_STENCIL_STATE | RADV_CMD_DIRTY_CB_RENDER_STATE | RADV_CMD_DIRTY_MSAA_STATE |
-      RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_PS_STATE | RADV_CMD_DIRTY_PS_EPILOG_SHADER;
+   cmd_buffer->state.dirty |= RADV_CMD_DIRTY_BINNING_STATE | RADV_CMD_DIRTY_DEPTH_BIAS_STATE |
+                              RADV_CMD_DIRTY_DEPTH_STENCIL_STATE | RADV_CMD_DIRTY_CB_RENDER_STATE |
+                              RADV_CMD_DIRTY_MSAA_STATE | RADV_CMD_DIRTY_RAST_SAMPLES_STATE | RADV_CMD_DIRTY_PS_STATE |
+                              RADV_CMD_DIRTY_PS_EPILOG_SHADER;
 
    if (pdev->info.rbplus_allowed)
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_RBPLUS;
    if (pdev->info.gfx_level >= GFX10_3)
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FSR_STATE;
+   if (pdev->info.gfx_level >= GFX12)
+      cmd_buffer->state.dirty |= RADV_CMD_DIRTY_GFX12_HIZ_WA_STATE;
 
    if (render->vrs_att.iview && pdev->info.gfx_level == GFX10_3) {
       if (render->ds_att.iview &&
@@ -10159,11 +10134,10 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
    radv_emit_fb_mip_change_flush(cmd_buffer);
 
+   radv_emit_framebuffer_state(cmd_buffer);
+
    if (!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT))
       radv_cmd_buffer_clear_rendering(cmd_buffer, pRenderingInfo);
-
-   if (device->vk.enabled_features.dynamicRenderingLocalRead && has_input_attachment_concurrent_writes)
-      radv_handle_fbfetch_output(cmd_buffer);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -12311,8 +12285,11 @@ radv_validate_dynamic_states(struct radv_cmd_buffer *cmd_buffer, uint64_t dynami
        (RADV_DYNAMIC_DEPTH_TEST_ENABLE | RADV_DYNAMIC_DEPTH_WRITE_ENABLE | RADV_DYNAMIC_DEPTH_COMPARE_OP |
         RADV_DYNAMIC_DEPTH_BOUNDS_TEST_ENABLE | RADV_DYNAMIC_STENCIL_TEST_ENABLE | RADV_DYNAMIC_STENCIL_OP |
         RADV_DYNAMIC_DEPTH_BOUNDS | RADV_DYNAMIC_STENCIL_REFERENCE | RADV_DYNAMIC_STENCIL_WRITE_MASK |
-        RADV_DYNAMIC_STENCIL_COMPARE_MASK))
+        RADV_DYNAMIC_STENCIL_COMPARE_MASK)) {
       cmd_buffer->state.dirty |= RADV_CMD_DIRTY_DEPTH_STENCIL_STATE;
+      if (pdev->info.gfx_level >= GFX12)
+         cmd_buffer->state.dirty |= RADV_CMD_DIRTY_GFX12_HIZ_WA_STATE;
+   }
 
    if (dynamic_states &
        (RADV_DYNAMIC_LINE_WIDTH | RADV_DYNAMIC_LINE_STIPPLE | RADV_DYNAMIC_CULL_MODE | RADV_DYNAMIC_FRONT_FACE |
@@ -12467,10 +12444,6 @@ radv_emit_all_graphics_states(struct radv_cmd_buffer *cmd_buffer, const struct r
 
    cmd_buffer->state.dirty_dynamic &= ~dynamic_states;
 
-   const bool gfx12_emit_hiz_wa_full =
-      pdev->gfx12_hiz_wa == RADV_GFX12_HIZ_WA_FULL &&
-      cmd_buffer->state.dirty & (RADV_CMD_DIRTY_FRAMEBUFFER | RADV_CMD_DIRTY_DEPTH_STENCIL_STATE);
-
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_RBPLUS) {
       radv_emit_rbplus_state(cmd_buffer);
       cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_RBPLUS;
@@ -12497,11 +12470,6 @@ radv_emit_all_graphics_states(struct radv_cmd_buffer *cmd_buffer, const struct r
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_FRAGMENT_OUTPUT) {
       radv_emit_fragment_output_state(cmd_buffer);
       cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_FRAGMENT_OUTPUT;
-   }
-
-   if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_FRAMEBUFFER) {
-      radv_emit_framebuffer_state(cmd_buffer);
-      cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_FRAMEBUFFER;
    }
 
    if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GUARDBAND) {
@@ -12604,8 +12572,10 @@ radv_emit_all_graphics_states(struct radv_cmd_buffer *cmd_buffer, const struct r
       cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_RAST_SAMPLES_STATE;
    }
 
-   if (gfx12_emit_hiz_wa_full)
+   if (cmd_buffer->state.dirty & RADV_CMD_DIRTY_GFX12_HIZ_WA_STATE) {
       radv_gfx12_emit_hiz_wa_full(cmd_buffer);
+      cmd_buffer->state.dirty &= ~RADV_CMD_DIRTY_GFX12_HIZ_WA_STATE;
+   }
 
    radv_emit_shaders_state(cmd_buffer);
 
@@ -15518,11 +15488,6 @@ radv_reset_pipeline_state(struct radv_cmd_buffer *cmd_buffer, VkPipelineBindPoin
       }
       if (cmd_buffer->state.emitted_graphics_pipeline) {
          radv_bind_custom_blend_mode(cmd_buffer, 0);
-
-         if (cmd_buffer->state.db_render_control) {
-            cmd_buffer->state.db_render_control = 0;
-            cmd_buffer->state.dirty |= RADV_CMD_DIRTY_FRAMEBUFFER;
-         }
 
          if (cmd_buffer->state.spi_shader_col_format || cmd_buffer->state.spi_shader_z_format ||
              cmd_buffer->state.cb_shader_mask) {
