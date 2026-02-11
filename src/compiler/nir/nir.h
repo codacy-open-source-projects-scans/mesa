@@ -1525,10 +1525,6 @@ typedef enum {
     * it must ensure that the resulting value is bit-for-bit identical to the
     * original, with the exception of undefindness allowed by other
     * nir_fp_math_control bits and NaN patterns.
-    *
-    * TODO This is currently also used to control NaN behavior of
-    * floating point comparisons and fmin/fmax/fsat.
-    * This should be changed to only depend on nir_fp_preserve_nan.
     */
    nir_fp_exact = BITFIELD_BIT(3),
 
@@ -1578,31 +1574,31 @@ typedef struct nir_alu_instr {
 } nir_alu_instr;
 
 static inline bool
-nir_alu_instr_is_signed_zero_preserve(nir_alu_instr *alu)
+nir_alu_instr_is_signed_zero_preserve(const nir_alu_instr *alu)
 {
    return alu->fp_math_ctrl & nir_fp_preserve_signed_zero;
 }
 
 static inline bool
-nir_alu_instr_is_inf_preserve(nir_alu_instr *alu)
+nir_alu_instr_is_inf_preserve(const nir_alu_instr *alu)
 {
    return alu->fp_math_ctrl & nir_fp_preserve_inf;
 }
 
 static inline bool
-nir_alu_instr_is_nan_preserve(nir_alu_instr *alu)
+nir_alu_instr_is_nan_preserve(const nir_alu_instr *alu)
 {
    return alu->fp_math_ctrl & nir_fp_preserve_nan;
 }
 
 static inline bool
-nir_alu_instr_is_signed_zero_inf_nan_preserve(nir_alu_instr *alu)
+nir_alu_instr_is_signed_zero_inf_nan_preserve(const nir_alu_instr *alu)
 {
    return alu->fp_math_ctrl & nir_fp_preserve_sz_inf_nan;
 }
 
 static inline bool
-nir_alu_instr_is_exact(nir_alu_instr *alu)
+nir_alu_instr_is_exact(const nir_alu_instr *alu)
 {
    return alu->fp_math_ctrl & nir_fp_exact;
 }

@@ -2889,14 +2889,14 @@ vtn_handle_constant(struct vtn_builder *b, SpvOp opcode,
          if (glsl_type_is_bfloat_16(src_type) || glsl_type_is_e4m3fn(src_type) || glsl_type_is_e5m2(src_type))
             src_type = glsl_float_type();
 
-         bool exact;
-         nir_op op = vtn_nir_alu_op_for_spirv_opcode(b, opcode, &swap, &exact,
+         unsigned extra_fp_math_ctrl;
+         nir_op op = vtn_nir_alu_op_for_spirv_opcode(b, opcode, &swap, &extra_fp_math_ctrl,
                                                      src_type, dst_type);
 
-         /* No SPIR-V opcodes handled through this path should set exact.
+         /* No SPIR-V opcodes handled through this path should set fast math.
           * Since it is ignored, assert on it.
           */
-         assert(!exact);
+         assert(!extra_fp_math_ctrl);
 
          unsigned bit_size = glsl_get_bit_size(dst_type);
          nir_const_value src[3][NIR_MAX_VEC_COMPONENTS];
@@ -5301,6 +5301,12 @@ vtn_handle_entry_point(struct vtn_builder *b, const uint32_t *w,
    b->interface_ids = vtn_alloc_array(b, uint32_t, b->interface_ids_count);
    memcpy(b->interface_ids, &w[start], b->interface_ids_count * 4);
    qsort(b->interface_ids, b->interface_ids_count, 4, cmp_uint32_t);
+
+   if (stage == MESA_SHADER_KERNEL) {
+      *vtn_fp_math_ctrl_for_base_type(b, GLSL_TYPE_FLOAT16) |= nir_fp_preserve_sz_inf_nan;
+      *vtn_fp_math_ctrl_for_base_type(b, GLSL_TYPE_FLOAT) |= nir_fp_preserve_sz_inf_nan;
+      *vtn_fp_math_ctrl_for_base_type(b, GLSL_TYPE_DOUBLE) |= nir_fp_preserve_sz_inf_nan;
+   }
 }
 
 static bool

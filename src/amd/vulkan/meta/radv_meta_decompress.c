@@ -412,7 +412,7 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
                                                       .baseArrayLayer = subresourceRange->baseArrayLayer + s,
                                                       .layerCount = 1},
                               },
-                              &(struct radv_image_view_extra_create_info){.disable_compression = true});
+                              NULL);
 
          radv_meta_bind_descriptors(
             cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 2,
@@ -449,10 +449,12 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
                                    radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                          VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, subresourceRange);
 
-   /* Initialize the HTILE metadata as "fully expanded". */
-   uint32_t htile_value = radv_get_htile_initial_value(device, image);
+   if (!radv_image_decompress_htile_on_image_stores(device, image)) {
+      /* Initialize the HTILE metadata as "fully expanded". */
+      uint32_t htile_value = radv_get_htile_initial_value(device, image);
 
-   cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, image, subresourceRange, htile_value, false);
+      cmd_buffer->state.flush_bits |= radv_clear_htile(cmd_buffer, image, subresourceRange, htile_value, false);
+   }
 }
 
 void

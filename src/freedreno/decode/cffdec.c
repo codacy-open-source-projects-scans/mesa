@@ -122,6 +122,15 @@ printl(int lvl, const char *fmt, ...)
    va_end(args);
 }
 
+static bool
+endswith(const char *name, const char *suffix)
+{
+   const char *s = strstr(name, suffix);
+   if (!s)
+      return false;
+   return (s - strlen(name) + strlen(suffix)) == name;
+}
+
 static const char *levels[] = {
    "\t",
    "\t\t",
@@ -812,10 +821,21 @@ static struct {
 
 static struct rnn *rnn;
 
+static bool
+has_query_val(int val)
+{
+   for (int i = 0; i < nqueryvals; i++)
+      if (queryvals[i] == val)
+         return true;
+   return false;
+}
+
 static void
 add_query_val(const char *querystr, int val)
 {
    printf("querystr: %s -> 0x%x\n", querystr, val);
+   if (has_query_val(val))
+      return;
    queryvals = realloc(queryvals, (nqueryvals + 1) * sizeof(!*queryvals));
    queryvals[nqueryvals] = val;
    nqueryvals++;
@@ -844,6 +864,10 @@ add_query(const char *querystr)
       const char *name = rnn_regname(rnn, off, false);
 
       if (!name)
+         continue;
+
+      /* Skip _HI regs if we are already watching the _LO: */
+      if (endswith(name, "_HI") && has_query_val(off - 1))
          continue;
 
       ret = regexec(&regex, name, 0, NULL, 0);
@@ -973,13 +997,9 @@ enumval(const char *enumname, const char *enumval)
 }
 
 static int
-endswith(uint32_t regbase, const char *suffix)
+regname_endswith(uint32_t regbase, const char *suffix)
 {
-   const char *name = regname(regbase, 0);
-   const char *s = strstr(name, suffix);
-   if (!s)
-      return 0;
-   return (s - strlen(name) + strlen(suffix)) == name;
+   return endswith(regname(regbase, 0), suffix);
 }
 
 struct regacc
@@ -1018,7 +1038,7 @@ regacc_push(struct regacc *r, uint32_t regbase, uint32_t dword)
    r->has_dword_lo = (info->width == 64);
 
    /* Workaround for kernel devcore dump bugs: */
-   if ((info->width == 64) && endswith(regbase, "_HI")) {
+   if ((info->width == 64) && regname_endswith(regbase, "_HI")) {
       printf("WARNING: 64b discontinuity (no _LO dword for %x)\n", regbase);
       r->has_dword_lo = false;
    }
@@ -1055,9 +1075,9 @@ dump_register_val(struct regacc *r, int level)
           * We can remove this hack once a5xx.xml is converted to reg64
           * and address/waddess.
           */
-         if (endswith(r->regbase, "_HI") && endswith(r->regbase - 1, "_LO")) {
+         if (regname_endswith(r->regbase, "_HI") && regname_endswith(r->regbase - 1, "_LO")) {
             gpuaddr = (r->value << 32) | reg_val(r->regbase - 1);
-         } else if (endswith(r->regbase, "_LO") && endswith(r->regbase + 1, "_HI")) {
+         } else if (regname_endswith(r->regbase, "_LO") && regname_endswith(r->regbase + 1, "_HI")) {
             gpuaddr = (((uint64_t)reg_val(r->regbase + 1)) << 32) | r->value;
          }
       }
@@ -1252,6 +1272,16 @@ skip_query(void)
    return true;
 }
 
+static const char *
+deprefix(const char *str, const char *prefix)
+{
+   if (!str)
+      return "";
+   if (str == strstr(str, prefix))
+      str += strlen(prefix);
+   return str;
+}
+
 static void
 __do_query(const char *primtype, uint32_t num_indices)
 {
@@ -1279,12 +1309,14 @@ __do_query(const char *primtype, uint32_t num_indices)
          if (regacc_push(&r, regbase + d, reg_val(regbase + d)))
             break;
 
-      printf("%4d: %s(%u,%u-%u,%u):%u:", draw_count, primtype, bin_x1,
-             bin_y1, bin_x2, bin_y2, num_indices);
+      printf("%4d: %s(%u,%u-%u,%u):%u:", draw_count,
+             deprefix(primtype, "DI_PT_"),
+             bin_x1, bin_y1, bin_x2, bin_y2,
+             num_indices);
       if (options->info->chip >= 5)
-         printf("%s:", render_mode);
+         printf("%s:", deprefix(render_mode, "RM6_"));
       if (thread)
-         printf("%s:", thread);
+         printf("%s:", deprefix(thread, "CP_SET_THREAD_"));
       printf("\t%08"PRIx64, r.value);
       if (r.value != lastvals[regbase]) {
          printf("!");

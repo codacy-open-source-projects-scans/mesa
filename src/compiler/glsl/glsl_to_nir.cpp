@@ -1888,9 +1888,10 @@ nir_visitor::visit(ir_assignment *ir)
    unsigned num_components = ir->lhs->type->vector_elements;
    unsigned write_mask = ir->write_mask;
 
-   b.fp_math_ctrl = ir->lhs->variable_referenced()->data.invariant ||
-                    ir->lhs->variable_referenced()->data.precise ?
-                       nir_fp_exact : nir_fp_fast_math;
+   bool exact = ir->lhs->variable_referenced()->data.invariant ||
+                  ir->lhs->variable_referenced()->data.precise;
+   b.fp_math_ctrl = exact ? nir_fp_exact | nir_fp_preserve_nan | nir_fp_preserve_inf
+                          : nir_fp_fast_math;
 
    if ((ir->rhs->as_dereference() || ir->rhs->as_constant()) &&
        (write_mask == BITFIELD_MASK(num_components) || write_mask == 0)) {
@@ -2152,6 +2153,7 @@ nir_visitor::visit(ir_expression *ir)
       break;
    case ir_unop_saturate:
       assert(type_is_float(types[0]));
+      b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
       result = nir_fsat(&b, srcs[0]);
       break;
    case ir_unop_sign:
@@ -2414,20 +2416,24 @@ nir_visitor::visit(ir_expression *ir)
                                        : nir_umod(&b, srcs[0], srcs[1]);
       break;
    case ir_binop_min:
-      if (type_is_float(out_type))
+      if (type_is_float(out_type)) {
+         b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
          result = nir_fmin(&b, srcs[0], srcs[1]);
-      else if (type_is_signed(out_type))
+      } else if (type_is_signed(out_type)) {
          result = nir_imin(&b, srcs[0], srcs[1]);
-      else
+      } else {
          result = nir_umin(&b, srcs[0], srcs[1]);
+      }
       break;
    case ir_binop_max:
-      if (type_is_float(out_type))
+      if (type_is_float(out_type)) {
+         b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
          result = nir_fmax(&b, srcs[0], srcs[1]);
-      else if (type_is_signed(out_type))
+      } else if (type_is_signed(out_type)) {
          result = nir_imax(&b, srcs[0], srcs[1]);
-      else
+      } else {
          result = nir_umax(&b, srcs[0], srcs[1]);
+      }
       break;
    case ir_binop_pow: result = nir_fpow(&b, srcs[0], srcs[1]); break;
    case ir_binop_bit_and: result = nir_iand(&b, srcs[0], srcs[1]); break;
@@ -2470,19 +2476,24 @@ nir_visitor::visit(ir_expression *ir)
          result = nir_uge(&b, srcs[0], srcs[1]);
       break;
    case ir_binop_equal:
-      if (type_is_float(types[0]))
+      if (type_is_float(types[0])) {
+         b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
          result = nir_feq(&b, srcs[0], srcs[1]);
-      else
+      } else {
          result = nir_ieq(&b, srcs[0], srcs[1]);
+      }
       break;
    case ir_binop_nequal:
-      if (type_is_float(types[0]))
+      if (type_is_float(types[0])) {
+         b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
          result = nir_fneu(&b, srcs[0], srcs[1]);
-      else
+      } else {
          result = nir_ine(&b, srcs[0], srcs[1]);
+      }
       break;
    case ir_binop_all_equal:
       if (type_is_float(types[0])) {
+         b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
          switch (ir->operands[0]->type->vector_elements) {
             case 1: result = nir_feq(&b, srcs[0], srcs[1]); break;
             case 2: result = nir_ball_fequal2(&b, srcs[0], srcs[1]); break;
@@ -2504,6 +2515,7 @@ nir_visitor::visit(ir_expression *ir)
       break;
    case ir_binop_any_nequal:
       if (type_is_float(types[0])) {
+         b.fp_math_ctrl |= nir_fp_preserve_nan | nir_fp_preserve_inf;
          switch (ir->operands[0]->type->vector_elements) {
             case 1: result = nir_fneu(&b, srcs[0], srcs[1]); break;
             case 2: result = nir_bany_fnequal2(&b, srcs[0], srcs[1]); break;
