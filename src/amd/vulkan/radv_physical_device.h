@@ -14,7 +14,6 @@
 #include "ac_gpu_info.h"
 #include "ac_perfcounter.h"
 
-#include "ac_uvd_dec.h"
 #include "ac_vcn_enc.h"
 #include "radv_constants.h"
 #include "radv_instance.h"
@@ -206,9 +205,6 @@ struct radv_physical_device {
       unsigned cntl;
    } vid_dec_reg;
    enum amd_ip_type vid_decode_ip;
-   uint32_t vid_addr_gfx_mode;
-   struct ac_uvd_stream_handle stream_handle;
-   uint32_t av1_version;
    rvcn_enc_cmd_t vcn_enc_cmds;
    enum radv_video_enc_hw_ver enc_hw_ver;
    uint32_t encoder_interface_version;
@@ -264,10 +260,6 @@ radv_has_pops(const struct radv_physical_device *pdev)
 static inline bool
 radv_has_uvd(struct radv_physical_device *pdev)
 {
-   enum radeon_family family = pdev->info.family;
-   /* Only support UVD on TONGA+ */
-   if (family < CHIP_TONGA)
-      return false;
    return pdev->info.ip[AMD_IP_UVD].num_queues > 0;
 }
 

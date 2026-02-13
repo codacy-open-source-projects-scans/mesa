@@ -20,8 +20,9 @@
 #include <optional>
 
 struct brw_bind_info {
-   bool valid;
-   bool bindless;
+   bool valid:1;
+   bool bindless:1;
+   bool internal:1;
    unsigned block;
    unsigned set;
    unsigned binding;
@@ -1834,6 +1835,12 @@ static bool
 get_nir_src_bindless(nir_to_brw_state &ntb, const nir_src &src)
 {
    return ntb.ssa_bind_infos[src.ssa->index].bindless;
+}
+
+static bool
+get_nir_src_internal(nir_to_brw_state &ntb, const nir_src &src)
+{
+   return ntb.ssa_bind_infos[src.ssa->index].internal;
 }
 
 /**
@@ -4854,6 +4861,9 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
       ntb.ssa_bind_infos[instr->def.index].bindless =
          (nir_intrinsic_resource_access_intel(instr) &
           nir_resource_intel_bindless) != 0;
+      ntb.ssa_bind_infos[instr->def.index].internal =
+         (nir_intrinsic_resource_access_intel(instr) &
+          nir_resource_intel_internal) != 0;
       ntb.ssa_bind_infos[instr->def.index].block =
          nir_intrinsic_resource_block_intel(instr);
       ntb.ssa_bind_infos[instr->def.index].set =
@@ -5366,13 +5376,14 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
    case nir_intrinsic_load_ubo: {
       s.prog_data->has_ubo_pull = true;
 
-      brw_reg surface, surface_handle;
       bool no_mask_handle = false;
 
-      if (get_nir_src_bindless(ntb, instr->src[0]))
-         surface_handle = get_nir_buffer_intrinsic_index(ntb, bld, instr, &no_mask_handle);
-      else
-         surface = get_nir_buffer_intrinsic_index(ntb, bld, instr, &no_mask_handle);
+      brw_reg binding_type = brw_imm_ud(
+         get_nir_src_internal(ntb, instr->src[0]) ? LSC_ADDR_SURFTYPE_SS :
+         get_nir_src_bindless(ntb, instr->src[0]) ? LSC_ADDR_SURFTYPE_BSS :
+         LSC_ADDR_SURFTYPE_BTI);
+      brw_reg binding =
+         get_nir_buffer_intrinsic_index(ntb, bld, instr, &no_mask_handle);
 
       const unsigned first_component =
          nir_def_first_component_read(&instr->def);
@@ -5399,7 +5410,7 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
               i += comps_per_load) {
             const unsigned remaining = last_component + 1 - i;
             xbld.VARYING_PULL_CONSTANT_LOAD(offset(dest, xbld, i),
-                                            surface, surface_handle,
+                                            binding_type, binding,
                                             base_offset,
                                             i * brw_type_size_bytes(dest.type),
                                             instr->def.bit_size / 8,
@@ -5429,10 +5440,13 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
 
             const brw_reg packed_consts = ubld.vgrf(BRW_TYPE_UD);
             brw_reg srcs[PULL_UNIFORM_CONSTANT_SRCS];
-            srcs[PULL_UNIFORM_CONSTANT_SRC_SURFACE]        = surface;
-            srcs[PULL_UNIFORM_CONSTANT_SRC_SURFACE_HANDLE] = surface_handle;
-            srcs[PULL_UNIFORM_CONSTANT_SRC_OFFSET]         = brw_imm_ud(base & ~(block_sz - 1));
-            srcs[PULL_UNIFORM_CONSTANT_SRC_SIZE]           = brw_imm_ud(block_sz);
+            srcs[PULL_UNIFORM_CONSTANT_SRC_BINDING_TYPE] = brw_imm_ud(
+               get_nir_src_internal(ntb, instr->src[0]) ? LSC_ADDR_SURFTYPE_SS :
+               get_nir_src_bindless(ntb, instr->src[0]) ? LSC_ADDR_SURFTYPE_BSS :
+               LSC_ADDR_SURFTYPE_BTI);
+            srcs[PULL_UNIFORM_CONSTANT_SRC_BINDING]      = binding;
+            srcs[PULL_UNIFORM_CONSTANT_SRC_OFFSET]       = brw_imm_ud(base & ~(block_sz - 1));
+            srcs[PULL_UNIFORM_CONSTANT_SRC_SIZE]         = brw_imm_ud(block_sz);
 
             ubld.emit(FS_OPCODE_UNIFORM_PULL_CONSTANT_LOAD, packed_consts,
                       srcs, PULL_UNIFORM_CONSTANT_SRCS);
@@ -6063,8 +6077,10 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
    case nir_intrinsic_load_ssbo_uniform_block_intel:
       if (!mode.has_value())
          mode = MEMORY_MODE_UNTYPED;
-      binding_type = get_nir_src_bindless(ntb, instr->src[is_store ? 1 : 0]) ?
-                     LSC_ADDR_SURFTYPE_BSS : LSC_ADDR_SURFTYPE_BTI;
+      binding_type =
+         get_nir_src_internal(ntb, instr->src[is_store ? 1 : 0]) ? LSC_ADDR_SURFTYPE_SS :
+         get_nir_src_bindless(ntb, instr->src[is_store ? 1 : 0]) ? LSC_ADDR_SURFTYPE_BSS :
+         LSC_ADDR_SURFTYPE_BTI;
       srcs[MEMORY_LOGICAL_BINDING] =
          get_nir_buffer_intrinsic_index(ntb, bld, instr, &no_mask_handle);
       srcs[MEMORY_LOGICAL_ADDRESS] =
@@ -6098,7 +6114,7 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
          const brw_builder ubld = bld.exec_all().group(8 * reg_unit(devinfo), 0);
          brw_reg bind = ubld.AND(retype(brw_vec1_grf(0, 5), BRW_TYPE_UD),
                                  brw_imm_ud(INTEL_MASK(31, 10)));
-         if (devinfo->ver >= 20)
+         if (devinfo->ver >= 20 || bld.shader->compiler->extended_bindless_surface_offset)
             bind = ubld.SHR(bind, brw_imm_ud(4));
 
          /* load_scratch / store_scratch cannot be is_scalar yet. */

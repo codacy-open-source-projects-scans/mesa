@@ -65,7 +65,7 @@ enum {
 static void radv_handle_image_transition(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                                          VkImageLayout src_layout, VkImageLayout dst_layout, uint32_t src_family_index,
                                          uint32_t dst_family_index, const VkImageSubresourceRange *range,
-                                         struct radv_sample_locations_state *sample_locs);
+                                         const VkSampleLocationsInfoEXT *sample_locs);
 
 static struct radv_cmd_stream *
 radv_get_pm4_cs(struct radv_cmd_buffer *cmd_buffer)
@@ -7527,8 +7527,7 @@ radv_handle_image_transition_separate(struct radv_cmd_buffer *cmd_buffer, struct
                                       VkImageLayout src_layout, VkImageLayout dst_layout,
                                       VkImageLayout src_stencil_layout, VkImageLayout dst_stencil_layout,
                                       uint32_t src_family_index, uint32_t dst_family_index,
-                                      const VkImageSubresourceRange *range,
-                                      struct radv_sample_locations_state *sample_locs)
+                                      const VkImageSubresourceRange *range, const VkSampleLocationsInfoEXT *sample_locs)
 {
    /* If we have a stencil layout that's different from depth, we need to
     * perform the stencil transition separately.
@@ -7557,8 +7556,7 @@ static void
 radv_handle_rendering_image_transition(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *view,
                                        uint32_t layer_count, uint32_t view_mask, VkImageLayout initial_layout,
                                        VkImageLayout initial_stencil_layout, VkImageLayout final_layout,
-                                       VkImageLayout final_stencil_layout,
-                                       struct radv_sample_locations_state *sample_locs)
+                                       VkImageLayout final_stencil_layout, const VkSampleLocationsInfoEXT *sample_locs)
 {
    VkImageSubresourceRange range;
    range.aspectMask = view->image->vk.aspects;
@@ -9534,7 +9532,7 @@ radv_handle_color_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, struct radv
 
 static void
 radv_handle_depth_fbfetch_output(struct radv_cmd_buffer *cmd_buffer, struct radv_attachment *att, uint32_t layer_count,
-                                 uint32_t view_mask, struct radv_sample_locations_state *sample_locs)
+                                 uint32_t view_mask, const VkSampleLocationsInfoEXT *sample_locs)
 {
    const struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
 
@@ -9841,6 +9839,8 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    bool disable_constant_encode_ac01 = false;
 
+   assert(!cmd_buffer->state.render.active);
+
    const struct VkSampleLocationsInfoEXT *sample_locs_info =
       vk_find_struct_const(pRenderingInfo->pNext, SAMPLE_LOCATIONS_INFO_EXT);
 
@@ -9982,9 +9982,9 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
       if (initial_depth_layout != ds_att.layout || initial_stencil_layout != ds_att.stencil_layout) {
          assert(!(pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT));
-         radv_handle_rendering_image_transition(
-            cmd_buffer, ds_att.iview, pRenderingInfo->layerCount, pRenderingInfo->viewMask, initial_depth_layout,
-            initial_stencil_layout, ds_att.layout, ds_att.stencil_layout, sample_locs_info ? &sample_locations : NULL);
+         radv_handle_rendering_image_transition(cmd_buffer, ds_att.iview, pRenderingInfo->layerCount,
+                                                pRenderingInfo->viewMask, initial_depth_layout, initial_stencil_layout,
+                                                ds_att.layout, ds_att.stencil_layout, sample_locs_info);
       }
 
       screen_scissor.width = MIN2(screen_scissor.width, ds_att.iview->vk.extent.width);
@@ -9992,7 +9992,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
 
       if (ds_att.flags & VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR) {
          radv_handle_depth_fbfetch_output(cmd_buffer, &ds_att, pRenderingInfo->layerCount, pRenderingInfo->viewMask,
-                                          sample_locs_info ? &sample_locations : NULL);
+                                          sample_locs_info);
       }
    }
    if (cmd_buffer->vk.render_pass)
@@ -10020,7 +10020,7 @@ radv_CmdBeginRendering(VkCommandBuffer commandBuffer, const VkRenderingInfo *pRe
    struct radv_rendering_state *render = &cmd_buffer->state.render;
    render->active = true;
    render->has_image_views = true;
-   render->has_custom_resolves = !!(pRenderingInfo->flags & VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT);
+   render->flags = pRenderingInfo->flags;
    render->area = pRenderingInfo->renderArea;
    render->view_mask = pRenderingInfo->viewMask;
    render->layer_count = pRenderingInfo->layerCount;
@@ -10145,13 +10145,97 @@ radv_CmdEndRendering2KHR(VkCommandBuffer commandBuffer, const VkRenderingEndInfo
 {
    VK_FROM_HANDLE(radv_cmd_buffer, cmd_buffer, commandBuffer);
    const struct radv_rendering_state *render = &cmd_buffer->state.render;
+   bool need_resolve = false;
 
    radv_mark_noncoherent_rb(cmd_buffer);
 
-   if (!render->has_custom_resolves)
-      radv_cmd_buffer_resolve_rendering(cmd_buffer);
+   VkRenderingAttachmentInfo color_atts[MAX_RTS];
+   VkRenderingAttachmentFlagsInfoKHR color_atts_flags[MAX_RTS];
+   for (uint32_t i = 0; i < render->color_att_count; i++) {
+      if (render->color_att[i].resolve_mode != VK_RESOLVE_MODE_NONE)
+         need_resolve = true;
+
+      color_atts_flags[i] = (VkRenderingAttachmentFlagsInfoKHR){
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
+         .flags = render->color_att[i].flags,
+      };
+
+      color_atts[i] = (VkRenderingAttachmentInfo){
+         .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+         .pNext = &color_atts_flags[i],
+         .imageView = radv_image_view_to_handle(render->color_att[i].iview),
+         .imageLayout = render->color_att[i].layout,
+         .resolveMode = render->color_att[i].resolve_mode,
+         .resolveImageView = radv_image_view_to_handle(render->color_att[i].resolve_iview),
+         .resolveImageLayout = render->color_att[i].resolve_layout,
+      };
+   }
+
+   const VkRenderingAttachmentFlagsInfoKHR depth_att_flags = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
+      .flags = render->ds_att.flags,
+   };
+   struct VkRenderingAttachmentInfo depth_att = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .pNext = &depth_att_flags,
+      .imageView = radv_image_view_to_handle(render->ds_att.iview),
+      .imageLayout = render->ds_att.layout,
+      .resolveMode = render->ds_att.resolve_mode,
+      .resolveImageView = radv_image_view_to_handle(render->ds_att.resolve_iview),
+      .resolveImageLayout = render->ds_att.resolve_layout,
+
+   };
+   if (render->ds_att.resolve_mode != VK_RESOLVE_MODE_NONE)
+      need_resolve = true;
+
+   const VkRenderingAttachmentFlagsInfoKHR stencil_att_flags = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
+      .flags = render->ds_att.flags,
+   };
+   struct VkRenderingAttachmentInfo stencil_att = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+      .pNext = &stencil_att_flags,
+      .imageView = radv_image_view_to_handle(render->ds_att.iview),
+      .imageLayout = render->ds_att.stencil_layout,
+      .resolveMode = render->ds_att.stencil_resolve_mode,
+      .resolveImageView = radv_image_view_to_handle(render->ds_att.resolve_iview),
+      .resolveImageLayout = render->ds_att.stencil_resolve_layout,
+   };
+
+   if (render->ds_att.stencil_resolve_mode != VK_RESOLVE_MODE_NONE)
+      need_resolve = true;
+
+   VkSampleLocationEXT sample_locs[MAX_SAMPLE_LOCATIONS];
+   typed_memcpy(sample_locs, render->sample_locations.locations, render->sample_locations.count);
+
+   VkSampleLocationsInfoEXT sample_locs_info = {
+      .sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT,
+      .sampleLocationsPerPixel = render->sample_locations.per_pixel,
+      .sampleLocationGridSize = render->sample_locations.grid_size,
+      .sampleLocationsCount = render->sample_locations.count,
+      .pSampleLocations = sample_locs,
+   };
+
+   VkRenderingInfo rendering_info = {
+      .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+      .pNext = &sample_locs_info,
+      .flags = VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR,
+      .renderArea = render->area,
+      .layerCount = render->layer_count,
+      .viewMask = render->view_mask,
+      .colorAttachmentCount = render->color_att_count,
+      .pColorAttachments = color_atts,
+      .pDepthAttachment = &depth_att,
+      .pStencilAttachment = &stencil_att,
+   };
+
+   if (render->flags & (VK_RENDERING_SUSPENDING_BIT | VK_RENDERING_CUSTOM_RESOLVE_BIT_EXT))
+      need_resolve = false;
 
    radv_cmd_buffer_reset_rendering(cmd_buffer);
+
+   if (need_resolve)
+      radv_cmd_buffer_resolve_rendering(cmd_buffer, &rendering_info);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -10199,7 +10283,7 @@ radv_CmdBeginCustomResolveEXT(VkCommandBuffer commandBuffer, const VkBeginCustom
 
    VkRenderingInfo rendering_info = {
       .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-      .flags = VK_RENDERING_RESUMING_BIT | VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR,
+      .flags = VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR,
       .renderArea = render->area,
       .layerCount = render->layer_count,
       .viewMask = render->view_mask,
@@ -14171,7 +14255,7 @@ static void
 radv_handle_depth_image_transition(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image,
                                    VkImageLayout src_layout, VkImageLayout dst_layout, unsigned src_queue_mask,
                                    unsigned dst_queue_mask, const VkImageSubresourceRange *range,
-                                   struct radv_sample_locations_state *sample_locs)
+                                   const VkSampleLocationsInfoEXT *sample_locs)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -14194,8 +14278,6 @@ radv_handle_depth_image_transition(struct radv_cmd_buffer *cmd_buffer, struct ra
          cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB | RADV_CMD_FLAG_FLUSH_AND_INV_DB_META;
 
          radv_expand_depth_stencil(cmd_buffer, image, range, sample_locs);
-
-         cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_FLUSH_AND_INV_DB | RADV_CMD_FLAG_FLUSH_AND_INV_DB_META;
       }
    }
 }
@@ -14398,7 +14480,7 @@ radv_handle_color_image_transition(struct radv_cmd_buffer *cmd_buffer, struct ra
 
    if (src_fmask_comp > dst_fmask_comp) {
       if (src_fmask_comp == RADV_FMASK_COMPRESSION_FULL) {
-         if (radv_dcc_enabled(image, range->baseMipLevel) && !radv_image_use_dcc_image_stores(device, image)) {
+         if (radv_dcc_enabled(image, range->baseMipLevel) && !radv_image_compress_dcc_on_image_stores(device, image)) {
             /* A DCC decompress is required before expanding FMASK when DCC stores aren't supported to
              * avoid being in a state where DCC is compressed and the main surface is uncompressed.
              */
@@ -14441,7 +14523,7 @@ radv_handle_color_image_transition(struct radv_cmd_buffer *cmd_buffer, struct ra
 static void
 radv_handle_image_transition(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, VkImageLayout src_layout,
                              VkImageLayout dst_layout, uint32_t src_family_index, uint32_t dst_family_index,
-                             const VkImageSubresourceRange *range, struct radv_sample_locations_state *sample_locs)
+                             const VkImageSubresourceRange *range, const VkSampleLocationsInfoEXT *sample_locs)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radv_physical_device *pdev = radv_device_physical(device);
@@ -14633,16 +14715,6 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
 
          const struct VkSampleLocationsInfoEXT *sample_locs_info =
             vk_find_struct_const(dep_info->pImageMemoryBarriers[i].pNext, SAMPLE_LOCATIONS_INFO_EXT);
-         struct radv_sample_locations_state sample_locations;
-
-         if (sample_locs_info) {
-            assert(image->vk.create_flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT);
-            sample_locations.per_pixel = sample_locs_info->sampleLocationsPerPixel;
-            sample_locations.grid_size = sample_locs_info->sampleLocationGridSize;
-            sample_locations.count = sample_locs_info->sampleLocationsCount;
-            typed_memcpy(&sample_locations.locations[0], sample_locs_info->pSampleLocations,
-                         sample_locs_info->sampleLocationsCount);
-         }
 
          uint32_t src_qf_index = dep_info->pImageMemoryBarriers[i].srcQueueFamilyIndex;
          uint32_t dst_qf_index = dep_info->pImageMemoryBarriers[i].dstQueueFamilyIndex;
@@ -14664,8 +14736,7 @@ radv_barrier(struct radv_cmd_buffer *cmd_buffer, uint32_t dep_count, const VkDep
 
          radv_handle_image_transition(cmd_buffer, image, dep_info->pImageMemoryBarriers[i].oldLayout,
                                       dep_info->pImageMemoryBarriers[i].newLayout, src_qf_index, dst_qf_index,
-                                      &dep_info->pImageMemoryBarriers[i].subresourceRange,
-                                      sample_locs_info ? &sample_locations : NULL);
+                                      &dep_info->pImageMemoryBarriers[i].subresourceRange, sample_locs_info);
       }
    }
 

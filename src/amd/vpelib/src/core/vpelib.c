@@ -468,6 +468,16 @@ static enum vpe_status populate_input_streams(struct vpe_priv *vpe_priv, const s
             stream_ctx->flip_horizonal_output = false;
 
         memcpy(&stream_ctx->stream, &param->streams[i], sizeof(struct vpe_stream));
+
+        /* if top-bottom blending is not supported,
+         * the 1st stream still can support blending with background,
+         * however, the 2nd stream and onward can not enable blending.
+         */
+        if (i && param->streams[i].blend_info.blending &&
+            !vpe_priv->pub.caps->color_caps.mpc.top_bottom_blending) {
+            result = VPE_STATUS_ALPHA_BLENDING_NOT_SUPPORTED;
+            break;
+        }
     }
 
     return result;
@@ -505,27 +515,6 @@ static enum vpe_status populate_virtual_streams(struct vpe_priv* vpe_priv, const
             stream_ctx->flip_horizonal_output = true;
         else
             stream_ctx->flip_horizonal_output = false;
-    }
-
-    return result;
-}
-
-static enum vpe_status check_blending_support(
-    struct vpe_priv *vpe_priv, const struct vpe_build_param *param)
-{
-    enum vpe_status result = VPE_STATUS_OK;
-    uint32_t        i;
-
-    for (i = 0; i < vpe_priv->num_input_streams; i++) {
-        /* if top-bottom blending is not supported,
-         * the 1st stream still can support blending with background,
-         * however, the 2nd stream and onward can not enable blending.
-         */
-        if (i && param->streams[i].blend_info.blending &&
-            !vpe_priv->pub.caps->color_caps.mpc.top_bottom_blending) {
-            result = VPE_STATUS_ALPHA_BLENDING_NOT_SUPPORTED;
-            break;
-        }
     }
 
     return result;
@@ -633,12 +622,6 @@ enum vpe_status vpe_check_support(
 
     if (status == VPE_STATUS_OK) {
         // blending support check
-        status = check_blending_support(vpe_priv, param);
-        if (status != VPE_STATUS_OK)
-            vpe_log("fail input stream population. status %d\n", (int)status);
-    }
-
-    if (status == VPE_STATUS_OK) {
         status = populate_input_streams(vpe_priv, param, vpe_priv->stream_ctx);
         if (status != VPE_STATUS_OK)
             vpe_log("fail input stream population. status %d\n", (int)status);
@@ -929,6 +912,27 @@ enum vpe_status vpe_build_commands(
     return status;
 }
 
+#ifdef VPE_REGISTER_PROFILE
+enum vpe_status vpe_get_register_profile_data(struct vpe *vpe, const struct vpe_build_param *param,
+    struct vpe_build_bufs *bufs, struct vpe_register_count *reg_count)
+{
+    struct vpe_priv *vpe_priv;
+
+    vpe_priv = container_of(vpe, struct vpe_priv, pub);
+    // call build commands to get the register profile data
+    enum vpe_status status = vpe_build_commands(vpe, param, bufs);
+
+    // populate the register count data and return
+    reg_count->total_register_count        = vpe_priv->config_writer.total_register_count;
+    reg_count->burstmode_register_count    = vpe_priv->config_writer.burstMode_register_count;
+    reg_count->nonburstmode_register_count = vpe_priv->config_writer.nonBurstMode_register_count;
+    reg_count->total_config_count          = vpe_priv->config_writer.total_config_count;
+    reg_count->reused_config_count         = vpe_priv->config_writer.reused_config_count;
+
+    return status;
+}
+#endif
+
 void vpe_get_optimal_num_of_taps(struct vpe *vpe, struct vpe_scaling_info *scaling_info)
 {
     struct vpe_priv *vpe_priv;
@@ -1011,7 +1015,7 @@ enum vpe_status vpe_build_resolve_query(
     return result;
 }
 
-const struct vpe_engine *vpe_create_engine(struct vpe_init_data *params)
+struct vpe_engine *vpe_create_engine(struct vpe_init_data *params)
 {
     struct vpe_engine_priv *engine_priv;
     struct vpe_engine      *engine_handle;

@@ -6,16 +6,75 @@
  *
  **************************************************************************/
 
+#include "si_video.h"
 #include "drm-uapi/drm_fourcc.h"
-#include "radeon_uvd.h"
 #include "radeon_uvd_enc.h"
 #include "radeon_vce.h"
-#include "radeon_vcn_dec.h"
 #include "radeon_vcn_enc.h"
-#include "radeon_video.h"
 #include "si_pipe.h"
 #include "si_vpe.h"
 #include "util/u_video.h"
+#include "vl/vl_video_buffer.h"
+#include "si_video_dec.h"
+#include "ac_uvd_dec.h"
+
+unsigned si_vid_alloc_stream_handle()
+{
+   static struct ac_uvd_stream_handle stream_handle;
+   if (!stream_handle.base)
+      ac_uvd_init_stream_handle(&stream_handle);
+   return ac_uvd_alloc_stream_handle(&stream_handle);
+}
+
+bool si_vid_resize_buffer(struct pipe_context *context,
+                          struct si_resource **buf, unsigned new_size)
+{
+   struct si_context *sctx = (struct si_context *)context;
+   struct si_screen *sscreen = (struct si_screen *)context->screen;
+   struct radeon_winsys *ws = sscreen->ws;
+   struct si_resource *new_buf = *buf;
+   unsigned bytes = MIN2(new_buf->buf->size, new_size);
+   struct si_resource *old_buf = new_buf;
+   void *src = NULL, *dst = NULL;
+
+   new_buf = si_resource(pipe_buffer_create(context->screen, old_buf->b.b.bind, old_buf->b.b.usage, new_size));
+   if (!new_buf)
+      goto error;
+
+   if (old_buf->b.b.usage == PIPE_USAGE_STAGING) {
+      src = ws->buffer_map(ws, old_buf->buf, NULL, PIPE_MAP_READ | RADEON_MAP_TEMPORARY);
+      if (!src)
+         goto error;
+
+      dst = ws->buffer_map(ws, new_buf->buf, NULL, PIPE_MAP_WRITE | RADEON_MAP_TEMPORARY);
+      if (!dst)
+         goto error;
+
+      memcpy(dst, src, bytes);
+      if (new_size > bytes) {
+         new_size -= bytes;
+         dst += bytes;
+         memset(dst, 0, new_size);
+      }
+      ws->buffer_unmap(ws, new_buf->buf);
+      ws->buffer_unmap(ws, old_buf->buf);
+   } else {
+      si_barrier_before_simple_buffer_op(sctx, 0, &new_buf->b.b, &old_buf->b.b);
+      bytes = MIN2(new_buf->b.b.width0, old_buf->b.b.width0);
+      si_copy_buffer(sctx, &new_buf->b.b, &old_buf->b.b, 0, 0, bytes);
+      context->flush(context, NULL, 0);
+   }
+
+   si_resource_reference(&old_buf, NULL);
+   *buf = new_buf;
+   return true;
+
+error:
+   if (src)
+      ws->buffer_unmap(ws, old_buf->buf);
+   si_resource_reference(&new_buf, NULL);
+   return false;
+}
 
 /**
  * creates a video buffer with an UVD compatible memory layout
@@ -102,20 +161,6 @@ struct pipe_video_buffer *si_video_buffer_create(struct pipe_context *pipe,
    return vl_video_buffer_create_as_resource(pipe, &vidbuf, modifiers, modifiers_count);
 }
 
-/* set the decoding target buffer offsets */
-static struct pb_buffer_lean *si_uvd_set_dtb(struct ruvd_msg *msg, struct vl_video_buffer *buf)
-{
-   struct si_screen *sscreen = (struct si_screen *)buf->base.context->screen;
-   struct si_texture *luma = (struct si_texture *)buf->resources[0];
-   struct si_texture *chroma = (struct si_texture *)buf->resources[1];
-   enum ruvd_surface_type type =
-      (sscreen->info.gfx_level >= GFX9) ? RUVD_SURFACE_TYPE_GFX9 : RUVD_SURFACE_TYPE_LEGACY;
-
-   si_uvd_set_dt_surfaces(msg, &luma->surface, (chroma) ? &chroma->surface : NULL, type);
-
-   return luma->buffer.buf;
-}
-
 /* get the radeon resources for VCE */
 static void si_vce_get_buffer(struct pipe_resource *resource, struct pb_buffer_lean **handle,
                               struct radeon_surf **surface)
@@ -143,10 +188,7 @@ static bool si_vcn_need_context(struct si_context *ctx)
    return ctx->screen->info.ip[AMD_IP_VCN_ENC].num_instances > 1;
 }
 
-/**
- * creates an UVD compatible decoder
- */
-struct pipe_video_codec *si_uvd_create_decoder(struct pipe_context *context,
+struct pipe_video_codec *si_video_codec_create(struct pipe_context *context,
                                                const struct pipe_video_codec *templ)
 {
    struct si_context *ctx = (struct si_context *)context;
@@ -168,10 +210,5 @@ struct pipe_video_codec *si_uvd_create_decoder(struct pipe_context *context,
               templ->entrypoint == PIPE_VIDEO_ENTRYPOINT_PROCESSING)
       return si_vpe_create_processor(context, templ);
 
-   if (vcn) {
-      codec = radeon_create_decoder(context, templ);
-      ctx->vcn_has_ctx = si_vcn_need_context(ctx);
-      return codec;
-   }
-   return si_common_uvd_create_decoder(context, templ, si_uvd_set_dtb);
+   return si_create_video_decoder(context, templ);
 }

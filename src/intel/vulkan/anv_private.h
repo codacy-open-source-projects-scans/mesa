@@ -1012,17 +1012,10 @@ uint32_t anv_scratch_pool_get_surf(struct anv_device *device,
                                    struct anv_scratch_pool *pool,
                                    unsigned per_thread_scratch);
 
-/* Note that on Gfx12HP we pass a scratch space surface state offset
- * shifted by 2 relative to the value specified on the BSpec, since
- * that allows the compiler to save a shift instruction while
- * constructing the extended descriptor for SS addressing.  That
- * worked because we limit the scratch surface state pool to 8 MB and
- * because we relied on the legacy (ExBSO=0) encoding of the extended
- * descriptor in order to save the shift, which is no longer supported
- * for the UGM shared function on Xe2 platforms, so we no longer
- * attempt to do that trick.
+/* Format expected for payload delivery, see 3DSTATE_(VS|HS|DS|GS|PS),
+ * 3DSTATE_BTD & CFE_STATE instruction definitions.
  */
-#define ANV_SCRATCH_SPACE_SHIFT(ver) ((ver) >= 20 ? 6 : 4)
+#define ANV_SCRATCH_SPACE_SHIFT (6)
 
 /** Implements a BO cache that ensures a 1-1 mapping of GEM BOs to anv_bos */
 struct anv_bo_cache {
@@ -1061,8 +1054,7 @@ VkResult anv_reloc_list_append(struct anv_reloc_list *list,
 
 /* Shaders */
 
-#define ANV_DESCRIPTOR_SET_PER_PRIM_PADDING   (UINT8_MAX - 5)
-#define ANV_DESCRIPTOR_SET_DESCRIPTORS_BUFFER (UINT8_MAX - 4)
+#define ANV_DESCRIPTOR_SET_PER_PRIM_PADDING   (UINT8_MAX - 4)
 #define ANV_DESCRIPTOR_SET_NULL               (UINT8_MAX - 3)
 #define ANV_DESCRIPTOR_SET_PUSH_CONSTANTS     (UINT8_MAX - 2)
 #define ANV_DESCRIPTOR_SET_DESCRIPTORS        (UINT8_MAX - 1)
@@ -2633,6 +2625,13 @@ struct anv_device {
 
     struct anv_state                            slice_hash;
 
+    /** Surface states used to access descriptor buffers
+     *
+     * Gfx12.5+ only, requires LSC_ADDR_SURFTYPE_SS.
+     */
+    struct anv_state                            descriptor_buffer_view_state;
+    struct anv_state                            descriptor_view_state;
+
     /** An array of CPS_STATE structures grouped by MAX_VIEWPORTS elements
      *
      * We need to emit CPS_STATE structures for each viewport accessible by a
@@ -2831,6 +2830,24 @@ static inline void
 anv_binding_table_pool_free(struct anv_device *device, struct anv_state state)
 {
    anv_state_pool_free(&device->binding_table_pool, state);
+}
+
+static inline uint32_t
+anv_surface_state_to_handle(struct anv_physical_device *device,
+                            struct anv_state state)
+{
+   /* Bits 31:12 of the bindless surface offset in the extended message
+    * descriptor is bits 25:6 of the byte-based address.
+    */
+   assert(state.offset >= 0);
+   uint32_t offset = state.offset;
+   if (device->uses_ex_bso) {
+      assert(util_is_aligned(offset, 64));
+      return offset;
+   } else {
+      assert(util_is_aligned(offset, 64) && offset < (1 << 26));
+      return offset << 6;
+   }
 }
 
 static inline struct anv_state

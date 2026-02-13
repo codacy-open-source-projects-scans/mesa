@@ -206,6 +206,7 @@ struct mpc_color_caps {
     uint32_t shared_3d_lut       : 1; /**< can be in either dpp or mpc, but single instance */
     uint32_t global_alpha        : 1; /**< e.g. top plane 30 %. bottom 70 % */
     uint32_t top_bottom_blending : 1; /**< two-layer blending */
+
 };
 
 /** @struct vpe_color_caps
@@ -653,7 +654,9 @@ struct vpe_color_adjust {
 struct vpe_surface_info {
 
     struct vpe_plane_address     address;     /**< Address */
-    enum vpe_swizzle_mode_values swizzle;     /**< Swizzle mode */
+    union {
+        enum vpe_swizzle_mode_values swizzle; /**< Swizzle mode */
+    };
 
     struct vpe_plane_size         plane_size; /**< Pitch */
     struct vpe_plane_dcc_param    dcc;        /**< DCC parameters */
@@ -995,6 +998,18 @@ struct vpe_engine {
     struct vpe_check_support_funcs check_funcs; /**< vpe check format support funcs */
 };
 
+#ifdef VPE_REGISTER_PROFILE
+/** @struct vpe_register_count
+ *  @brief VPE register profiling information
+ */
+struct vpe_register_count {
+    uint64_t total_register_count;        /**< Total Registers Accessed */
+    uint64_t burstmode_register_count;    /**< Burst Mode Registers Accessed */
+    uint64_t nonburstmode_register_count; /**< Non-Burst Mode Registers Accessed */
+    uint64_t total_config_count;          /**< Total Config Descriptors */
+    uint64_t reused_config_count;         /**< Total Re-used Config Descriptors */
+};
+#endif
 #ifdef __cplusplus
 }
 #endif

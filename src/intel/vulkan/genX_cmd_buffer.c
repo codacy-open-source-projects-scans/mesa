@@ -2686,34 +2686,36 @@ emit_binding_table(struct anv_cmd_buffer *cmd_buffer,
          bt_map[s] = surface_state.offset + state_offset;
          break;
 
-      case ANV_DESCRIPTOR_SET_DESCRIPTORS: {
-         struct anv_descriptor_set *set =
-            pipe_state->descriptors[binding->index];
-
-         /* If the shader doesn't access the set buffer, just put the null
-          * surface.
+      case ANV_DESCRIPTOR_SET_DESCRIPTORS:
+         /* We have LSC_SS surface states for this, binding table isn't
+          * needed.
           */
-         if (set->is_push && shader->push_desc_info.push_set_buffer == 0) {
-            bt_map[s] = 0;
-            break;
+         assert(!cmd_buffer->device->info->has_lsc);
+         if (shader->bind_map.layout_type == ANV_PIPELINE_DESCRIPTOR_SET_LAYOUT_TYPE_BUFFER) {
+            assert(pipe_state->descriptor_buffers[binding->index].state.alloc_size);
+            bt_map[s] = pipe_state->descriptor_buffers[binding->index].state.offset +
+                        state_offset;
+         } else {
+            struct anv_descriptor_set *set =
+               pipe_state->descriptors[binding->index];
+
+            /* If the shader doesn't access the set buffer, just put the null
+             * surface.
+             */
+            if (set->is_push && shader->push_desc_info.push_set_buffer == 0) {
+               bt_map[s] = 0;
+               break;
+            }
+
+            /* This is a descriptor set buffer so the set index is actually
+             * given by binding->binding. (Yes, that's confusing.)
+             */
+            assert(set->desc_surface_mem.alloc_size);
+            assert(set->desc_surface_state.alloc_size);
+            bt_map[s] = set->desc_surface_state.offset + state_offset;
+            add_surface_reloc(cmd_buffer, anv_descriptor_set_address(set));
          }
-
-         /* This is a descriptor set buffer so the set index is actually
-          * given by binding->binding.  (Yes, that's confusing.)
-          */
-         assert(set->desc_surface_mem.alloc_size);
-         assert(set->desc_surface_state.alloc_size);
-         bt_map[s] = set->desc_surface_state.offset + state_offset;
-         add_surface_reloc(cmd_buffer, anv_descriptor_set_address(set));
          break;
-      }
-
-      case ANV_DESCRIPTOR_SET_DESCRIPTORS_BUFFER: {
-         assert(pipe_state->descriptor_buffers[binding->index].state.alloc_size);
-         bt_map[s] = pipe_state->descriptor_buffers[binding->index].state.offset +
-                     state_offset;
-         break;
-      }
 
       default: {
          assert(binding->set < MAX_SETS);
@@ -4568,7 +4570,12 @@ anv_pipe_invalidate_bits_for_access_flags(struct anv_cmd_buffer *cmd_buffer,
          }
          break;
       case VK_ACCESS_2_DESCRIPTOR_BUFFER_READ_BIT_EXT:
-         pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT;
+         /* Invalidate the state cache (when HW reads RENDER_SURFACE_STATE &
+          * SAMPLER_STATE) and the constant cache (when shaders read the
+          * descriptor buffers)
+          */
+         pipe_bits |= ANV_PIPE_STATE_CACHE_INVALIDATE_BIT |
+                      ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
          break;
       default:
          break; /* Nothing to do */
@@ -5406,7 +5413,11 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
     */
    bits |= ANV_PIPE_CS_STALL_BIT | ANV_PIPE_HDC_PIPELINE_FLUSH_BIT;
 
-   if (cmd_buffer->state.current_pipeline == _3D) {
+   if (cmd_buffer->state.current_pipeline == UINT32_MAX) {
+       bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+               ANV_PIPE_DEPTH_CACHE_FLUSH_BIT |
+               ANV_PIPE_UNTYPED_DATAPORT_CACHE_FLUSH_BIT;
+   } else if (cmd_buffer->state.current_pipeline == _3D) {
       bits |= ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
               ANV_PIPE_DEPTH_CACHE_FLUSH_BIT;
    } else {

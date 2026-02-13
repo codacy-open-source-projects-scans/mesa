@@ -2168,17 +2168,9 @@ nvk_flush_ia_state(struct nvk_cmd_buffer *cmd)
       &cmd->vk.dynamic_graphics_state;
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_TOPOLOGY)) {
-      uint32_t begin;
-      V_NV9097_BEGIN(begin, {
-         .op = vk_to_nv9097_primitive_topology(dyn->ia.primitive_topology),
-         .primitive_id = NV9097_BEGIN_PRIMITIVE_ID_FIRST,
-         .instance_id = NV9097_BEGIN_INSTANCE_ID_FIRST,
-         .split_mode = SPLIT_MODE_NORMAL_BEGIN_NORMAL_END,
-      });
-
       struct nv_push *p = nvk_cmd_buffer_push(cmd, 2);
-      P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_DRAW_BEGIN));
-      P_INLINE_DATA(p, begin);
+      P_MTHD(p, NV9097, SET_MME_SHADOW_SCRATCH(NVK_MME_SCRATCH_DRAW_TOPOLOGY));
+      P_INLINE_DATA(p, vk_to_nv9097_primitive_topology(dyn->ia.primitive_topology));
    }
 
    if (BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_IA_PRIMITIVE_RESTART_ENABLE)) {
@@ -4305,32 +4297,49 @@ nvk_mme_build_draw_loop(struct mme_builder *b,
                         struct mme_value first_vertex,
                         struct mme_value vertex_count)
 {
-   struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
-   if (b->devinfo->cls_eng3d < PASCAL_B) {
-      mme_start_loop(b, instance_count);
-   } else {
-      mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+   if (b->devinfo->cls_eng3d >= TURING_A) {
+      struct mme_value draw_control_a = nvk_mme_load_scratch(b, DRAW_TOPOLOGY);
+      mme_set_field_enum(b, draw_control_a, NVC597_SET_DRAW_CONTROL_A_INSTANCE_ITERATE_ENABLE, TRUE);
+
+      mme_mthd(b, NVC597_SET_DRAW_CONTROL_A);
+      mme_emit(b, draw_control_a);
       mme_emit(b, instance_count);
-      mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+
+      mme_mthd(b, NVC597_DRAW_VERTEX_ARRAY_BEGIN_END_A);
+      mme_emit(b, first_vertex);
+      mme_emit(b, vertex_count);
+
+      mme_free_reg(b, draw_control_a);
+   } else {
+      struct mme_value begin = nvk_mme_load_scratch(b, DRAW_TOPOLOGY);
+
+      if (b->devinfo->cls_eng3d < PASCAL_B) {
+         mme_start_loop(b, instance_count);
+      } else {
+         mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+         mme_emit(b, instance_count);
+         mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+      }
+
+      mme_mthd(b, NV9097_BEGIN);
+      mme_emit(b, begin);
+
+      mme_mthd(b, NV9097_SET_VERTEX_ARRAY_START);
+      mme_emit(b, first_vertex);
+      mme_emit(b, vertex_count);
+
+      mme_mthd(b, NV9097_END);
+      mme_emit(b, mme_zero());
+
+      if (b->devinfo->cls_eng3d < PASCAL_B) {
+         mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
+         mme_end_loop(b);
+      }
+
+      mme_free_reg(b, begin);
    }
 
-   mme_mthd(b, NV9097_BEGIN);
-   mme_emit(b, begin);
-
-   mme_mthd(b, NV9097_SET_VERTEX_ARRAY_START);
-   mme_emit(b, first_vertex);
-   mme_emit(b, vertex_count);
-
-   mme_mthd(b, NV9097_END);
-   mme_emit(b, mme_zero());
-
-   if (b->devinfo->cls_eng3d < PASCAL_B) {
-      mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
-      mme_end_loop(b);
-   }
-
-   mme_free_reg(b, begin);
 }
 
 static void
@@ -4408,6 +4417,9 @@ nvk_CmdDraw(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
+   if (unlikely(!vertexCount || !instanceCount))
+      return;
+
    nvk_cmd_flush_gfx_state(cmd);
 
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 6);
@@ -4428,6 +4440,9 @@ nvk_CmdDrawMultiEXT(VkCommandBuffer commandBuffer,
                     uint32_t stride)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
+
+   if (unlikely(!drawCount || !pVertexInfo->vertexCount || !instanceCount))
+      return;
 
    nvk_cmd_flush_gfx_state(cmd);
 
@@ -4450,32 +4465,46 @@ nvk_mme_build_draw_indexed_loop(struct mme_builder *b,
                                 struct mme_value first_index,
                                 struct mme_value index_count)
 {
-   struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
 
-   if (b->devinfo->cls_eng3d < PASCAL_B) {
-      mme_start_loop(b, instance_count);
-   } else {
-      mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+   if (b->devinfo->cls_eng3d >= TURING_A) {
+      struct mme_value draw_control_a = nvk_mme_load_scratch(b, DRAW_TOPOLOGY);
+      mme_set_field_enum(b, draw_control_a, NVC597_SET_DRAW_CONTROL_A_INSTANCE_ITERATE_ENABLE, TRUE);
+
+      mme_mthd(b, NVC597_SET_DRAW_CONTROL_A);
+      mme_emit(b, draw_control_a);
       mme_emit(b, instance_count);
-      mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+      mme_emit(b, first_index);
+      mme_emit(b, index_count);
+
+      mme_free_reg(b, draw_control_a);
+   } else {
+      struct mme_value begin = nvk_mme_load_scratch(b, DRAW_TOPOLOGY);
+
+      if (b->devinfo->cls_eng3d < PASCAL_B) {
+         mme_start_loop(b, instance_count);
+      } else {
+         mme_mthd(b, NVC197_SET_INSTANCE_COUNT);
+         mme_emit(b, instance_count);
+         mme_set_field_enum(b, begin, NVC197_BEGIN_INSTANCE_ITERATE_ENABLE, TRUE);
+      }
+
+      mme_mthd(b, NV9097_BEGIN);
+      mme_emit(b, begin);
+
+      mme_mthd(b, NV9097_SET_INDEX_BUFFER_F);
+      mme_emit(b, first_index);
+      mme_emit(b, index_count);
+
+      mme_mthd(b, NV9097_END);
+      mme_emit(b, mme_zero());
+
+      if (b->devinfo->cls_eng3d < PASCAL_B) {
+         mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
+         mme_end_loop(b);
+      }
+
+      mme_free_reg(b, begin);
    }
-
-   mme_mthd(b, NV9097_BEGIN);
-   mme_emit(b, begin);
-
-   mme_mthd(b, NV9097_SET_INDEX_BUFFER_F);
-   mme_emit(b, first_index);
-   mme_emit(b, index_count);
-
-   mme_mthd(b, NV9097_END);
-   mme_emit(b, mme_zero());
-
-   if (b->devinfo->cls_eng3d < PASCAL_B) {
-      mme_set_field_enum(b, begin, NV9097_BEGIN_INSTANCE_ID, SUBSEQUENT);
-      mme_end_loop(b);
-   }
-
-   mme_free_reg(b, begin);
 }
 
 static void
@@ -4557,6 +4586,9 @@ nvk_CmdDrawIndexed(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
 
+   if (unlikely(!indexCount || !instanceCount))
+      return;
+
    nvk_cmd_flush_gfx_state(cmd);
 
    struct nv_push *p = nvk_cmd_buffer_push(cmd, 7);
@@ -4579,6 +4611,9 @@ nvk_CmdDrawMultiIndexedEXT(VkCommandBuffer commandBuffer,
                            const int32_t *pVertexOffset)
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
+
+   if (unlikely(!drawCount || !pIndexInfo->indexCount || !instanceCount))
+      return;
 
    nvk_cmd_flush_gfx_state(cmd);
 
@@ -4647,6 +4682,9 @@ nvk_CmdDrawIndirect(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_buffer, buffer, _buffer);
+
+   if (unlikely(!drawCount))
+      return;
 
    /* From the Vulkan 1.3.238 spec:
     *
@@ -4928,7 +4966,7 @@ nvk_mme_xfb_draw_indirect_loop(struct mme_builder *b,
                                struct mme_value instance_count,
                                struct mme_value counter)
 {
-   struct mme_value begin = nvk_mme_load_scratch(b, DRAW_BEGIN);
+   struct mme_value begin = nvk_mme_load_scratch(b, DRAW_TOPOLOGY);
 
    /* NVC197_BEGIN_INSTANCE_ITERATE_ENABLE seems to be incompatible with xfb.
     * Always use an mme loop instead.
@@ -5012,6 +5050,9 @@ nvk_CmdDrawIndirectByteCountEXT(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(nvk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(nvk_buffer, counter_buffer, counterBuffer);
+
+   if (unlikely(!instanceCount))
+      return;
 
    nvk_cmd_flush_gfx_state(cmd);
 

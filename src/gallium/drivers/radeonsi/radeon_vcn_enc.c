@@ -10,8 +10,7 @@
 #include "ac_vcn_enc_av1_default_cdf.h"
 #include "ac_debug.h"
 
-#include "pipe/p_video_codec.h"
-#include "radeon_video.h"
+#include "si_video.h"
 #include "radeonsi/si_pipe.h"
 #include "util/u_memory.h"
 #include "util/u_video.h"
@@ -1628,12 +1627,12 @@ static void radeon_enc_begin_frame(struct pipe_video_codec *encoder,
 
    if (dpb_slots > enc->dpb_slots) {
       setup_dpb(enc, dpb_slots);
-      if (!si_vid_resize_buffer(enc->base.context, &enc->dpb, enc->dpb_size, NULL)) {
+      if (!si_vid_resize_buffer(enc->base.context, &enc->dpb, enc->dpb_size)) {
          RADEON_ENC_ERR("Can't resize DPB buffer.\n");
          goto error;
       }
       if (sscreen->info.vcn_ip_version >= VCN_5_0_0 && enc->metadata_size &&
-          !si_vid_resize_buffer(enc->base.context, &enc->meta, enc->metadata_size, NULL)) {
+          !si_vid_resize_buffer(enc->base.context, &enc->meta, enc->metadata_size)) {
          RADEON_ENC_ERR("Can't resize meta buffer.\n");
          goto error;
       }
