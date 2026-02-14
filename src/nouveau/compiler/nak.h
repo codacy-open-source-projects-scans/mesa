@@ -58,6 +58,12 @@ struct nak_fs_key {
    bool force_sample_shading;
    bool uses_underestimate;
 
+   uint8_t pad;
+};
+PRAGMA_DIAGNOSTIC_POP
+static_assert(sizeof(struct nak_fs_key) == 4, "This struct has no holes");
+
+struct nak_constant_offset_info {
    /**
     * The constant buffer index and offset at which the sample locations and
     * pass sample masks tables lives.
@@ -79,10 +85,21 @@ struct nak_fs_key {
     * sample in a multi-pass fragment shader invocaiton.
     */
    uint32_t sample_masks_offset;
-};
-PRAGMA_DIAGNOSTIC_POP
-static_assert(sizeof(struct nak_fs_key) == 12, "This struct has no holes");
 
+   /**
+    * The offset into cb0 for the printf buffer pointer.
+    */
+   uint32_t printf_buffer_offset;
+};
+const extern struct nak_constant_offset_info nak_const_offsets;
+
+#define NAK_PRINTF_BUFFER_SIZE 0x40000
+
+#ifdef NDEBUG
+#define NAK_CAN_PRINTF false
+#else
+#define NAK_CAN_PRINTF true
+#endif
 
 void nak_postprocess_nir(nir_shader *nir, const struct nak_compiler *nak,
                          nir_variable_mode robust2_modes,

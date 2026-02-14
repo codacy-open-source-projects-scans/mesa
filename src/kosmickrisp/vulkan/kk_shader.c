@@ -416,6 +416,13 @@ kk_lower_fs(struct kk_device *dev, nir_shader *nir,
    if (state->cb)
       kk_lower_fs_blend(nir, state);
 
+   enum pipe_format rts[MAX_DRAW_BUFFERS] = {PIPE_FORMAT_NONE};
+   const struct vk_render_pass_state *rp = state->rp;
+   for (uint32_t i = 0u; i < MAX_DRAW_BUFFERS; ++i)
+      rts[i] = vk_format_to_pipe_format(rp->color_attachment_formats[i]);
+
+   NIR_PASS(_, nir, msl_nir_fs_force_output_signedness, rts);
+
    if (state->rp->depth_attachment_format == VK_FORMAT_UNDEFINED ||
        nir->info.fs.early_fragment_tests)
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
@@ -471,6 +478,11 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir,
    if (KK_DEBUG(FORCE_ROBUSTNESS))
       rs = &rs_all_supported;
 
+   const nir_opt_access_options access_options = {
+      .is_vulkan = true,
+   };
+   NIR_PASS(_, nir, nir_opt_access, &access_options);
+
    /* Massage IO related variables to please Metal */
    if (nir->info.stage == MESA_SHADER_VERTEX) {
       NIR_PASS(_, nir, kk_nir_lower_vs_multiview, state->rp->view_mask);
@@ -484,13 +496,6 @@ kk_lower_nir(struct kk_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, msl_ensure_vertex_position_output);
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      enum pipe_format rts[MAX_DRAW_BUFFERS] = {PIPE_FORMAT_NONE};
-      const struct vk_render_pass_state *rp = state->rp;
-      for (uint32_t i = 0u; i < MAX_DRAW_BUFFERS; ++i)
-         rts[i] = vk_format_to_pipe_format(rp->color_attachment_formats[i]);
-
-      NIR_PASS(_, nir, msl_nir_fs_force_output_signedness, rts);
-
       NIR_PASS(_, nir, kk_nir_lower_fs_multiview, state->rp->view_mask);
 
       if (state->rp->depth_attachment_format != VK_FORMAT_UNDEFINED &&

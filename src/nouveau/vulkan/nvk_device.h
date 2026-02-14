@@ -50,9 +50,12 @@ struct nvk_device {
    struct nvk_slm_area slm;
    struct nvkmd_mem *vab_memory;
 
+   struct u_printf_ctx printf;
+
    struct vk_meta_device meta;
 
    struct nvk_shader *copy_queries;
+   struct nvk_shader *copy_indirect;
 };
 
 VK_DEFINE_HANDLE_CASTS(nvk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)

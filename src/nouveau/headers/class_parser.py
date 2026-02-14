@@ -83,7 +83,7 @@ TEMPLATE_H = Template("""\
 
 #include <assert.h>
 #include <stdio.h>
-#include "util/u_math.h"
+#include "util/macros.h"
 
 %for mthd in methods:
 struct nv_${nvcl.lower()}_${mthd.name} {
@@ -101,7 +101,7 @@ __${nvcl}_${mthd.name}(uint32_t *val_out, struct nv_${nvcl.lower()}_${mthd.name}
     %if field_width == 32:
     val |= st.${field.name.lower()};
     %else:
-    assert(st.${field.name.lower()} < (1ULL << ${field_width}));
+    assert(st.${field.name.lower()} < (UINT64_C(1) << ${field_width}));
     val |= st.${field.name.lower()} << ${field.start};
     %endif
   %endfor
@@ -159,6 +159,8 @@ TEMPLATE_C = Template("""\
 #include "${header}"
 
 #include <stdio.h>
+
+#include "util/u_math.h"
 
 <%def name="cases(mthd)">
   %if mthd.is_array:

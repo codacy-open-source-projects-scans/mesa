@@ -3786,7 +3786,6 @@ pops_await_overlapped_waves(isel_context* ctx)
    begin_uniform_if_then(ctx, &newest_overlapped_wave_exited_if_context,
                          newest_overlapped_wave_exited);
    emit_loop_break(ctx);
-   begin_uniform_if_else(ctx, &newest_overlapped_wave_exited_if_context);
    end_uniform_if(ctx, &newest_overlapped_wave_exited_if_context);
    bld.reset(ctx->block);
 
@@ -4013,58 +4012,6 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
    case nir_intrinsic_load_scratch: visit_load_scratch(ctx, instr); break;
    case nir_intrinsic_store_scratch: visit_store_scratch(ctx, instr); break;
    case nir_intrinsic_barrier: emit_barrier(ctx, instr); break;
-   case nir_intrinsic_load_num_workgroups: {
-      Temp dst = get_ssa_temp(ctx, &instr->def);
-      if (ctx->options->load_grid_size_from_user_sgpr) {
-         bld.copy(Definition(dst), get_arg(ctx, ctx->args->num_work_groups));
-      } else {
-         Temp addr = get_arg(ctx, ctx->args->num_work_groups);
-         assert(addr.regClass() == s2);
-         bld.pseudo(aco_opcode::p_create_vector, Definition(dst),
-                    bld.smem(aco_opcode::s_load_dwordx2, bld.def(s2), addr, Operand::zero()),
-                    bld.smem(aco_opcode::s_load_dword, bld.def(s1), addr, Operand::c32(8)));
-      }
-      emit_split_vector(ctx, dst, 3);
-      break;
-   }
-   case nir_intrinsic_load_workgroup_id: {
-      Temp dst = get_ssa_temp(ctx, &instr->def);
-      if (ctx->stage.hw == AC_HW_COMPUTE_SHADER) {
-         Operand workgroup_id[3];
-         if (ctx->program->gfx_level >= GFX12) {
-            Temp idx = bld.copy(bld.def(s1), Operand(PhysReg(108 + 9 /*ttmp9*/), s1));
-            Temp idy = bld.copy(bld.def(s1), Operand(PhysReg(108 + 7 /*ttmp7*/), s1));
-            workgroup_id[0] = Operand(idx);
-            if (ctx->args->workgroup_ids[2].used) {
-               workgroup_id[1] =
-                  bld.pseudo(aco_opcode::p_extract, bld.def(s1), bld.def(s1, scc), idy,
-                             Operand::zero(), Operand::c32(16u), Operand::zero());
-               workgroup_id[2] =
-                  bld.pseudo(aco_opcode::p_extract, bld.def(s1), bld.def(s1, scc), idy,
-                             Operand::c32(1u), Operand::c32(16u), Operand::zero());
-            } else {
-               workgroup_id[1] = Operand(idy);
-               workgroup_id[2] = Operand::zero();
-            }
-         } else {
-            const struct ac_arg* ids = ctx->args->workgroup_ids;
-            for (unsigned i = 0; i < 3; i++)
-               workgroup_id[i] = ids[i].used ? Operand(get_arg(ctx, ids[i])) : Operand::zero();
-         }
-         bld.pseudo(aco_opcode::p_create_vector, Definition(dst), workgroup_id[0], workgroup_id[1],
-                    workgroup_id[2]);
-         emit_split_vector(ctx, dst, 3);
-      } else {
-         isel_err(&instr->instr, "Unsupported stage for load_workgroup_id");
-      }
-      break;
-   }
-   case nir_intrinsic_load_subgroup_id: {
-      assert(ctx->options->gfx_level >= GFX12 && ctx->stage.hw == AC_HW_COMPUTE_SHADER);
-      bld.sop2(aco_opcode::s_bfe_u32, Definition(get_ssa_temp(ctx, &instr->def)), bld.def(s1, scc),
-               Operand(PhysReg(108 + 8 /*ttmp8*/), s1), Operand::c32(25 | (5 << 16)));
-      break;
-   }
    case nir_intrinsic_ddx:
    case nir_intrinsic_ddy:
    case nir_intrinsic_ddx_fine:
@@ -4805,6 +4752,12 @@ visit_intrinsic(isel_context* ctx, nir_intrinsic_instr* instr)
    case nir_intrinsic_load_resume_shader_address_amd: {
       bld.pseudo(aco_opcode::p_resume_shader_address, Definition(get_ssa_temp(ctx, &instr->def)),
                  bld.def(s1, scc), Operand::c32(nir_intrinsic_call_idx(instr)));
+      break;
+   }
+   case nir_intrinsic_load_ttmp_register_amd: {
+      assert(ctx->options->gfx_level >= GFX12);
+      Temp dst = get_ssa_temp(ctx, &instr->def);
+      bld.copy(Definition(dst), Operand(PhysReg(108 + nir_intrinsic_base(instr)), s1));
       break;
    }
    case nir_intrinsic_load_scalar_arg_amd:
