@@ -137,7 +137,6 @@ struct vk_cmd_queue_entry;
 struct vk_cmd_queue_entry_base {
    struct list_head cmd_link;
    enum vk_cmd_type type;
-   void *driver_data;
    void (*driver_free_cb)(struct vk_cmd_queue *queue,
                           struct vk_cmd_queue_entry *cmd);
 };
@@ -146,7 +145,6 @@ struct vk_cmd_queue_entry_base {
 struct vk_cmd_queue_entry {
    struct list_head cmd_link;
    enum vk_cmd_type type;
-   void *driver_data;
    void (*driver_free_cb)(struct vk_cmd_queue *queue,
                           struct vk_cmd_queue_entry *cmd);
    union {
@@ -271,10 +269,11 @@ VkResult vk_enqueue_${to_underscore(c.name)}(struct vk_cmd_queue *queue
 % endfor
 )
 {
-   struct vk_cmd_queue_entry *cmd = linear_zalloc_child(queue->ctx, vk_cmd_queue_type_sizes[${to_enum_name(c.name)}]);
+   struct vk_cmd_queue_entry *cmd = linear_alloc_child(queue->ctx, vk_cmd_queue_type_sizes[${to_enum_name(c.name)}]);
    if (!cmd) return VK_ERROR_OUT_OF_HOST_MEMORY;
 
    cmd->type = ${to_enum_name(c.name)};
+   cmd->driver_free_cb = NULL;
 ${get_params_copy(c, types)}}
 % endif
 % if c.guard is not None:
@@ -433,21 +432,6 @@ def get_array_copy(builder, command, param, field_name):
     ))
     builder.add("memcpy((void*)%s, %s, %s * (%s));" % (field_name, param.name, field_size, param.len))
 
-def get_array_member_copy(builder, struct, src_name, member):
-    field_name = "%s->%s" % (struct, member.name)
-    if member.len == "struct-ptr":
-        field_size = "sizeof(*%s)" % (field_name)
-    else:
-        field_size = "sizeof(*%s) * %s->%s" % (field_name, struct, member.len)
-
-    builder.add("if (%s->%s) {" % (src_name, member.name))
-    builder.level += 1
-    builder.add("%s = linear_alloc_child(queue->alloc, %s);" % (field_name, field_size))
-    builder.add("if (%s == NULL) return VK_ERROR_OUT_OF_HOST_MEMORY;" % (field_name))
-    builder.add("memcpy((void*)%s, %s->%s, %s);" % (field_name, src_name, member.name, field_size))
-    builder.level -= 1
-    builder.add("}")
-
 def get_pnext_member_copy(builder, struct, src_type, member, types):
     if not types[src_type].extended_by:
         return
@@ -538,6 +522,10 @@ def get_param_copy(builder, command, param, types):
         builder.add("if (%s) {" % (param.name))
         builder.level += 1
         get_array_copy(builder, command, param, dst)
+        builder.level -= 1
+        builder.add("} else {")
+        builder.level += 1
+        builder.add("%s = NULL;" % (dst))
         builder.level -= 1
         builder.add("}")
         return True
