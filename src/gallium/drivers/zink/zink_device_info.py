@@ -142,6 +142,9 @@ EXTENSIONS = [
     Extension("VK_KHR_driver_properties",
               alias="driver",
               properties=True),
+    Extension("VK_EXT_pci_bus_info",
+              alias="pci",
+              properties=True),
     Extension("VK_EXT_memory_budget"),
     Extension("VK_EXT_memory_priority", alias="memprio", features=True),
     Extension("VK_EXT_pageable_device_local_memory", alias="mempage", features=True),
@@ -945,15 +948,19 @@ if __name__ == "__main__":
             latest_entry = entry
 
         if ext.has_features:
-            if not (entry.features_struct and ext.physical_device_struct("Features") == entry.features_struct):
+            if not entry.features_struct:
                 error_count += 1
                 print("The extension {} does not provide a features struct.".format(ext.name))
+            elif ext.physical_device_struct("Features") != entry.features_struct:
+                ext.features_struct_name = entry.features_struct
             ext.features_promoted = latest_entry.features_promoted
 
         if ext.has_properties:
-            if not (entry.properties_struct and ext.physical_device_struct("Properties") == entry.properties_struct):
+            if not entry.properties_struct:
                 error_count += 1
                 print("The extension {} does not provide a properties struct.".format(ext.name))
+            elif ext.physical_device_struct("Properties") != entry.properties_struct:
+                ext.properties_struct_name = entry.properties_struct
             ext.properties_promoted = latest_entry.properties_promoted
             ext.needs_double_load = latest_entry.needs_double_load
 
