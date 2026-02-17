@@ -91,11 +91,6 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
    compiler->precise_trig = debug_get_bool_option("INTEL_PRECISE_TRIG", false);
 
-   compiler->extended_bindless_surface_offset = devinfo->verx10 >= 125;
-   compiler->use_tcs_multi_patch = devinfo->ver >= 12;
-
-   compiler->indirect_ubos_use_sampler = devinfo->ver < 12;
-
    compiler->lower_dpas = !devinfo->has_systolic ||
                           debug_get_bool_option("INTEL_LOWER_DPAS", false);
 
@@ -190,7 +185,7 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
    nir_options->lower_doubles_options = fp64_options;
    nir_options->max_samples = devinfo->ver >= 30 ? 8 : 16;
 
-   if (compiler->use_tcs_multi_patch) {
+   if (intel_use_tcs_multi_patch(devinfo)) {
       /* TCS MULTI_PATCH mode has multiple patches per subgroup */
       nir_options->divergence_analysis_options &=
          ~nir_divergence_single_patch_per_tcs_subgroup;
@@ -207,8 +202,7 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
 
       stage_options->unify_interfaces = i < MESA_SHADER_FRAGMENT;
 
-      stage_options->force_indirect_unrolling |=
-         brw_nir_no_indirect_mask(compiler, i);
+      stage_options->force_indirect_unrolling |= brw_nir_no_indirect_mask(i);
    }
 
    /* Build a list of storage format compatible in component bit size &

@@ -2249,9 +2249,9 @@
     <field name="Pre Frame 1" size="3" start="0:3" type="Pre Post Frame Shader Mode"/>
     <field name="Post Frame" size="3" start="0:6" type="Pre Post Frame Shader Mode"/>
     <field name="Downscale geometry" size="2" start="0:9" type="Downscale"/>
-    <field name="HSR Prepare Enable" size="1" start="0:11" type="bool"/>
-    <field name="HSR Prepare Interleaving Enable" size="1" start="0:12" type="bool"/>
-    <field name="HSR Prepare Filter Enable" size="1" start="0:13" type="bool"/>
+    <field name="HSR Prepass Enable" size="1" start="0:11" type="bool"/>
+    <field name="HSR Prepass Interleaving Enable" size="1" start="0:12" type="bool"/>
+    <field name="HSR Prepass Filter Enable" size="1" start="0:13" type="bool"/>
     <field name="HSR Hierarchical Optimizations Enable" size="1" start="0:14" type="bool"/>
     <field name="Internal layer index" size="8" start="0:24" type="uint"/>
     <field name="Frame argument" size="64" start="2:0" type="hex"/>
@@ -2700,6 +2700,16 @@
     <field name="Render Target Mask" size="12" start="16" type="hex"/>
   </struct>
 
+  <enum name="HSR Update">
+    <value name="Early" value="0"/>
+    <value name="Late" value="1"/>
+  </enum>
+
+  <enum name="HSR Prepass Kill">
+    <value name="Follow HSR Update" value="0"/>
+    <value name="Late" value="1"/>
+  </enum>
+
   <struct name="DCD Flags 2" size="1">
     <field name="Read Mask" size="12" start="0" type="hex"/>
     <field name="Write Mask" size="12" start="12" type="hex"/>
@@ -2709,8 +2719,8 @@
     <field name="HSR Can Be Culled" size="1" start="27" type="bool"/>
     <field name="Z Write Or Stencil" size="1" start="28" type="bool"/>
     <field name="Enable Varying Shading In Pre Pass" size="1" start="29" type="bool"/>
-    <field name="HSR Update Operation" size="1" start="30" type="bool"/>
-    <field name="HSR Prepass Kill Operation" size="1" start="31" type="bool"/>
+    <field name="HSR Update Operation" size="1" start="30" type="HSR Update"/>
+    <field name="HSR Prepass Kill Operation" size="1" start="31" type="HSR Prepass Kill"/>
   </struct>
 
   <struct name="FAU Pointer" size="2">

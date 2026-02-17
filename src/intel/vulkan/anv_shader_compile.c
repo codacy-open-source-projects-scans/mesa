@@ -1190,7 +1190,7 @@ shared_type_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 }
 
 static void
-anv_shader_compute_fragment_rts(const struct brw_compiler *compiler,
+anv_shader_compute_fragment_rts(const struct intel_device_info *devinfo,
                                 const struct vk_graphics_pipeline_state *state,
                                 struct anv_shader_data *shader_data)
 {
@@ -1222,8 +1222,7 @@ anv_shader_compute_fragment_rts(const struct brw_compiler *compiler,
          }
       }
       shader_data->bind_map.surface_count = num_rts;
-   } else if (brw_nir_fs_needs_null_rt(
-                 compiler->devinfo, nir,
+   } else if (brw_nir_fs_needs_null_rt(devinfo, nir,
                  shader_data->key.fs.alpha_to_coverage != INTEL_NEVER)) {
       /* Setup a null render target */
       rt_bindings[0] = (struct anv_pipeline_binding) {
@@ -1321,6 +1320,7 @@ anv_shader_lower_nir(struct anv_device *device,
 {
    const struct anv_physical_device *pdevice = device->physical;
    const struct brw_compiler *compiler = pdevice->compiler;
+   const struct intel_device_info *devinfo = compiler->devinfo;
    struct anv_descriptor_set_layout * const *set_layouts =
       (struct anv_descriptor_set_layout * const *) shader_data->info->set_layouts;
    const uint32_t set_layout_count = shader_data->info->set_layout_count;
@@ -1374,7 +1374,7 @@ anv_shader_lower_nir(struct anv_device *device,
       nir_lower_compute_system_values_options options = {
          .lower_workgroup_id_to_index = true,
          /* nir_lower_idiv generates expensive code */
-         .shortcut_1d_workgroup_id = compiler->devinfo->verx10 >= 125,
+         .shortcut_1d_workgroup_id = devinfo->verx10 >= 125,
       };
 
       NIR_PASS(_, nir, nir_lower_compute_system_values, &options);
@@ -1399,7 +1399,7 @@ anv_shader_lower_nir(struct anv_device *device,
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
    /* Apply lowering for 64bit atomics pre-Xe2 */
-   const bool lower_64bit_atomics = compiler->devinfo->ver < 20;
+   const bool lower_64bit_atomics = devinfo->ver < 20;
 
    if (lower_64bit_atomics) {
       /* Ensure robustness, do this before brw_nir_lower_storage_image so that
@@ -1428,7 +1428,7 @@ anv_shader_lower_nir(struct anv_device *device,
                accept_64bit_atomic_cb, NULL);
 
       /* Detile for global */
-      NIR_PASS(_, nir, brw_nir_lower_texel_address, compiler->devinfo,
+      NIR_PASS(_, nir, brw_nir_lower_texel_address, devinfo,
                pdevice->isl_dev.shader_tiling);
    }
 
@@ -1445,7 +1445,7 @@ anv_shader_lower_nir(struct anv_device *device,
 
    /* Need to have render targets placed first in the bind_map */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
-      anv_shader_compute_fragment_rts(compiler, state, shader_data);
+      anv_shader_compute_fragment_rts(devinfo, state, shader_data);
 
 
    uint32_t dynamic_descriptors_offset = 0;
@@ -1502,7 +1502,9 @@ anv_shader_lower_nir(struct anv_device *device,
 
    enum nir_lower_non_uniform_access_type lower_non_uniform_access_types =
       nir_lower_non_uniform_texture_access |
+      nir_lower_non_uniform_texture_query |
       nir_lower_non_uniform_image_access |
+      nir_lower_non_uniform_image_query |
       nir_lower_non_uniform_get_ssbo_size |
       (lower_non_uniform_texture_offsets ?
        nir_lower_non_uniform_texture_offset_access : 0);
@@ -1556,7 +1558,7 @@ anv_shader_lower_nir(struct anv_device *device,
          const unsigned chunk_size = 16;
          const unsigned shared_size = align(nir->info.shared_size, chunk_size);
          assert(shared_size <=
-                intel_compute_slm_calculate_size(compiler->devinfo->ver,
+                intel_compute_slm_calculate_size(devinfo->ver,
                                                  nir->info.shared_size));
 
          NIR_PASS(_, nir, nir_zero_initialize_shared_memory,
@@ -1565,7 +1567,7 @@ anv_shader_lower_nir(struct anv_device *device,
    }
 
    if (mesa_shader_stage_is_compute(nir->info.stage)) {
-      NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, compiler->devinfo,
+      NIR_PASS(_, nir, brw_nir_lower_cs_intrinsics, devinfo,
                &shader_data->prog_data.cs);
    }
 

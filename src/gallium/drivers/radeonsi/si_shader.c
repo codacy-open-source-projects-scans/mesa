@@ -954,7 +954,7 @@ static void si_postprocess_nir(struct si_nir_shader_ctx *ctx)
    /* LLVM does not work well with this, so is handled in llvm backend waterfall. */
    if (nir->info.use_aco_amd && ctx->temp_info.has_non_uniform_tex_access) {
       nir_lower_non_uniform_access_options options = {
-         .types = nir_lower_non_uniform_texture_access,
+         .types = nir_lower_non_uniform_texture_access | nir_lower_non_uniform_texture_query,
       };
       NIR_PASS(progress, nir, nir_lower_non_uniform_access, &options);
    }
@@ -1169,6 +1169,12 @@ static void si_postprocess_nir(struct si_nir_shader_ctx *ctx)
       .cb_data = &sel->screen->info.gfx_level,
    };
    NIR_PASS(_, nir, nir_opt_offsets, &offset_options);
+
+   bool opt_intrinsics = false;
+   if (sel->screen->info.gfx_level >= GFX11)
+      NIR_PASS(opt_intrinsics, nir, ac_nir_opt_flip_if_for_mem_loads);
+   if (opt_intrinsics) /* optimize inot(inverse_ballot) */
+      NIR_PASS(_, nir, nir_opt_intrinsics);
 
    si_nir_late_opts(nir);
 

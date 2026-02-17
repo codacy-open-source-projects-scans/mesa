@@ -746,7 +746,6 @@ static void
 lower_sampler_logical_send(const brw_builder &bld, brw_tex_inst *tex)
 {
    const intel_device_info *devinfo = bld.shader->devinfo;
-   const brw_compiler *compiler = bld.shader->compiler;
 
    const enum brw_sampler_opcode op = tex->sampler_opcode;
    const bool surface_bindless = tex->surface_bindless;
@@ -849,12 +848,7 @@ lower_sampler_logical_send(const brw_builder &bld, brw_tex_inst *tex)
           * address space but means we can do something more efficient in the
           * shader.
           */
-         if (compiler->use_bindless_sampler_offset) {
-            assert(devinfo->ver >= 11);
-            ubld1.OR(component(header, 3), sampler, brw_imm_ud(1));
-         } else {
-            ubld1.MOV(component(header, 3), sampler);
-         }
+         ubld1.MOV(component(header, 3), sampler);
       } else if (is_high_sampler(devinfo, sampler)) {
          brw_reg sampler_state_ptr =
             retype(brw_vec1_grf(0, 3), BRW_TYPE_UD);
@@ -1674,7 +1668,6 @@ lower_lsc_varying_pull_constant_logical_send(const brw_builder &bld,
                                              brw_inst *inst)
 {
    const intel_device_info *devinfo = bld.shader->devinfo;
-   ASSERTED const brw_compiler *compiler = bld.shader->compiler;
 
    assert(inst->src[PULL_VARYING_CONSTANT_SRC_BINDING_TYPE].file == IMM);
    enum lsc_addr_surface_type surf_type =
@@ -1699,7 +1692,7 @@ lower_lsc_varying_pull_constant_logical_send(const brw_builder &bld,
 
    send->sfid = BRW_SFID_UGM;
 
-   assert(!compiler->indirect_ubos_use_sampler);
+   assert(!intel_indirect_ubos_use_sampler(devinfo));
 
    send->src[SEND_SRC_DESC]     = brw_imm_ud(0);
    send->src[SEND_SRC_EX_DESC]  = brw_imm_ud(0);
@@ -1746,7 +1739,6 @@ static void
 lower_varying_pull_constant_logical_send(const brw_builder &bld, brw_inst *inst)
 {
    const intel_device_info *devinfo = bld.shader->devinfo;
-   const brw_compiler *compiler = bld.shader->compiler;
 
    assert(inst->src[PULL_VARYING_CONSTANT_SRC_BINDING_TYPE].file == IMM);
    enum lsc_addr_surface_type surf_type =
@@ -1777,7 +1769,7 @@ lower_varying_pull_constant_logical_send(const brw_builder &bld, brw_inst *inst)
    send->src[SEND_SRC_PAYLOAD1] = ubo_offset;
    send->src[SEND_SRC_PAYLOAD2] = brw_reg();
 
-   if (compiler->indirect_ubos_use_sampler) {
+   if (intel_indirect_ubos_use_sampler(devinfo)) {
       const unsigned simd_mode =
          send->exec_size <= 8 ? BRW_SAMPLER_SIMD_MODE_SIMD8 :
                                 BRW_SAMPLER_SIMD_MODE_SIMD16;
@@ -2314,7 +2306,7 @@ brw_lower_logical_sends(brw_shader &s)
       }
 
       case FS_OPCODE_VARYING_PULL_CONSTANT_LOAD_LOGICAL:
-         if (devinfo->has_lsc && !s.compiler->indirect_ubos_use_sampler)
+         if (devinfo->has_lsc)
             lower_lsc_varying_pull_constant_logical_send(ibld, inst);
          else
             lower_varying_pull_constant_logical_send(ibld, inst);
@@ -2531,8 +2523,7 @@ brw_lower_send_descriptors(brw_shader &s)
           (ex_desc_imm & INTEL_MASK(15, 12)) != 0)
          needs_addr_reg = true;
 
-      if (send->bindless_surface &&
-          s.compiler->extended_bindless_surface_offset) {
+      if (send->bindless_surface && intel_has_extended_bindless(devinfo)) {
          needs_addr_reg = true;
          /* When using the extended bindless offset, the whole extended
           * descriptor is the surface handle.

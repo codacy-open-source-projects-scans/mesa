@@ -1616,7 +1616,7 @@ brw_nir_optimize(brw_pass_tracker *pt)
 static unsigned
 lower_bit_size_callback(const nir_instr *instr, void *data)
 {
-   const struct brw_compiler *compiler = data;
+   const struct intel_device_info *devinfo = data;
 
    switch (instr->type) {
    case nir_instr_type_alu: {
@@ -1656,7 +1656,7 @@ lower_bit_size_callback(const nir_instr *instr, void *data)
           *
           * Older platforms have idiv instructions only for int32, so lower.
           */
-         return compiler->devinfo->verx10 >= 125 ? 0 : 32;
+         return devinfo->verx10 >= 125 ? 0 : 32;
       case nir_op_fceil:
       case nir_op_ffloor:
       case nir_op_ffract:
@@ -1866,7 +1866,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
           nir->options->lower_doubles_options);
    }
 
-   OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)compiler);
+   OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)devinfo);
 
    /* Lower a bunch of stuff */
    OPT(nir_lower_var_copies);
@@ -1897,8 +1897,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    };
    OPT(nir_lower_subgroups, &subgroups_options);
 
-   nir_variable_mode indirect_mask =
-      brw_nir_no_indirect_mask(compiler, nir->info.stage);
+   nir_variable_mode indirect_mask = brw_nir_no_indirect_mask(nir->info.stage);
    OPT(nir_lower_indirect_derefs_to_if_else_trees, indirect_mask, UINT32_MAX);
 
    /* Even in cases where we can handle indirect temporaries via scratch, we
@@ -1933,7 +1932,7 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
     * nir_lower_system_values above.
     */
    if (nir->info.stage == MESA_SHADER_TESS_CTRL &&
-       compiler->use_tcs_multi_patch)
+       intel_use_tcs_multi_patch(devinfo))
       OPT(intel_nir_clamp_per_vertex_loads);
 
    /* Get rid of split copies */
@@ -2422,7 +2421,7 @@ static void
 brw_vectorize_lower_mem_access(brw_pass_tracker *pt,
                                enum brw_robustness_flags robust_flags)
 {
-   const struct brw_compiler *compiler = pt->compiler;
+   const struct intel_device_info *devinfo = pt->compiler->devinfo;
 
    nir_load_store_vectorize_options options = {
       .modes = nir_var_mem_ubo | nir_var_mem_ssbo |
@@ -2449,7 +2448,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt,
     *   - fewer send messages
     *   - reduced register pressure
     */
-   if (OPT(intel_nir_blockify_uniform_loads, compiler->devinfo)) {
+   if (OPT(intel_nir_blockify_uniform_loads, devinfo)) {
       OPT(nir_opt_load_store_vectorize, &options);
 
       OPT(nir_opt_constant_folding);
@@ -2470,7 +2469,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt,
    }
 
    struct brw_mem_access_cb_data cb_data = {
-      .devinfo = compiler->devinfo,
+      .devinfo = devinfo,
    };
 
    nir_lower_mem_access_bit_sizes_options mem_access_options = {
@@ -2494,7 +2493,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt,
    /* Do this after the vectorization & brw_nir_rebase_const_offset_ubo_loads
     * so that we maximize the offset put into the messages.
     */
-   if (compiler->devinfo->ver >= 20) {
+   if (devinfo->ver >= 20) {
       OPT(brw_nir_ssbo_intel);
 
       const nir_opt_offsets_options offset_options = {
@@ -2720,7 +2719,7 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt,
 
    OPT(brw_nir_lower_texture);
 
-   OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)compiler);
+   OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)devinfo);
 
    OPT(nir_opt_combine_barriers, combine_all_memory_barriers, NULL);
 
@@ -2738,7 +2737,7 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt,
        * 8-bit integer math which needs to be lowered.
        */
       if (OPT(nir_lower_idiv, &options))
-         OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)compiler);
+         OPT(nir_lower_bit_size, lower_bit_size_callback, (void *)devinfo);
    }
 
    if (devinfo->ver >= 30)

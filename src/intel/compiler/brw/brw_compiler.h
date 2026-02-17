@@ -65,7 +65,6 @@ struct brw_compiler {
    void (*shader_debug_log)(void *, unsigned *id, const char *str, ...) PRINTFLIKE(3, 4);
    void (*shader_perf_log)(void *, unsigned *id, const char *str, ...) PRINTFLIKE(3, 4);
 
-   bool use_tcs_multi_patch;
    struct nir_shader_compiler_options nir_options[MESA_ALL_SHADER_STAGES];
 
    /**
@@ -73,29 +72,6 @@ struct brw_compiler {
     * This can negatively impact performance.
     */
    bool precise_trig;
-
-   /**
-    * Whether indirect UBO loads should use the sampler or go through the
-    * data/constant cache.  For the sampler, UBO surface states have to be set
-    * up with VK_FORMAT_R32G32B32A32_FLOAT whereas if it's going through the
-    * constant or data cache, UBOs must use VK_FORMAT_RAW.
-    */
-   bool indirect_ubos_use_sampler;
-
-   /**
-    * Gfx12.5+ has a bit in the SEND instruction extending the bindless
-    * surface offset range from 20 to 26 bits, effectively giving us 4Gb of
-    * bindless surface descriptors instead of 64Mb previously.
-    */
-   bool extended_bindless_surface_offset;
-
-   /**
-    * Gfx11+ has a bit in the dword 3 of the sampler message header that
-    * indicates whether the sampler handle is relative to the dynamic state
-    * base address (0) or the bindless sampler base address (1). The driver
-    * can select this.
-    */
-   bool use_bindless_sampler_offset;
 
    /**
     * Should DPAS instructions be lowered?
@@ -995,18 +971,6 @@ struct brw_bs_prog_data {
    uint32_t num_resume_shaders;
 };
 
-/**
- * Enum representing the i965-specific vertex results that don't correspond
- * exactly to any element of gl_varying_slot.  The values of this enum are
- * assigned such that they don't conflict with gl_varying_slot.
- */
-typedef enum
-{
-   BRW_VARYING_SLOT_PAD = VARYING_SLOT_MAX,
-   BRW_VARYING_SLOT_COUNT
-} brw_varying_slot;
-
-
 #define BRW_VUE_HEADER_VARYING_MASK \
    (VARYING_BIT_VIEWPORT | \
     VARYING_BIT_LAYER | \
@@ -1033,7 +997,7 @@ static inline unsigned brw_vue_slot_to_offset(unsigned slot)
 }
 
 /**
- * Convert a vertex output (brw_varying_slot) into a byte offset within the
+ * Convert a vertex output (gl_varying_slot) into a byte offset within the
  * VUE.
  */
 static inline unsigned
@@ -1622,11 +1586,6 @@ struct brw_compile_bs_params {
 const unsigned *
 brw_compile_bs(const struct brw_compiler *compiler,
                struct brw_compile_bs_params *params);
-
-void brw_debug_key_recompile(const struct brw_compiler *c, void *log,
-                             mesa_shader_stage stage,
-                             const struct brw_base_prog_key *old_key,
-                             const struct brw_base_prog_key *key);
 
 unsigned
 brw_cs_push_const_total_size(const struct brw_cs_prog_data *cs_prog_data,

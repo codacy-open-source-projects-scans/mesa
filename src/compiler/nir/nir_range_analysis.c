@@ -115,27 +115,27 @@ perform_analysis(struct analysis_state *state)
 }
 
 static bool
-is_not_negative(enum ssa_ranges r)
+is_not_negative(enum fp_ranges r)
 {
    return r == gt_zero || r == ge_zero || r == eq_zero;
 }
 
 static bool
-is_not_zero(enum ssa_ranges r)
+is_not_zero(enum fp_ranges r)
 {
    return r == gt_zero || r == lt_zero || r == ne_zero;
 }
 
 static uint32_t
-pack_data(const struct ssa_result_range r)
+pack_data(const struct fp_result_range r)
 {
    return r.range | r.is_integral << 8 | r.is_finite << 9 | r.is_a_number << 10;
 }
 
-static struct ssa_result_range
+static struct fp_result_range
 unpack_data(uint32_t v)
 {
-   return (struct ssa_result_range){
+   return (struct fp_result_range){
       .range = v & 0xff,
       .is_integral = (v & 0x00100) != 0,
       .is_finite = (v & 0x00200) != 0,
@@ -150,144 +150,58 @@ nir_alu_src_type(const nir_alu_instr *instr, unsigned src)
           nir_src_bit_size(instr->src[src].src);
 }
 
-static struct ssa_result_range
-analyze_constant(const struct nir_alu_instr *instr, unsigned src,
-                 nir_alu_type use_type)
+static struct fp_result_range
+analyze_fp_constant(const nir_load_const_instr *const load)
 {
-   uint8_t swizzle[NIR_MAX_VEC_COMPONENTS] = { 0, 1, 2, 3,
-                                               4, 5, 6, 7,
-                                               8, 9, 10, 11,
-                                               12, 13, 14, 15 };
+   struct fp_result_range r = { unknown, false, false, false };
 
-   /* If the source is an explicitly sized source, then we need to reset
-    * both the number of components and the swizzle.
-    */
-   const unsigned num_components = nir_ssa_alu_instr_src_components(instr, src);
+   double min_value = NAN;
+   double max_value = NAN;
+   bool any_zero = false;
+   bool all_zero = true;
 
-   for (unsigned i = 0; i < num_components; ++i)
-      swizzle[i] = instr->src[src].swizzle[i];
+   r.is_integral = true;
+   r.is_a_number = true;
+   r.is_finite = true;
 
-   const nir_load_const_instr *const load =
-      nir_def_as_load_const(instr->src[src].src.ssa);
+   for (unsigned i = 0; i < load->def.num_components; ++i) {
+      const double v = nir_const_value_as_float(load->value[i],
+                                                load->def.bit_size);
 
-   struct ssa_result_range r = { unknown, false, false, false };
+      if (floor(v) != v)
+         r.is_integral = false;
 
-   switch (nir_alu_type_get_base_type(use_type)) {
-   case nir_type_float: {
-      double min_value = NAN;
-      double max_value = NAN;
-      bool any_zero = false;
-      bool all_zero = true;
+      if (isnan(v))
+         r.is_a_number = false;
 
-      r.is_integral = true;
-      r.is_a_number = true;
-      r.is_finite = true;
+      if (!isfinite(v))
+         r.is_finite = false;
 
-      for (unsigned i = 0; i < num_components; ++i) {
-         const double v = nir_const_value_as_float(load->value[swizzle[i]],
-                                                   load->def.bit_size);
-
-         if (floor(v) != v)
-            r.is_integral = false;
-
-         if (isnan(v))
-            r.is_a_number = false;
-
-         if (!isfinite(v))
-            r.is_finite = false;
-
-         any_zero = any_zero || (v == 0.0);
-         all_zero = all_zero && (v == 0.0);
-         min_value = fmin(min_value, v);
-         max_value = fmax(max_value, v);
-      }
-
-      assert(any_zero >= all_zero);
-      assert(isnan(max_value) || max_value >= min_value);
-
-      if (all_zero)
-         r.range = eq_zero;
-      else if (min_value > 0.0)
-         r.range = gt_zero;
-      else if (min_value == 0.0)
-         r.range = ge_zero;
-      else if (max_value < 0.0)
-         r.range = lt_zero;
-      else if (max_value == 0.0)
-         r.range = le_zero;
-      else if (!any_zero)
-         r.range = ne_zero;
-      else
-         r.range = unknown;
-
-      return r;
+      any_zero = any_zero || (v == 0.0);
+      all_zero = all_zero && (v == 0.0);
+      min_value = fmin(min_value, v);
+      max_value = fmax(max_value, v);
    }
 
-   case nir_type_int:
-   case nir_type_bool: {
-      int64_t min_value = INT_MAX;
-      int64_t max_value = INT_MIN;
-      bool any_zero = false;
-      bool all_zero = true;
+   assert(any_zero >= all_zero);
+   assert(isnan(max_value) || max_value >= min_value);
 
-      for (unsigned i = 0; i < num_components; ++i) {
-         const int64_t v = nir_const_value_as_int(load->value[swizzle[i]],
-                                                  load->def.bit_size);
+   if (all_zero)
+      r.range = eq_zero;
+   else if (min_value > 0.0)
+      r.range = gt_zero;
+   else if (min_value == 0.0)
+      r.range = ge_zero;
+   else if (max_value < 0.0)
+      r.range = lt_zero;
+   else if (max_value == 0.0)
+      r.range = le_zero;
+   else if (!any_zero)
+      r.range = ne_zero;
+   else
+      r.range = unknown;
 
-         any_zero = any_zero || (v == 0);
-         all_zero = all_zero && (v == 0);
-         min_value = MIN2(min_value, v);
-         max_value = MAX2(max_value, v);
-      }
-
-      assert(any_zero >= all_zero);
-      assert(max_value >= min_value);
-
-      if (all_zero)
-         r.range = eq_zero;
-      else if (min_value > 0)
-         r.range = gt_zero;
-      else if (min_value == 0)
-         r.range = ge_zero;
-      else if (max_value < 0)
-         r.range = lt_zero;
-      else if (max_value == 0)
-         r.range = le_zero;
-      else if (!any_zero)
-         r.range = ne_zero;
-      else
-         r.range = unknown;
-
-      return r;
-   }
-
-   case nir_type_uint: {
-      bool any_zero = false;
-      bool all_zero = true;
-
-      for (unsigned i = 0; i < num_components; ++i) {
-         const uint64_t v = nir_const_value_as_uint(load->value[swizzle[i]],
-                                                    load->def.bit_size);
-
-         any_zero = any_zero || (v == 0);
-         all_zero = all_zero && (v == 0);
-      }
-
-      assert(any_zero >= all_zero);
-
-      if (all_zero)
-         r.range = eq_zero;
-      else if (any_zero)
-         r.range = ge_zero;
-      else
-         r.range = gt_zero;
-
-      return r;
-   }
-
-   default:
-      UNREACHABLE("Invalid alu source type");
-   }
+   return r;
 }
 
 /**
@@ -345,10 +259,10 @@ analyze_constant(const struct nir_alu_instr *instr, unsigned src,
 #define ASSERT_TABLE_IS_DIAGONAL(t)
 #endif /* !defined(NDEBUG) */
 
-static enum ssa_ranges
-union_ranges(enum ssa_ranges a, enum ssa_ranges b)
+static enum fp_ranges
+union_ranges(enum fp_ranges a, enum fp_ranges b)
 {
-   static const enum ssa_ranges union_table[last_range + 1][last_range + 1] = {
+   static const enum fp_ranges union_table[last_range + 1][last_range + 1] = {
       /* left\right   unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
       /* unknown */ { _______, _______, _______, _______, _______, _______, _______ },
       /* lt_zero */ { _______, lt_zero, le_zero, ne_zero, _______, ne_zero, le_zero },
@@ -376,8 +290,8 @@ union_ranges(enum ssa_ranges a, enum ssa_ranges b)
          first = false;                                                         \
          pragma_unroll_7 for (unsigned i = 0; i < last_range; i++)              \
          {                                                                      \
-            enum ssa_ranges col_range = t[i][unknown + 1];                      \
-            enum ssa_ranges row_range = t[unknown + 1][i];                      \
+            enum fp_ranges col_range = t[i][unknown + 1];                       \
+            enum fp_ranges row_range = t[unknown + 1][i];                       \
                                                                                 \
             pragma_unroll_5 for (unsigned j = unknown + 2; j < last_range; j++) \
             {                                                                   \
@@ -472,62 +386,29 @@ union_ranges(enum ssa_ranges a, enum ssa_ranges b)
 
 struct fp_query {
    struct analysis_query head;
-   const nir_alu_instr *instr;
-   unsigned src;
-   nir_alu_type use_type;
+   const nir_def *def;
 };
 
 static void
-push_fp_query(struct analysis_state *state, const nir_alu_instr *alu, unsigned src, nir_alu_type type)
+push_fp_query(struct analysis_state *state, const nir_def *def)
 {
    struct fp_query *pushed_q = push_analysis_query(state, sizeof(struct fp_query));
-   pushed_q->instr = alu;
-   pushed_q->src = src;
-   pushed_q->use_type = type == nir_type_invalid ? nir_alu_src_type(alu, src) : type;
+   pushed_q->def = def;
 }
 
 static uintptr_t
 get_fp_key(struct analysis_query *q)
 {
    struct fp_query *fp_q = (struct fp_query *)q;
-   const nir_src *src = &fp_q->instr->src[fp_q->src].src;
 
-   if (!nir_def_is_alu(src->ssa))
+   if (!nir_def_is_alu(fp_q->def))
       return 0;
 
-   uintptr_t type_encoding;
-   uintptr_t ptr = (uintptr_t) nir_def_as_alu(src->ssa);
-
-   /* The low 2 bits have to be zero or this whole scheme falls apart. */
-   assert((ptr & 0x3) == 0);
-
-   /* NIR is typeless in the sense that sequences of bits have whatever
-    * meaning is attached to them by the instruction that consumes them.
-    * However, the number of bits must match between producer and consumer.
-    * As a result, the number of bits does not need to be encoded here.
-    */
-   switch (nir_alu_type_get_base_type(fp_q->use_type)) {
-   case nir_type_int:
-      type_encoding = 0;
-      break;
-   case nir_type_uint:
-      type_encoding = 1;
-      break;
-   case nir_type_bool:
-      type_encoding = 2;
-      break;
-   case nir_type_float:
-      type_encoding = 3;
-      break;
-   default:
-      UNREACHABLE("Invalid base type.");
-   }
-
-   return ptr | type_encoding;
+   return (uintptr_t)fp_q->def;
 }
 
 static inline bool
-fmul_is_a_number(const struct ssa_result_range left, const struct ssa_result_range right, bool mulz)
+fmul_is_a_number(const struct fp_result_range left, const struct fp_result_range right, bool mulz)
 {
    if (mulz) {
       /* nir_op_fmulz: unlike nir_op_fmul, 0 * ±Inf is a number. */
@@ -545,7 +426,7 @@ fmul_is_a_number(const struct ssa_result_range left, const struct ssa_result_ran
 }
 
 static inline bool
-fadd_is_a_number(const struct ssa_result_range left, const struct ssa_result_range right)
+fadd_is_a_number(const struct fp_result_range left, const struct fp_result_range right)
 {
    /* X + Y is NaN if either operand is NaN or if one operand is +Inf and
     * the other is -Inf.  If neither operand is NaN and at least one of the
@@ -553,7 +434,7 @@ fadd_is_a_number(const struct ssa_result_range left, const struct ssa_result_ran
     * If the combined range doesn't contain both postive and negative values
     * (including Infs) then the result cannot be NaN either.
     */
-   enum ssa_ranges combined_range = union_ranges(left.range, right.range);
+   enum fp_ranges combined_range = union_ranges(left.range, right.range);
    return left.is_a_number && right.is_a_number &&
           (left.is_finite || right.is_finite ||
            combined_range == eq_zero ||
@@ -580,57 +461,27 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    STATIC_ASSERT(last_range + 1 == 7);
 
    struct fp_query q = *(struct fp_query *)aq;
-   const nir_alu_instr *instr = q.instr;
-   unsigned src = q.src;
-   nir_alu_type use_type = q.use_type;
+   const nir_def *def = q.def;
 
-   if (nir_src_is_const(instr->src[src].src)) {
-      *result = pack_data(analyze_constant(instr, src, use_type));
+   if (nir_def_is_const(def)) {
+      *result = pack_data(analyze_fp_constant(nir_def_as_load_const(def)));
       return;
    }
 
-   if (!nir_src_is_alu(instr->src[src].src)) {
-      *result = pack_data((struct ssa_result_range){ unknown, false, false, false });
+   if (!nir_def_is_alu(def)) {
+      *result = pack_data((struct fp_result_range){ unknown, false, false, false });
       return;
    }
 
-   const struct nir_alu_instr *const alu =
-      nir_def_as_alu(instr->src[src].src.ssa);
-
-   /* Bail if the type of the instruction generating the value does not match
-    * the type the value will be interpreted as.  int/uint/bool can be
-    * reinterpreted trivially.  The most important cases are between float and
-    * non-float.
-    */
-   if (alu->op != nir_op_mov && alu->op != nir_op_bcsel && alu->op != nir_op_vec2) {
-      const nir_alu_type use_base_type =
-         nir_alu_type_get_base_type(use_type);
-      const nir_alu_type src_base_type =
-         nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type);
-
-      if (use_base_type != src_base_type &&
-          (use_base_type == nir_type_float ||
-           src_base_type == nir_type_float)) {
-         *result = pack_data((struct ssa_result_range){ unknown, false, false, false });
-         return;
-      }
-   }
+   const nir_alu_instr *const alu = nir_def_as_alu(def);
 
    if (!aq->pushed_queries) {
       switch (alu->op) {
       case nir_op_bcsel:
-         push_fp_query(state, alu, 1, use_type);
-         push_fp_query(state, alu, 2, use_type);
+         push_fp_query(state, alu->src[1].src.ssa);
+         push_fp_query(state, alu->src[2].src.ssa);
          return;
       case nir_op_mov:
-         push_fp_query(state, alu, 0, use_type);
-         return;
-      case nir_op_vec2:
-         push_fp_query(state, alu, 0, use_type);
-         push_fp_query(state, alu, 1, use_type);
-         return;
-      case nir_op_i2f32:
-      case nir_op_u2f32:
       case nir_op_fabs:
       case nir_op_fexp2:
       case nir_op_frcp:
@@ -658,7 +509,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       case nir_op_fdot4_replicated:
       case nir_op_fdot8_replicated:
       case nir_op_fdot16_replicated:
-         push_fp_query(state, alu, 0, nir_type_invalid);
+         push_fp_query(state, alu->src[0].src.ssa);
          return;
       case nir_op_fadd:
       case nir_op_fmax:
@@ -666,22 +517,23 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       case nir_op_fmul:
       case nir_op_fmulz:
       case nir_op_fpow:
-         push_fp_query(state, alu, 0, nir_type_invalid);
-         push_fp_query(state, alu, 1, nir_type_invalid);
+      case nir_op_vec2:
+         push_fp_query(state, alu->src[0].src.ssa);
+         push_fp_query(state, alu->src[1].src.ssa);
          return;
       case nir_op_ffma:
       case nir_op_ffmaz:
       case nir_op_flrp:
-         push_fp_query(state, alu, 0, nir_type_invalid);
-         push_fp_query(state, alu, 1, nir_type_invalid);
-         push_fp_query(state, alu, 2, nir_type_invalid);
+         push_fp_query(state, alu->src[0].src.ssa);
+         push_fp_query(state, alu->src[1].src.ssa);
+         push_fp_query(state, alu->src[2].src.ssa);
          return;
       default:
          break;
       }
    }
 
-   struct ssa_result_range r = { unknown, false, false, false };
+   struct fp_result_range r = { unknown, false, false, false };
 
    /* ge_zero: ge_zero + ge_zero
     *
@@ -711,7 +563,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
     * All other cases are 'unknown'.  The seeming odd entry is (ne_zero,
     * ne_zero), but that could be (-5, +5) which is not ne_zero.
     */
-   static const enum ssa_ranges fadd_table[last_range + 1][last_range + 1] = {
+   static const enum fp_ranges fadd_table[last_range + 1][last_range + 1] = {
       /* left\right   unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
       /* unknown */ { _______, _______, _______, _______, _______, _______, _______ },
       /* lt_zero */ { _______, lt_zero, lt_zero, _______, _______, _______, lt_zero },
@@ -757,7 +609,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
     *
     * All other cases are 'unknown'.
     */
-   static const enum ssa_ranges fmul_table[last_range + 1][last_range + 1] = {
+   static const enum fp_ranges fmul_table[last_range + 1][last_range + 1] = {
       /* left\right   unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
       /* unknown */ { _______, _______, _______, _______, _______, _______, eq_zero },
       /* lt_zero */ { _______, ge_zero, ge_zero, le_zero, le_zero, _______, eq_zero },
@@ -772,7 +624,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    ASSERT_UNION_OF_DISJOINT_MATCHES_UNKNOWN_2_SOURCE(fmul_table);
    ASSERT_UNION_OF_EQ_AND_STRICT_INEQ_MATCHES_NONSTRICT_2_SOURCE(fmul_table);
 
-   static const enum ssa_ranges fneg_table[last_range + 1] = {
+   static const enum fp_ranges fneg_table[last_range + 1] = {
       /* unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
       _______, gt_zero, ge_zero, lt_zero, le_zero, ne_zero, eq_zero
    };
@@ -790,12 +642,12 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
        * 1.401298464324817e-45.  The latter is subnormal, but it is finite and
        * a number.
        */
-      r = (struct ssa_result_range){ ge_zero, alu->op == nir_op_b2f32, true, true };
+      r = (struct fp_result_range){ ge_zero, alu->op == nir_op_b2f32, true, true };
       break;
 
    case nir_op_bcsel: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       r.is_integral = left.is_integral && right.is_integral;
 
@@ -820,13 +672,11 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
 
    case nir_op_i2f32:
    case nir_op_u2f32:
-      r = unpack_data(src_res[0]);
-
       r.is_integral = true;
       r.is_a_number = true;
       r.is_finite = true;
 
-      if (r.range == unknown && alu->op == nir_op_u2f32)
+      if (alu->op == nir_op_u2f32)
          r.range = ge_zero;
 
       break;
@@ -880,8 +730,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
 
    case nir_op_fadd: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       r.is_integral = left.is_integral && right.is_integral;
       r.range = fadd_table[left.range][right.range];
@@ -894,7 +744,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
        * will be on (0, 1).  For sufficiently large magnitude negative
        * parameters, the result will flush to zero.
        */
-      static const enum ssa_ranges table[last_range + 1] = {
+      static const enum fp_ranges table[last_range + 1] = {
          /* unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
          ge_zero, ge_zero, ge_zero, gt_zero, gt_zero, ge_zero, gt_zero
       };
@@ -914,8 +764,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_fmax: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       r.is_integral = left.is_integral && right.is_integral;
 
@@ -966,7 +816,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
        *
        * All other cases are 'unknown'.
        */
-      static const enum ssa_ranges table[last_range + 1][last_range + 1] = {
+      static const enum fp_ranges table[last_range + 1][last_range + 1] = {
          /* left\right   unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
          /* unknown */ { _______, _______, _______, gt_zero, ge_zero, _______, ge_zero },
          /* lt_zero */ { _______, lt_zero, le_zero, gt_zero, ge_zero, ne_zero, eq_zero },
@@ -998,8 +848,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_fmin: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       r.is_integral = left.is_integral && right.is_integral;
 
@@ -1050,7 +900,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
        *
        * All other cases are 'unknown'.
        */
-      static const enum ssa_ranges table[last_range + 1][last_range + 1] = {
+      static const enum fp_ranges table[last_range + 1][last_range + 1] = {
          /* left\right   unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
          /* unknown */ { _______, lt_zero, le_zero, _______, _______, _______, le_zero },
          /* lt_zero */ { lt_zero, lt_zero, lt_zero, lt_zero, lt_zero, lt_zero, lt_zero },
@@ -1083,8 +933,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
 
    case nir_op_fmul:
    case nir_op_fmulz: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       r.is_integral = left.is_integral && right.is_integral;
 
@@ -1107,7 +957,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_frcp: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       /* Only rcp(NaN) is NaN. */
       r.is_a_number = left.is_a_number;
@@ -1131,8 +981,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
 
    case nir_op_vec2: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       r.range = union_ranges(left.range, right.range);
       r.is_integral = left.is_integral && right.is_integral;
@@ -1147,7 +997,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
 
    case nir_op_fsat: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       /* fsat(NaN) = 0. */
       r.is_a_number = true;
@@ -1181,7 +1031,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_fsign:
-      r = (struct ssa_result_range){
+      r = (struct fp_result_range){
          unpack_data(src_res[0]).range,
          true,
          true, /* fsign is -1, 0, or 1, even for NaN, so it must be a number. */
@@ -1190,7 +1040,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
 
    case nir_op_fsqrt: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       /* sqrt(NaN) and sqrt(< 0) is NaN. */
       if (left.range == eq_zero || left.range == ge_zero || left.range == gt_zero) {
@@ -1208,7 +1058,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_frsq: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       /* rsq(NaN) and rsq(< 0) is NaN. */
       if (left.range == eq_zero || left.range == ge_zero || left.range == gt_zero)
@@ -1227,7 +1077,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_ffloor: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       r.is_integral = true;
 
@@ -1248,7 +1098,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_fceil: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       r.is_integral = true;
 
@@ -1269,7 +1119,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_ftrunc: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       r.is_integral = true;
 
@@ -1292,7 +1142,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_ffract: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       /* fract(±Inf) is NaN */
       r.is_a_number = left.is_a_number && left.is_finite;
@@ -1307,20 +1157,6 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       break;
    }
 
-   case nir_op_flt:
-   case nir_op_fge:
-   case nir_op_feq:
-   case nir_op_fneu:
-   case nir_op_ilt:
-   case nir_op_ige:
-   case nir_op_ieq:
-   case nir_op_ine:
-   case nir_op_ult:
-   case nir_op_uge:
-      /* Boolean results are 0 or -1. */
-      r = (struct ssa_result_range){ le_zero, false, true, false };
-      break;
-
    case nir_op_fdot2:
    case nir_op_fdot3:
    case nir_op_fdot4:
@@ -1331,7 +1167,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    case nir_op_fdot4_replicated:
    case nir_op_fdot8_replicated:
    case nir_op_fdot16_replicated: {
-      const struct ssa_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
 
       /* If the two sources are the same SSA value, then the result is either
        * NaN or some number >= 0.  If one source is the negation of the other,
@@ -1342,11 +1178,11 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
        * Inf-Inf in the dot-product, the result must also be a number.
        */
       if (nir_alu_srcs_equal(alu, alu, 0, 1)) {
-         r = (struct ssa_result_range){ ge_zero, false, left.is_a_number, false };
+         r = (struct fp_result_range){ ge_zero, false, left.is_a_number, false };
       } else if (nir_alu_srcs_negative_equal(alu, alu, 0, 1)) {
-         r = (struct ssa_result_range){ le_zero, false, left.is_a_number, false };
+         r = (struct fp_result_range){ le_zero, false, left.is_a_number, false };
       } else {
-         r = (struct ssa_result_range){ unknown, false, false, false };
+         r = (struct fp_result_range){ unknown, false, false, false };
       }
       break;
    }
@@ -1391,7 +1227,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
        * We could do better if the right operand is a constant, integral
        * value.
        */
-      static const enum ssa_ranges table[last_range + 1][last_range + 1] = {
+      static const enum fp_ranges table[last_range + 1][last_range + 1] = {
          /* left\right   unknown  lt_zero  le_zero  gt_zero  ge_zero  ne_zero  eq_zero */
          /* unknown */ { _______, _______, _______, _______, _______, _______, gt_zero },
          /* lt_zero */ { _______, _______, _______, _______, _______, _______, gt_zero },
@@ -1402,8 +1238,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
          /* eq_zero */ { ge_zero, gt_zero, gt_zero, eq_zero, ge_zero, ge_zero, gt_zero },
       };
 
-      const struct ssa_result_range left = unpack_data(src_res[0]);
-      const struct ssa_result_range right = unpack_data(src_res[1]);
+      const struct fp_result_range left = unpack_data(src_res[0]);
+      const struct fp_result_range right = unpack_data(src_res[1]);
 
       ASSERT_UNION_OF_DISJOINT_MATCHES_UNKNOWN_2_SOURCE(table);
       ASSERT_UNION_OF_EQ_AND_STRICT_INEQ_MATCHES_NONSTRICT_2_SOURCE(table);
@@ -1420,11 +1256,11 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
 
    case nir_op_ffma:
    case nir_op_ffmaz: {
-      const struct ssa_result_range first = unpack_data(src_res[0]);
-      const struct ssa_result_range second = unpack_data(src_res[1]);
-      const struct ssa_result_range third = unpack_data(src_res[2]);
+      const struct fp_result_range first = unpack_data(src_res[0]);
+      const struct fp_result_range second = unpack_data(src_res[1]);
+      const struct fp_result_range third = unpack_data(src_res[2]);
 
-      struct ssa_result_range fmul_result;
+      struct fp_result_range fmul_result;
       fmul_result.is_integral = first.is_integral && second.is_integral;
       fmul_result.is_finite = false;
       fmul_result.is_a_number = fmul_is_a_number(first, third, alu->op == nir_op_ffmaz);
@@ -1447,9 +1283,9 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    case nir_op_flrp: {
-      const struct ssa_result_range first = unpack_data(src_res[0]);
-      const struct ssa_result_range second = unpack_data(src_res[1]);
-      const struct ssa_result_range third = unpack_data(src_res[2]);
+      const struct fp_result_range first = unpack_data(src_res[0]);
+      const struct fp_result_range second = unpack_data(src_res[1]);
+      const struct fp_result_range third = unpack_data(src_res[2]);
 
       r.is_integral = first.is_integral && second.is_integral &&
                       third.is_integral;
@@ -1458,10 +1294,10 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
       r.is_a_number = false;
 
       /* Decompose the flrp to first + third * (second + -first) */
-      const enum ssa_ranges inner_fadd_range =
+      const enum fp_ranges inner_fadd_range =
          fadd_table[second.range][fneg_table[first.range]];
 
-      const enum ssa_ranges fmul_range =
+      const enum fp_ranges fmul_range =
          fmul_table[third.range][inner_fadd_range];
 
       r.range = fadd_table[first.range][fmul_range];
@@ -1469,7 +1305,7 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
    }
 
    default:
-      r = (struct ssa_result_range){ unknown, false, false, false };
+      r = (struct fp_result_range){ unknown, false, false, false };
       break;
    }
 
@@ -1484,9 +1320,8 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
 
 #undef _______
 
-struct ssa_result_range
-nir_analyze_range(struct hash_table *range_ht,
-                  const nir_alu_instr *alu, unsigned src)
+struct fp_result_range
+nir_analyze_fp_range(struct hash_table *range_ht, const nir_def *def)
 {
    struct fp_query query_alloc[64];
    uint32_t result_alloc[64];
@@ -1499,7 +1334,7 @@ nir_analyze_range(struct hash_table *range_ht,
    state.get_key = &get_fp_key;
    state.process_query = &process_fp_query;
 
-   push_fp_query(&state, alu, src, nir_type_invalid);
+   push_fp_query(&state, def);
 
    return unpack_data(perform_analysis(&state));
 }
