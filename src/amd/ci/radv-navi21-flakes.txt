@@ -91,3 +91,5 @@ dEQP-VK.synchronization2.op.multi_queue.fence.write_copy_buffer_read_ssbo_comput
 dEQP-VK.texture.mipmap.cubemap.bias.linear_linear_nearest_clamp
 dEQP-VK.texture.shadow.cube_array.linear_mipmap_nearest.non_seamless_less_or_equal_d32_sfloat_s8_uint
 dEQP-VK.ycbcr.conversion.g8_b8r8_2plane_444_unorm.sampler_array.nearest_tiling_linear_binding_7
+
+dEQP-VK.wsi.direct_drm.*

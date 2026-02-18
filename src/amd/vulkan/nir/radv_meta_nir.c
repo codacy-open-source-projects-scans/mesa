@@ -588,13 +588,13 @@ radv_meta_nir_build_btoi_compute_shader(struct radv_device *dev, bool is_3d)
    return b.shader;
 }
 
-/** Buffer to image - special path for R32G32B32 */
+/** Buffer to image - special path for 96bit */
 nir_shader *
-radv_meta_nir_build_btoi_r32g32b32_compute_shader(struct radv_device *dev)
+radv_meta_nir_build_btoi_96bit_compute_shader(struct radv_device *dev)
 {
    const struct glsl_type *buf_type = glsl_sampler_type(GLSL_SAMPLER_DIM_BUF, false, false, GLSL_TYPE_FLOAT);
    const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_BUF, false, GLSL_TYPE_FLOAT);
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_btoi_r32g32b32_cs");
+   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_btoi_96bit_cs");
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
    nir_variable *input_img = nir_variable_create(b.shader, nir_var_uniform, buf_type, "s_tex");
@@ -608,18 +608,18 @@ radv_meta_nir_build_btoi_r32g32b32_compute_shader(struct radv_device *dev)
    nir_def *global_id = radv_meta_nir_get_global_ids(&b, 2);
 
    nir_def *offset = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8);
-   nir_def *pitch = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 8), .range = 12);
-   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 12), .range = 16);
+   nir_def *stride = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 8), .range = 12);
+   nir_def *pitch = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 12), .range = 16);
 
    nir_def *pos_x = nir_channel(&b, global_id, 0);
    nir_def *pos_y = nir_channel(&b, global_id, 1);
 
-   nir_def *buf_coord = nir_imul(&b, pos_y, stride);
+   nir_def *buf_coord = nir_imul(&b, pos_y, pitch);
    buf_coord = nir_iadd(&b, buf_coord, pos_x);
 
    nir_def *img_coord = nir_iadd(&b, global_id, offset);
 
-   nir_def *global_pos = nir_iadd(&b, nir_imul(&b, nir_channel(&b, img_coord, 1), pitch),
+   nir_def *global_pos = nir_iadd(&b, nir_imul(&b, nir_channel(&b, img_coord, 1), stride),
                                   nir_imul_imm(&b, nir_channel(&b, img_coord, 0), 3));
 
    nir_def *outval = nir_txf(&b, buf_coord, .texture_deref = nir_build_deref_var(&b, input_img));
@@ -692,11 +692,11 @@ radv_meta_nir_build_itoi_compute_shader(struct radv_device *dev, bool src_3d, bo
 }
 
 nir_shader *
-radv_meta_nir_build_itoi_r32g32b32_compute_shader(struct radv_device *dev)
+radv_meta_nir_build_itoi_96bit_compute_shader(struct radv_device *dev)
 {
    const struct glsl_type *type = glsl_sampler_type(GLSL_SAMPLER_DIM_BUF, false, false, GLSL_TYPE_FLOAT);
    const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_BUF, false, GLSL_TYPE_FLOAT);
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_itoi_r32g32b32_cs");
+   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_itoi_96bit_cs");
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
    nir_variable *input_img = nir_variable_create(b.shader, nir_var_uniform, type, "input_img");
@@ -778,12 +778,12 @@ radv_meta_nir_build_cleari_compute_shader(struct radv_device *dev, bool is_3d, i
    return b.shader;
 }
 
-/** Special path for clearing R32G32B32 images using a compute shader. */
+/** Special path for clearing 96bit images using a compute shader. */
 nir_shader *
-radv_meta_nir_build_cleari_r32g32b32_compute_shader(struct radv_device *dev)
+radv_meta_nir_build_cleari_96bit_compute_shader(struct radv_device *dev)
 {
    const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_BUF, false, GLSL_TYPE_FLOAT);
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_cleari_r32g32b32_cs");
+   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_cleari_96bit_cs");
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
 
