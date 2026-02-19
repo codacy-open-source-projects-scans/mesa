@@ -164,7 +164,7 @@ emit_resolve(struct radv_cmd_buffer *cmd_buffer, const struct radv_image *src_im
                                    radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                                          VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT, 0, src_image, NULL);
 
-   radv_CmdBindPipeline(cmd_buffer_h, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   radv_meta_bind_graphics_pipeline(cmd_buffer, pipeline);
 
    radv_CmdDraw(cmd_buffer_h, 3, 1, 0, 0);
    cmd_buffer->state.flush_bits |= radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
@@ -233,9 +233,6 @@ radv_meta_resolve_hardware_image(struct radv_cmd_buffer *cmd_buffer, struct radv
                                  VkImageLayout dst_image_layout, const VkImageResolve2 *region)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
-
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_GRAPHICS_PIPELINE);
 
    assert(src_image->vk.samples > 1);
    assert(dst_image->vk.samples == 1);
@@ -285,15 +282,8 @@ radv_meta_resolve_hardware_image(struct radv_cmd_buffer *cmd_buffer, struct radv
       .extent = {extent.width, extent.height},
    };
 
-   radv_CmdSetViewport(radv_cmd_buffer_to_handle(cmd_buffer), 0, 1,
-                       &(VkViewport){.x = resolve_area.offset.x,
-                                     .y = resolve_area.offset.y,
-                                     .width = resolve_area.extent.width,
-                                     .height = resolve_area.extent.height,
-                                     .minDepth = 0.0f,
-                                     .maxDepth = 1.0f});
-
-   radv_CmdSetScissor(radv_cmd_buffer_to_handle(cmd_buffer), 0, 1, &resolve_area);
+   radv_meta_set_viewport_and_scissor(cmd_buffer, resolve_area.offset.x, resolve_area.offset.y,
+                                      resolve_area.extent.width, resolve_area.extent.height);
 
    const VkImageViewUsageCreateInfo src_iview_usage_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
@@ -383,8 +373,6 @@ radv_meta_resolve_hardware_image(struct radv_cmd_buffer *cmd_buffer, struct radv
 
    radv_image_view_finish(&src_iview);
    radv_image_view_finish(&dst_iview);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }
 
 /**
@@ -523,6 +511,8 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
+   radv_meta_begin(cmd_buffer);
+
    /* we can use the hw resolve only for single full resolves */
    if (pResolveImageInfo->regionCount == 1) {
       if (pResolveImageInfo->pRegions[0].srcOffset.x || pResolveImageInfo->pRegions[0].srcOffset.y ||
@@ -548,6 +538,8 @@ radv_CmdResolveImage2(VkCommandBuffer commandBuffer, const VkResolveImageInfo2 *
       resolve_image(cmd_buffer, src_image, src_image_layout, dst_image, dst_image_layout, region, resolve_mode_info,
                     resolve_method);
    }
+
+   radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
 }
@@ -579,6 +571,8 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
       return;
 
    radv_describe_begin_render_pass_resolve(cmd_buffer);
+
+   radv_meta_begin(cmd_buffer);
 
    /* Resolves happen before the end-of-subpass barriers get executed, so we have to make the
     * attachment shader-readable.
@@ -792,6 +786,8 @@ radv_cmd_buffer_resolve_rendering(struct radv_cmd_buffer *cmd_buffer, const VkRe
          }
       }
    }
+
+   radv_meta_end(cmd_buffer);
 
    radv_describe_end_render_pass_resolve(cmd_buffer);
 }

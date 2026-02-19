@@ -162,22 +162,13 @@ emit_resolve(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_ivi
                                                              },
                                                           }}});
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    unsigned push_constants[5] = {
       src_offset->x, src_offset->y, dst_offset->x, dst_offset->y, dst_offset->z,
    };
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(push_constants),
-      .pValues = push_constants,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants), push_constants);
 
    radv_unaligned_dispatch(cmd_buffer, resolve_extent->width, resolve_extent->height, resolve_extent->depth);
 }
@@ -316,13 +307,9 @@ radv_meta_resolve_compute_image(struct radv_cmd_buffer *cmd_buffer, struct radv_
                                 VkImageLayout dst_image_layout, const VkImageResolve2 *region)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
 
    radv_fixup_resolve_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
                                    &region->extent, true);
-
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS);
 
    assert(region->srcSubresource.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT);
    assert(region->dstSubresource.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT);
@@ -395,8 +382,6 @@ radv_meta_resolve_compute_image(struct radv_cmd_buffer *cmd_buffer, struct radv_
    radv_image_view_finish(&src_iview);
    radv_image_view_finish(&dst_iview);
 
-   radv_meta_restore(&saved_state, cmd_buffer);
-
    radv_fixup_resolve_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
                                    &region->extent, false);
 }
@@ -408,7 +393,6 @@ radv_meta_resolve_depth_stencil_cs(struct radv_cmd_buffer *cmd_buffer, struct ra
                                    VkResolveModeFlagBits resolve_mode, const VkImageResolve2 *region)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
    VkPipelineLayout layout;
    VkPipeline pipeline;
    VkResult result;
@@ -422,9 +406,6 @@ radv_meta_resolve_depth_stencil_cs(struct radv_cmd_buffer *cmd_buffer, struct ra
 
    radv_fixup_resolve_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
                                    &region->extent, true);
-
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_CONSTANTS);
 
    const VkImageViewUsageCreateInfo src_iview_usage_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
@@ -504,27 +485,16 @@ radv_meta_resolve_depth_stencil_cs(struct radv_cmd_buffer *cmd_buffer, struct ra
                                  },
                               });
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    const uint32_t push_constants[2] = {region->srcOffset.x, region->srcOffset.y};
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(push_constants),
-      .pValues = push_constants,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push_constants), push_constants);
 
    radv_unaligned_dispatch(cmd_buffer, region->extent.width, region->extent.height, layer_count);
 
    radv_image_view_finish(&src_iview);
    radv_image_view_finish(&dst_iview);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 
    radv_fixup_resolve_dst_metadata(cmd_buffer, dst_image, dst_image_layout, &region->dstSubresource, &region->dstOffset,
                                    &region->extent, false);

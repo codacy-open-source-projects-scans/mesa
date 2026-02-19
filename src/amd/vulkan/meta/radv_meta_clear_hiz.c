@@ -93,7 +93,6 @@ radv_clear_hiz(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, con
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const struct radeon_surf *surf = &image->planes[0].surface;
-   struct radv_meta_saved_state saved_state;
    struct radv_image_view iview;
    VkPipelineLayout layout;
    VkPipeline pipeline;
@@ -108,10 +107,7 @@ radv_clear_hiz(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, con
       return 0;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_CONSTANTS);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    const uint32_t base_width = surf->u.gfx9.zs.hiz.width_in_tiles;
    const uint32_t base_height = surf->u.gfx9.zs.hiz.height_in_tiles;
@@ -156,24 +152,13 @@ radv_clear_hiz(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image, con
                                        },
                                     });
 
-         const VkPushConstantsInfo pc_info = {
-            .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-            .layout = layout,
-            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-            .offset = 0,
-            .size = sizeof(value),
-            .pValues = &value,
-         };
-
-         radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+         radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(value), &value);
 
          radv_unaligned_dispatch(cmd_buffer, width, height, 1);
 
          radv_image_view_finish(&iview);
       }
    }
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 
    return RADV_CMD_FLAG_CS_PARTIAL_FLUSH | radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                                                                  VK_ACCESS_2_SHADER_WRITE_BIT, 0, image, range);

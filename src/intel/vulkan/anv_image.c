@@ -644,31 +644,24 @@ add_aux_state_tracking_buffer(struct anv_device *device,
       }
    }
 
-   enum anv_image_memory_binding binding =
-      ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
-
    const struct isl_drm_modifier_info *mod_info =
       isl_drm_modifier_get_info(image->vk.drm_format_mod);
 
-   /* If an auxiliary surface is used for an externally-shareable image,
-    * we have to hide this from the memory of the image since other
-    * processes with access to the memory may not be aware of it or of
-    * its current state. So put that auxiliary data into a separate
-    * buffer (ANV_IMAGE_MEMORY_BINDING_PRIVATE).
+   /* If the image is created with a drm modifier that supports clear color,
+    * it will be exported along with main surface. Otherwise, place the
+    * aux-tracking state in a separate, suballocated buffer to achieve better
+    * memory utilization.
     *
-    * But when the image is created with a drm modifier that supports
-    * clear color, it will be exported along with main surface.
-    */
-   if (anv_image_is_externally_shared(image) &&
-       !mod_info->supports_clear_color)
-      binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
-
-   /* The indirect clear color BO requires 64B-alignment on gfx11+. If we're
+    * The indirect clear color BO requires 64B-alignment on gfx11+. If we're
     * using a modifier with clear color, then some kernels might require a 4k
     * alignment.
     */
-   const uint32_t clear_color_alignment =
-      (mod_info && mod_info->supports_clear_color) ? 4096 : 64;
+   enum anv_image_memory_binding binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
+   uint32_t clear_color_alignment = 64;
+   if (mod_info && mod_info->supports_clear_color) {
+      binding = ANV_IMAGE_MEMORY_BINDING_PLANE_0 + plane;
+      clear_color_alignment = 4096;
+   }
 
    return image_binding_grow(device, image, binding,
                              state_offset, state_size, clear_color_alignment,
@@ -1146,20 +1139,16 @@ check_memory_bindings(const struct anv_device *device,
       /* Check fast clear state */
       if (plane->fast_clear_memory_range.size > 0) {
          enum anv_image_memory_binding binding = primary_binding;
+         const struct isl_drm_modifier_info *mod_info =
+            isl_drm_modifier_get_info(image->vk.drm_format_mod);
 
-         /* If an auxiliary surface is used for an externally-shareable image,
-          * we have to hide this from the memory of the image since other
-          * processes with access to the memory may not be aware of it or of
-          * its current state. So put that auxiliary data into a separate
-          * buffer (ANV_IMAGE_MEMORY_BINDING_PRIVATE).
-          *
-          * But when the image is created with a drm modifier that supports
-          * clear color, it will be exported along with main surface.
+         /* If the image is created with a drm modifier that supports clear
+          * color, it will be exported along with main surface. Otherwise,
+          * place the aux-tracking state in a separate, suballocated buffer
+          * to achieve better memory utilization.
           */
-         if (anv_image_is_externally_shared(image)
-             && !isl_drm_modifier_get_info(image->vk.drm_format_mod)->supports_clear_color) {
+         if (!mod_info || !mod_info->supports_clear_color)
             binding = ANV_IMAGE_MEMORY_BINDING_PRIVATE;
-         }
 
          /* The indirect clear color BO requires 64B-alignment on gfx11+. */
          assert(plane->fast_clear_memory_range.alignment % 64 == 0);

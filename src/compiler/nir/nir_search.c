@@ -374,12 +374,10 @@ match_expression(const nir_algebraic_table *table, const nir_search_expression *
        instr->def.bit_size != expr->value.bit_size)
       return false;
 
-   unsigned fp_math_ctrl = instr->fp_math_ctrl & ~(expr->ignore_exact ? nir_fp_exact : 0);
-
-   if (expr->fp_math_ctrl_exclude & fp_math_ctrl)
+   if (expr->fp_math_ctrl_exclude & instr->fp_math_ctrl)
       return false;
 
-   state->fp_math_ctrl |= fp_math_ctrl;
+   state->fp_math_ctrl |= instr->fp_math_ctrl;
 
    assert(nir_op_infos[instr->op].num_inputs > 0);
 
@@ -467,8 +465,7 @@ construct_value(nir_builder *build,
        * expression we are replacing has any exact values, the entire
        * replacement should be exact.
        */
-      alu->fp_math_ctrl = state->fp_math_ctrl;
-      alu->fp_math_ctrl |= expr->fp_math_ctrl_add;
+      alu->fp_math_ctrl = nir_op_valid_fp_math_ctrl(op, state->fp_math_ctrl | expr->fp_math_ctrl_add);
 
       for (unsigned i = 0; i < nir_op_infos[op].num_inputs; i++) {
          /* If the source is an explicitly sized source, then we need to reset

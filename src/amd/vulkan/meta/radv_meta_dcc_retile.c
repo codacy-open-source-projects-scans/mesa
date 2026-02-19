@@ -108,7 +108,6 @@ get_pipeline(struct radv_device *device, struct radv_image *image, VkPipeline *p
 void
 radv_retile_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image)
 {
-   struct radv_meta_saved_state saved_state;
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_cmd_stream *cs = cmd_buffer->cs;
    VkPipelineLayout layout;
@@ -129,10 +128,7 @@ radv_retile_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image)
    state->flush_bits |= radv_dst_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                                               VK_ACCESS_2_SHADER_READ_BIT, 0, image, NULL);
 
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    const uint64_t va = image->bindings[0].addr;
 
@@ -177,20 +173,9 @@ radv_retile_dcc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *image)
       image->planes[0].surface.u.gfx9.color.display_dcc_height,
    };
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(constants),
-      .pValues = constants,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(constants), constants);
 
    radv_unaligned_dispatch(cmd_buffer, dcc_width, dcc_height, 1);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 
    state->flush_bits |=
       RADV_CMD_FLAG_CS_PARTIAL_FLUSH | radv_src_access_flush(cmd_buffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,

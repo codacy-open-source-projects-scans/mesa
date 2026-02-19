@@ -260,18 +260,10 @@ meta_emit_blit(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_i
       src_offset_1[1] / (float)src_height, src_offset_0[2] / (float)src_depth,
    };
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = layout,
-      .stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
-      .offset = 0,
-      .size = sizeof(vertex_push_constants),
-      .pValues = vertex_push_constants,
-   };
+   radv_meta_push_constants(cmd_buffer, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(vertex_push_constants),
+                            vertex_push_constants);
 
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   radv_meta_bind_graphics_pipeline(cmd_buffer, pipeline);
 
    radv_meta_bind_descriptors(cmd_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 1,
                               (VkDescriptorGetInfoEXT[]){{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_GET_INFO_EXT,
@@ -370,7 +362,6 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    const VkImageSubresourceLayers *src_res = &region->srcSubresource;
    const VkImageSubresourceLayers *dst_res = &region->dstSubresource;
-   struct radv_meta_saved_state saved_state;
    struct radv_sampler sampler;
 
    /* From the Vulkan 1.0 spec:
@@ -390,9 +381,6 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
                         .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
                         .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
                      });
-
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_GRAPHICS_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS);
 
    unsigned dst_start, dst_end;
    if (dst_image->vk.image_type == VK_IMAGE_TYPE_3D) {
@@ -454,20 +442,11 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
       .y = dst_y1,
    };
 
-   radv_CmdSetViewport(radv_cmd_buffer_to_handle(cmd_buffer), 0, 1,
-                       &(VkViewport){.x = dst_offset_0.x,
-                                     .y = dst_offset_0.y,
-                                     .width = dst_offset_1.x - dst_offset_0.x,
-                                     .height = dst_offset_1.y - dst_offset_0.y,
-                                     .minDepth = 0.0f,
-                                     .maxDepth = 1.0f});
+   radv_meta_set_viewport(cmd_buffer, dst_offset_0.x, dst_offset_0.y, dst_offset_1.x - dst_offset_0.x,
+                          dst_offset_1.y - dst_offset_0.y);
 
-   radv_CmdSetScissor(
-      radv_cmd_buffer_to_handle(cmd_buffer), 0, 1,
-      &(VkRect2D){
-         .offset = (VkOffset2D){MIN2(dst_offset_0.x, dst_offset_1.x), MIN2(dst_offset_0.y, dst_offset_1.y)},
-         .extent = (VkExtent2D){abs(dst_offset_1.x - dst_offset_0.x), abs(dst_offset_1.y - dst_offset_0.y)},
-      });
+   radv_meta_set_scissor(cmd_buffer, MIN2(dst_offset_0.x, dst_offset_1.x), MIN2(dst_offset_0.y, dst_offset_1.y),
+                         abs(dst_offset_1.x - dst_offset_0.x), abs(dst_offset_1.y - dst_offset_0.y));
 
    const unsigned num_layers = dst_end - dst_start;
    for (unsigned i = 0; i < num_layers; i++) {
@@ -537,8 +516,6 @@ blit_image(struct radv_cmd_buffer *cmd_buffer, struct radv_image *src_image, VkI
       radv_image_view_finish(&src_iview);
    }
 
-   radv_meta_restore(&saved_state, cmd_buffer);
-
    radv_sampler_finish(device, &sampler);
 }
 
@@ -551,10 +528,14 @@ radv_CmdBlitImage2(VkCommandBuffer commandBuffer, const VkBlitImageInfo2 *pBlitI
 
    radv_suspend_conditional_rendering(cmd_buffer);
 
+   radv_meta_begin(cmd_buffer);
+
    for (unsigned r = 0; r < pBlitImageInfo->regionCount; r++) {
       blit_image(cmd_buffer, src_image, pBlitImageInfo->srcImageLayout, dst_image, pBlitImageInfo->dstImageLayout,
                  &pBlitImageInfo->pRegions[r], pBlitImageInfo->filter);
    }
+
+   radv_meta_end(cmd_buffer);
 
    radv_resume_conditional_rendering(cmd_buffer);
 }

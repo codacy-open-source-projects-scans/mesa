@@ -214,8 +214,6 @@ radv_process_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image
                            const VkImageSubresourceRange *subresourceRange, const VkSampleLocationsInfoEXT *sample_locs)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
-   VkCommandBuffer cmd_buffer_h = radv_cmd_buffer_to_handle(cmd_buffer);
    VkPipelineLayout layout;
    VkPipeline pipeline;
    VkResult result;
@@ -226,9 +224,7 @@ radv_process_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image
       return;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_GRAPHICS_PIPELINE);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+   radv_meta_bind_graphics_pipeline(cmd_buffer, pipeline);
 
    if (sample_locs) {
       assert(image->vk.create_flags & VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT);
@@ -237,7 +233,7 @@ radv_process_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image
        * automatic layout transitions, otherwise the depth decompress
        * pass uses the default HW locations.
        */
-      radv_CmdSetSampleLocationsEXT(cmd_buffer_h, sample_locs);
+      radv_meta_set_sample_locations(cmd_buffer, sample_locs);
    }
 
    for (uint32_t l = 0; l < vk_image_subresource_level_count(&image->vk, subresourceRange); ++l) {
@@ -249,22 +245,12 @@ radv_process_depth_stencil(struct radv_cmd_buffer *cmd_buffer, struct radv_image
       uint32_t width = u_minify(image->vk.extent.width, subresourceRange->baseMipLevel + l);
       uint32_t height = u_minify(image->vk.extent.height, subresourceRange->baseMipLevel + l);
 
-      radv_CmdSetViewport(
-         cmd_buffer_h, 0, 1,
-         &(VkViewport){.x = 0, .y = 0, .width = width, .height = height, .minDepth = 0.0f, .maxDepth = 1.0f});
-
-      radv_CmdSetScissor(cmd_buffer_h, 0, 1,
-                         &(VkRect2D){
-                            .offset = {0, 0},
-                            .extent = {width, height},
-                         });
+      radv_meta_set_viewport_and_scissor(cmd_buffer, 0, 0, width, height);
 
       for (uint32_t s = 0; s < vk_image_subresource_layer_count(&image->vk, subresourceRange); s++) {
          radv_process_depth_image_layer(cmd_buffer, image, subresourceRange, l, s);
       }
    }
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }
 
 static VkResult
@@ -336,7 +322,6 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
                                   const VkImageSubresourceRange *subresourceRange)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
    struct radv_image_view load_iview = {0};
    struct radv_image_view store_iview = {0};
    VkPipelineLayout layout;
@@ -351,9 +336,7 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
       return;
    }
 
-   radv_meta_save(&saved_state, cmd_buffer, RADV_META_SAVE_DESCRIPTORS | RADV_META_SAVE_COMPUTE_PIPELINE);
-
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    for (uint32_t l = 0; l < vk_image_subresource_level_count(&image->vk, subresourceRange); l++) {
       uint32_t width, height;
@@ -436,8 +419,6 @@ radv_expand_depth_stencil_compute(struct radv_cmd_buffer *cmd_buffer, struct rad
          radv_image_view_finish(&store_iview);
       }
    }
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }
 
 void

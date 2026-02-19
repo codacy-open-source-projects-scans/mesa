@@ -13,19 +13,19 @@
 #include "vk_format.h"
 
 static VkPipeline
-radv_get_etc_decode_pipeline(struct radv_cmd_buffer *cmd_buffer)
+radv_get_etc_decode_pipeline(struct radv_cmd_buffer *cmd_buffer, bool indirect)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
    struct radv_meta_state *state = &device->meta_state;
    VkResult ret;
 
-   ret = vk_texcompress_etc2_late_init(&device->vk, &state->etc_decode);
+   ret = vk_texcompress_etc2_late_init(&device->vk, indirect, &state->etc_decode);
    if (ret != VK_SUCCESS) {
       vk_command_buffer_set_error(&cmd_buffer->vk, ret);
       return VK_NULL_HANDLE;
    }
 
-   return state->etc_decode.pipeline;
+   return indirect ? state->etc_decode.indirect_pipeline : state->etc_decode.pipeline;
 }
 
 static void
@@ -33,7 +33,7 @@ decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_iview
            const VkOffset3D *offset, const VkExtent3D *extent)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   VkPipeline pipeline = radv_get_etc_decode_pipeline(cmd_buffer);
+   VkPipeline pipeline = radv_get_etc_decode_pipeline(cmd_buffer, false);
 
    radv_meta_bind_descriptors(cmd_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, device->meta_state.etc_decode.pipeline_layout,
                               2,
@@ -55,22 +55,14 @@ decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image_view *src_iview
                                                              },
                                                           }}});
 
-   radv_CmdBindPipeline(radv_cmd_buffer_to_handle(cmd_buffer), VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   radv_meta_bind_compute_pipeline(cmd_buffer, pipeline);
 
    unsigned push_constants[5] = {
       offset->x, offset->y, offset->z, src_iview->image->vk.format, src_iview->image->vk.image_type,
    };
 
-   const VkPushConstantsInfoKHR pc_info = {
-      .sType = VK_STRUCTURE_TYPE_PUSH_CONSTANTS_INFO_KHR,
-      .layout = device->meta_state.etc_decode.pipeline_layout,
-      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
-      .offset = 0,
-      .size = sizeof(push_constants),
-      .pValues = push_constants,
-   };
-
-   radv_CmdPushConstants2(radv_cmd_buffer_to_handle(cmd_buffer), &pc_info);
+   radv_meta_push_constants(cmd_buffer, device->meta_state.etc_decode.pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                            sizeof(push_constants), push_constants);
 
    radv_unaligned_dispatch(cmd_buffer, extent->width, extent->height, extent->depth);
 }
@@ -80,9 +72,6 @@ radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *imag
                      const VkImageSubresourceLayers *subresource, VkOffset3D offset, VkExtent3D extent)
 {
    struct radv_device *device = radv_cmd_buffer_device(cmd_buffer);
-   struct radv_meta_saved_state saved_state;
-   radv_meta_save(&saved_state, cmd_buffer,
-                  RADV_META_SAVE_COMPUTE_PIPELINE | RADV_META_SAVE_CONSTANTS | RADV_META_SAVE_DESCRIPTORS);
 
    const bool is_3d = image->vk.image_type == VK_IMAGE_TYPE_3D;
    const uint32_t base_slice = is_3d ? offset.z : subresource->baseArrayLayer;
@@ -152,6 +141,4 @@ radv_meta_decode_etc(struct radv_cmd_buffer *cmd_buffer, struct radv_image *imag
 
    radv_image_view_finish(&src_iview);
    radv_image_view_finish(&dst_iview);
-
-   radv_meta_restore(&saved_state, cmd_buffer);
 }
