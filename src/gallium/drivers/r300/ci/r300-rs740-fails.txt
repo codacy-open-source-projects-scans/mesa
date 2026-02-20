@@ -62,10 +62,7 @@ dEQP-GLES2.functional.shaders.conversions.vector_to_vector.vec4_to_ivec2_fragmen
 dEQP-GLES2.functional.shaders.conversions.vector_to_vector.vec4_to_ivec3_fragment,Fail
 dEQP-GLES2.functional.shaders.conversions.vector_to_vector.vec4_to_ivec4_fragment,Fail
 dEQP-GLES2.functional.shaders.functions.control_flow.mixed_return_break_continue_fragment,Fail
-dEQP-GLES2.functional.shaders.functions.control_flow.return_after_continue_fragment,Fail
 dEQP-GLES2.functional.shaders.loops.for_constant_iterations.101_iterations_fragment,Fail
-dEQP-GLES2.functional.shaders.loops.for_constant_iterations.conditional_continue_fragment,Fail
-dEQP-GLES2.functional.shaders.loops.for_constant_iterations.double_continue_fragment,Fail
 dEQP-GLES2.functional.shaders.loops.for_constant_iterations.mixed_break_continue_fragment,Fail
 dEQP-GLES2.functional.shaders.random.all_features.fragment.6,Fail
 dEQP-GLES2.functional.texture.filtering.cube.linear_linear_clamp_l8_npot,Fail
@@ -694,8 +691,6 @@ spec@arb_texture_rg@texwrap formats-float bordercolor@GL_RG32F- border color onl
 
 spec@egl 1.4@eglterminate then unbind context,Fail
 
-spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_rgba,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 
 spec@ext_framebuffer_blit@fbo-blit-check-limits,Fail
@@ -737,8 +732,6 @@ spec@ext_framebuffer_object@getteximage-formats init-by-rendering,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-export,Fail
 
 spec@ext_occlusion_query_boolean@any-samples,Fail
-
-spec@ext_packed_depth_stencil@depth_stencil texture,Fail
 
 spec@ext_texture_format_bgra8888@api-errors,Fail
 
@@ -992,7 +985,6 @@ spec@glsl-1.10@execution@fs-sign-times-sign,Fail
 spec@glsl-1.10@execution@glsl-1.10-built-in-matrix-state,Fail
 spec@glsl-1.10@execution@glsl-fs-convolution-2,Fail
 spec@glsl-1.10@execution@glsl-fs-if-nested-loop,Fail
-spec@glsl-1.10@execution@loops@glsl-fs-continue-inside-do-while,Fail
 spec@glsl-1.10@execution@loops@glsl-fs-loop-vec4-counter,Fail
 spec@glsl-1.10@execution@temp-array-indexing@glsl-fs-vec4-indexing-temp-dst-in-nested-loop-combined,Fail
 spec@glsl-1.10@execution@temp-array-indexing@glsl-fs-vec4-indexing-temp-src-in-loop,Fail

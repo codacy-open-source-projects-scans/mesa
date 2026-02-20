@@ -244,7 +244,6 @@ iris_apply_brw_prog_data(struct iris_compiled_shader *shader,
    shader->const_data_offset      = brw->const_data_offset;
    shader->dispatch_grf_start_reg = brw->dispatch_grf_start_reg;
    shader->has_ubo_pull           = brw->has_ubo_pull;
-   shader->use_alt_mode           = brw->use_alt_mode;
 
    switch (shader->stage) {
    case MESA_SHADER_FRAGMENT:
@@ -898,11 +897,14 @@ setup_vec4_image_sysval(uint32_t *sysvals, uint32_t idx,
 #ifdef INTEL_USE_ELK
    assert(offset % sizeof(uint32_t) == 0);
 
-   for (unsigned i = 0; i < n; ++i)
-      sysvals[i] = ELK_PARAM_IMAGE(idx, offset / sizeof(uint32_t) + i);
+   for (unsigned i = 0; i < n; ++i) {
+      sysvals[i] = IRIS_SYSVAL_IMAGE_START +
+                   idx * IRIS_SYSVALS_PER_IMAGE +
+                   offset / sizeof(uint32_t) + i;
+   }
 
    for (unsigned i = n; i < 4; ++i)
-      sysvals[i] = ELK_PARAM_BUILTIN_ZERO;
+      sysvals[i] = IRIS_SYSVAL_ZERO;
 #else
    UNREACHABLE("no elk support");
 #endif
@@ -1006,7 +1008,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
             for (int i = 0; i < 4; i++) {
                system_values[ucp_idx[ucp] + i] =
-                  BRW_PARAM_BUILTIN_CLIP_PLANE(ucp, i);
+                  IRIS_SYSVAL_CLIP_PLANE(ucp, i);
             }
 
             b.cursor = nir_before_instr(instr);
@@ -1017,8 +1019,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
             if (patch_vert_idx == -1)
                patch_vert_idx = num_system_values++;
 
-            system_values[patch_vert_idx] =
-               BRW_PARAM_BUILTIN_PATCH_VERTICES_IN;
+            system_values[patch_vert_idx] = IRIS_SYSVAL_PATCH_VERTICES_IN;
 
             b.cursor = nir_before_instr(instr);
             offset = nir_imm_int(&b, patch_vert_idx * sizeof(uint32_t));
@@ -1031,7 +1032,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
             for (int i = 0; i < 4; i++) {
                system_values[tess_outer_default_idx + i] =
-                  BRW_PARAM_BUILTIN_TESS_LEVEL_OUTER_X + i;
+                  IRIS_SYSVAL_TESS_LEVEL_OUTER_X + i;
             }
 
             b.cursor = nir_before_instr(instr);
@@ -1045,7 +1046,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
 
             for (int i = 0; i < 2; i++) {
                system_values[tess_inner_default_idx + i] =
-                  BRW_PARAM_BUILTIN_TESS_LEVEL_INNER_X + i;
+                  IRIS_SYSVAL_TESS_LEVEL_INNER_X + i;
             }
 
             b.cursor = nir_before_instr(instr);
@@ -1101,7 +1102,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
                num_system_values += 3;
                for (int i = 0; i < 3; i++) {
                   system_values[variable_group_size_idx + i] =
-                     BRW_PARAM_BUILTIN_WORK_GROUP_SIZE_X + i;
+                     IRIS_SYSVAL_WORK_GROUP_SIZE_X + i;
                }
             }
 
@@ -1112,7 +1113,7 @@ iris_setup_uniforms(ASSERTED const struct intel_device_info *devinfo,
          case nir_intrinsic_load_work_dim: {
             if (work_dim_idx == -1) {
                work_dim_idx = num_system_values++;
-               system_values[work_dim_idx] = BRW_PARAM_BUILTIN_WORK_DIM;
+               system_values[work_dim_idx] = IRIS_SYSVAL_WORK_DIM;
             }
             b.cursor = nir_before_instr(instr);
             offset = nir_imm_int(&b, work_dim_idx * sizeof(uint32_t));
@@ -1908,8 +1909,6 @@ iris_compile_vs(struct iris_screen *screen,
       struct brw_vs_prog_data *brw_prog_data =
          rzalloc(mem_ctx, struct brw_vs_prog_data);
 
-      brw_prog_data->base.base.use_alt_mode = nir->info.use_legacy_math_rules;
-
       struct iris_ubo_range ubo_ranges[4] = {};
       brw_apply_ubo_ranges(screen, nir, ubo_ranges, &brw_prog_data->base.base);
 
@@ -1985,6 +1984,7 @@ iris_compile_vs(struct iris_screen *screen,
    }
 
    shader->compilation_failed = false;
+   shader->use_alt_mode = nir->info.use_legacy_math_rules;
 
    uint32_t *so_decls =
       screen->vtbl.create_so_decl_list(&ish->stream_output,
@@ -2095,6 +2095,36 @@ get_unified_tess_slots(const struct iris_context *ice,
    }
 }
 
+static nir_shader *
+iris_create_passthrough_tcs(void *mem_ctx,
+                            const nir_shader_compiler_options *options,
+                            const struct iris_tcs_prog_key *key)
+{
+   assert(key->input_vertices > 0);
+
+   uint64_t inputs_read = key->outputs_written &
+      ~(VARYING_BIT_TESS_LEVEL_INNER | VARYING_BIT_TESS_LEVEL_OUTER);
+
+   unsigned locations[64];
+   unsigned num_locations = 0;
+
+   u_foreach_bit64(varying, inputs_read)
+      locations[num_locations++] = varying;
+
+   nir_shader *nir =
+      nir_create_passthrough_tcs_impl(options, locations, num_locations,
+                                      key->input_vertices);
+
+   ralloc_steal(mem_ctx, nir);
+
+   nir->info.inputs_read = inputs_read;
+   nir->info.tess._primitive_mode = key->_tes_primitive_mode;
+
+   NIR_PASS(_, nir, nir_lower_system_values);
+
+   return nir;
+}
+
 /**
  * Compile a tessellation control shader, and upload the assembly.
  */
@@ -2118,7 +2148,11 @@ iris_compile_tcs(struct iris_screen *screen,
 
    const struct iris_tcs_prog_key *const key = &shader->key.tcs;
    struct brw_tcs_prog_key brw_key = iris_to_brw_tcs_key(screen, key);
+   const struct nir_shader_compiler_options *options =
+      &screen->brw->nir_options[MESA_SHADER_TESS_CTRL];
 #ifdef INTEL_USE_ELK
+   if (!screen->brw)
+      options = screen->elk->nir_options[MESA_SHADER_TESS_CTRL];
    struct elk_tcs_prog_key elk_key = iris_to_elk_tcs_key(screen, key);
 #endif
    uint32_t source_hash;
@@ -2127,16 +2161,7 @@ iris_compile_tcs(struct iris_screen *screen,
       nir = nir_shader_clone(mem_ctx, ish->nir);
       source_hash = ish->source_hash;
    } else {
-      if (screen->brw) {
-         nir = brw_nir_create_passthrough_tcs(mem_ctx, screen->brw, &brw_key);
-      } else {
-#ifdef INTEL_USE_ELK
-         assert(screen->elk);
-         nir = elk_nir_create_passthrough_tcs(mem_ctx, screen->elk, &elk_key);
-#else
-         UNREACHABLE("no elk support");
-#endif
-      }
+      nir = iris_create_passthrough_tcs(mem_ctx, options, key);
       source_hash = *(uint32_t*)nir->info.source_blake3;
    }
 
@@ -2745,8 +2770,6 @@ iris_compile_fs(struct iris_screen *screen,
       struct brw_fs_prog_data *brw_prog_data =
          rzalloc(mem_ctx, struct brw_fs_prog_data);
 
-      brw_prog_data->base.use_alt_mode = nir->info.use_legacy_math_rules;
-
       struct iris_ubo_range ubo_ranges[4] = {};
       brw_apply_ubo_ranges(screen, nir, ubo_ranges, &brw_prog_data->base);
 
@@ -2824,6 +2847,7 @@ iris_compile_fs(struct iris_screen *screen,
    }
 
    shader->compilation_failed = false;
+   shader->use_alt_mode = nir->info.use_legacy_math_rules;
 
    iris_finalize_program(shader, NULL, system_values,
                          num_system_values, num_cbufs, &bt);
@@ -3100,6 +3124,7 @@ iris_compile_cs(struct iris_screen *screen,
       if (subgroup_id_lowered) {
          brw_prog_data->base.push_sizes[0] = 4;
          brw_cs_fill_push_const_info(devinfo, brw_prog_data, 0);
+         brw_prog_data->base.push_sizes[0] = align(4, REG_SIZE);
       } else {
          brw_cs_fill_push_const_info(devinfo, brw_prog_data, -1);
       }

@@ -24,11 +24,8 @@ dEQP-GLES2.functional.rasterization.primitives.lines_wide,Fail
 dEQP-GLES2.functional.shaders.builtin_variable.frontfacing,Fail
 
 dEQP-GLES2.functional.shaders.functions.control_flow.mixed_return_break_continue_fragment,Fail
-dEQP-GLES2.functional.shaders.functions.control_flow.return_after_continue_fragment,Fail
 
 dEQP-GLES2.functional.shaders.loops.for_constant_iterations.101_iterations_fragment,Fail
-dEQP-GLES2.functional.shaders.loops.for_constant_iterations.conditional_continue_fragment,Fail
-dEQP-GLES2.functional.shaders.loops.for_constant_iterations.double_continue_fragment,Fail
 dEQP-GLES2.functional.shaders.loops.for_constant_iterations.mixed_break_continue_fragment,Fail
 
 dEQP-GLES2.functional.shaders.random.all_features.fragment.5,Fail
@@ -402,8 +399,6 @@ spec@ati_fragment_shader@ati_fragment_shader-render-ops,Fail
 spec@ati_fragment_shader@ati_fragment_shader-render-ops@mov 8*c0,Fail
 
 spec@egl 1.4@eglterminate then unbind context,Fail
-spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_depth_component24,Fail
-spec@egl_khr_gl_image@egl_khr_gl_renderbuffer_image-clear-shared-image gl_rgba,Fail
 spec@egl_khr_surfaceless_context@viewport,Fail
 
 spec@ext_direct_state_access@program-uniform,Fail
@@ -504,7 +499,6 @@ spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yuyv,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvu420,Fail
 spec@ext_image_dma_buf_import@ext_image_dma_buf_import-sample_yvyu,Fail
 
-spec@ext_packed_depth_stencil@depth_stencil texture,Fail
 spec@ext_packed_depth_stencil@fbo-clear-formats,Fail
 spec@ext_packed_depth_stencil@fbo-clear-formats@GL_DEPTH24_STENCIL8,Fail
 spec@ext_packed_depth_stencil@fbo-clear-formats@GL_DEPTH_STENCIL,Fail
@@ -776,7 +770,6 @@ spec@glsl-1.10@execution@interpolation@interpolation-none-gl_frontcolor-smooth-v
 spec@glsl-1.10@execution@interpolation@interpolation-none-gl_frontsecondarycolor-smooth-fixed,Fail
 spec@glsl-1.10@execution@interpolation@interpolation-none-gl_frontsecondarycolor-smooth-none,Fail
 spec@glsl-1.10@execution@interpolation@interpolation-none-gl_frontsecondarycolor-smooth-vertex,Fail
-spec@glsl-1.10@execution@loops@glsl-fs-continue-inside-do-while,Fail
 spec@glsl-1.10@execution@loops@glsl-fs-loop-300,Fail
 
 # Failed to link: error: looping not supported i915 fragment shaders, all loops must be statically unrollable.

@@ -2465,6 +2465,17 @@ vc4_shader_precompile(struct vc4_context *vc4,
         }
 }
 
+static bool
+vc4_check_divergent_loops(nir_shader *s)
+{
+        nir_foreach_block(block, nir_shader_get_entrypoint(s)) {
+                nir_loop *loop = nir_block_get_following_loop(block);
+                if (loop && nir_loop_is_divergent(loop))
+                        return true;
+        }
+        return false;
+}
+
 static void *
 vc4_shader_state_create(struct pipe_context *pctx,
                         const struct pipe_shader_state *cso)
@@ -2513,6 +2524,26 @@ vc4_shader_state_create(struct pipe_context *pctx,
 
         /* Garbage collect dead instructions */
         nir_sweep(s);
+
+        /* VC4 hardware doesn't have a dispatch mask for the VS. This means
+         * that, if we submit a divergent loop to the hardware, some execution
+         * channels can have undefined/garbage contents and cause infinite
+         * loops and GPU hangs.
+         *
+         * Instead of potentially hanging the GPU, refuse shader linking.
+         */
+        if (s->info.stage == MESA_SHADER_VERTEX) {
+                nir_divergence_analysis(s);
+
+                if (vc4_check_divergent_loops(s) && cso->report_compile_error) {
+                        ((struct pipe_shader_state *)cso)->error_message =
+                                strdup("Non-uniform loops are unsupported "
+                                       "in the vertex shader.");
+                        ralloc_free(s);
+                        free(so);
+                        return NULL;
+                }
+        }
 
         so->base.type = PIPE_SHADER_IR_NIR;
         so->base.ir.nir = s;
@@ -2672,9 +2703,7 @@ vc4_get_compiled_shader(struct vc4_context *vc4, enum qstage stage,
         }
 
         shader->failed = c->failed;
-        if (c->failed) {
-                shader->failed = true;
-        } else {
+        if (!shader->failed) {
                 copy_uniform_state_to_shader(shader, c);
                 shader->bo = vc4_bo_alloc_shader(vc4->screen, c->qpu_insts,
                                                  c->qpu_inst_count *
