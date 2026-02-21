@@ -133,6 +133,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_buffer_device_address = true,
       .EXT_calibrated_timestamps =
          device->kmod.dev->props.gpu_can_query_timestamp,
+      .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
       .EXT_depth_bias_control = true,
       .EXT_depth_clamp_zero_one = true,
@@ -157,6 +158,7 @@ panvk_per_arch(get_physical_device_extensions)(
       /* EXT_image_drm_format_modifier depends on KHR_sampler_ycbcr_conversion */
       .EXT_image_drm_format_modifier = true,
       .EXT_image_robustness = true,
+      .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
@@ -473,6 +475,9 @@ panvk_per_arch(get_physical_device_features)(
       .formatA4R4G4B4 = true,
       .formatA4B4G4R4 = true,
 
+      /* VK_EXT_color_write_enable */
+      .colorWriteEnable = true,
+
       /* VK_EXT_custom_border_color */
       .customBorderColors = true,
 
@@ -483,6 +488,9 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_EXT_image_2d_view_of_3d */
       .image2DViewOf3D = true,
       .sampler2DViewOf3D = true,
+
+      /* VK_EXT_image_view_min_lod */
+      .minLod = true,
 
       /* VK_EXT_primitive_topology_list_restart */
       .primitiveTopologyListRestart = true,

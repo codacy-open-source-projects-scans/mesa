@@ -2862,6 +2862,7 @@ zink_update_fbfetch(struct zink_context *ctx)
       ctx->di.fbfetch.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
       ctx->di.fbfetch.imageView = VK_NULL_HANDLE;
       ctx->invalidate_descriptor_state(ctx, MESA_SHADER_FRAGMENT, ZINK_DESCRIPTOR_TYPE_UBO, 0, 1);
+      ctx->dynamic_fb.flags[0].flags &= ~VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
       return true;
    }
 
@@ -2878,8 +2879,10 @@ zink_update_fbfetch(struct zink_context *ctx)
       bool fbfetch_ms = ctx->fb_state.cbufs[0].texture->nr_samples > 1;
       if (zink_get_fs_base_key(ctx)->fbfetch_ms != fbfetch_ms)
          zink_set_fs_base_key(ctx)->fbfetch_ms = fbfetch_ms;
+      ctx->dynamic_fb.flags[0].flags |= VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
    } else {
       ctx->di.fbfetch.imageView = VK_NULL_HANDLE;
+      ctx->dynamic_fb.flags[0].flags &= ~VK_RENDERING_ATTACHMENT_INPUT_ATTACHMENT_FEEDBACK_BIT_KHR;
    }
    bool ret = false;
    ctx->di.fbfetch.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -3065,7 +3068,6 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
    uint32_t attachment_shadow_mask = 0;
    /* j/k this is super nonconformant */
    bool very_legal_and_conformant_msaa_opt = ctx->dynamic_fb.tc_info.has_resolve && ctx->dynamic_fb.tc_info.ended && (zink_debug & ZINK_DEBUG_MSAAOPT);
-   ctx->dynamic_fb.attachments[0].pNext = NULL;
    if (ctx->rp_changed || ctx->rp_layout_changed || (!ctx->in_rp && ctx->rp_loadop_changed)) {
       /* init imageviews, base loadOp, formats */
       for (int i = 0; i < ctx->fb_state.nr_cbufs; i++) {
@@ -3282,6 +3284,11 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
          ctx->dynamic_fb.attachments[i].resolveMode = VK_RESOLVE_MODE_NONE;
       }
       ctx->dynamic_fb.attachments[i].imageView = iv;
+
+      if (ctx->feedback_loops & BITFIELD_BIT(i))
+         ctx->dynamic_fb.fbfetch_att[i].feedbackLoopEnable = VK_TRUE;
+      else
+         ctx->dynamic_fb.fbfetch_att[i].feedbackLoopEnable = VK_FALSE;
    }
    if (ctx->has_swapchain) {
       ASSERTED struct zink_resource *res = zink_resource(ctx->fb_state.cbufs[0].texture);
@@ -3329,6 +3336,14 @@ begin_rendering(struct zink_context *ctx, bool check_attachment_shadow)
       } else {
          ctx->dynamic_fb.attachments[PIPE_MAX_COLOR_BUFS].resolveMode = 0;
          ctx->dynamic_fb.attachments[PIPE_MAX_COLOR_BUFS + 1].resolveMode = 0;
+      }
+
+      if (ctx->feedback_loops & BITFIELD_BIT(PIPE_MAX_COLOR_BUFS)) {
+         ctx->dynamic_fb.fbfetch_att[PIPE_MAX_COLOR_BUFS].feedbackLoopEnable = VK_TRUE;
+         ctx->dynamic_fb.fbfetch_att[PIPE_MAX_COLOR_BUFS+1].feedbackLoopEnable = VK_TRUE;
+      } else {
+         ctx->dynamic_fb.fbfetch_att[PIPE_MAX_COLOR_BUFS].feedbackLoopEnable = VK_FALSE;
+         ctx->dynamic_fb.fbfetch_att[PIPE_MAX_COLOR_BUFS+1].feedbackLoopEnable = VK_FALSE;
       }
    }
    if (use_tc_info && ctx->dynamic_fb.tc_info.has_resolve) {
@@ -3953,11 +3968,6 @@ unbind_fb_surface(struct zink_context *ctx, const struct pipe_surface *surf, uns
          if (ctx->gfx_pipeline_state.feedback_loop)
             ctx->gfx_pipeline_state.dirty = ctx->gfx_pipeline_state.mesh_dirty = true;
          ctx->gfx_pipeline_state.feedback_loop = false;
-      }
-      if (zink_screen(ctx->base.screen)->info.have_KHR_unified_image_layouts && zink_screen(ctx->base.screen)->info.have_EXT_attachment_feedback_loop_layout) {
-         ctx->dynamic_fb.fbfetch_att[idx].feedbackLoopEnable = VK_FALSE;
-         if (idx == PIPE_MAX_COLOR_BUFS)
-            ctx->dynamic_fb.fbfetch_att[idx + 1].feedbackLoopEnable = VK_FALSE;
       }
    }
    res->fb_binds &= ~BITFIELD_BIT(idx);
@@ -5792,6 +5802,17 @@ zink_context_create(struct pipe_screen *pscreen, void *priv, unsigned flags)
          VK_FALSE
       };
    }
+   if (screen->info.have_KHR_maintenance10) {
+      ctx->dynamic_fb.info.flags = VK_RENDERING_LOCAL_READ_CONCURRENT_ACCESS_CONTROL_BIT_KHR;
+      for (unsigned i = 0; i < ARRAY_SIZE(ctx->dynamic_fb.flags); i++) {
+         ctx->dynamic_fb.flags[i] = (VkRenderingAttachmentFlagsInfoKHR){
+            VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_FLAGS_INFO_KHR,
+            ctx->dynamic_fb.attachments[i].pNext,
+            0
+         };
+         ctx->dynamic_fb.attachments[i].pNext = &ctx->dynamic_fb.flags[i];
+      }
+   }
 
    ctx->gfx_pipeline_state.rendering_info.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
    ctx->gfx_pipeline_state.rendering_info.pColorAttachmentFormats = ctx->gfx_pipeline_state.rendering_formats;
@@ -6082,11 +6103,7 @@ add_implicit_feedback_loop(struct zink_context *ctx, struct zink_resource *res)
    }
    ctx->rp_layout_changed = true;
    ctx->feedback_loops |= is_feedback;
-   if (zink_screen(ctx->base.screen)->info.have_KHR_unified_image_layouts && zink_screen(ctx->base.screen)->info.have_EXT_attachment_feedback_loop_layout) {
-      u_foreach_bit(idx, is_feedback) {
-         ctx->dynamic_fb.fbfetch_att[idx].feedbackLoopEnable = VK_TRUE;
-      }
-   } else {
+   if (!zink_screen(ctx->base.screen)->info.have_KHR_unified_image_layouts || !zink_screen(ctx->base.screen)->info.have_EXT_attachment_feedback_loop_layout) {
       u_foreach_bit(idx, is_feedback) {
          if (zink_screen(ctx->base.screen)->info.have_EXT_attachment_feedback_loop_layout)
             ctx->dynamic_fb.attachments[idx].imageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT;
