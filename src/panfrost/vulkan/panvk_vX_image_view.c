@@ -84,15 +84,10 @@ prepare_tex_descs(struct panvk_image_view *view)
    struct panvk_image *image =
       container_of(view->vk.image, struct panvk_image, vk);
    struct panvk_device *dev = to_panvk_device(view->vk.base.device);
-   bool img_combined_ds =
-      vk_format_aspects(image->vk.format) ==
-      (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-   bool view_combined_ds = view->vk.aspects ==
-      (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
-   bool can_preload_other_aspect =
-      (view->vk.usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT) &&
-      (img_combined_ds &&
-       (view_combined_ds || panvk_image_is_interleaved_depth_stencil(image)));
+#if PAN_ARCH >= 9
+   bool has_storage = (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) &&
+                      !vk_format_is_compressed(view->vk.format);
+#endif
 
    if (util_format_is_depth_or_stencil(view->pview.format)) {
       /* Vulkan wants R001, where the depth/stencil is stored in the red
@@ -138,12 +133,12 @@ prepare_tex_descs(struct panvk_image_view *view)
       .alignment = pan_alignment(NULL_PLANE) * (plane_count > 1 ? 2 : 1),
 #endif
 
-      .size = tex_payload_size * (can_preload_other_aspect ? 2 : plane_count),
+      .size = tex_payload_size * plane_count,
    };
 
 #if PAN_ARCH >= 9
    uint32_t storage_payload_size = 0;
-   if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+   if (has_storage) {
       /* We'll need a second set of Texture Descriptors for storage use. */
       storage_payload_size = tex_payload_size * plane_count;
       alloc_info.size += storage_payload_size;
@@ -162,11 +157,10 @@ prepare_tex_descs(struct panvk_image_view *view)
 
 #if PAN_ARCH >= 9
       struct pan_ptr storage_ptr = ptr;
-      if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+      if (has_storage) {
          uint32_t storage_payload_offset =
             alloc_info.size - storage_payload_size;
-         storage_ptr.gpu += storage_payload_offset;
-         storage_ptr.cpu += storage_payload_offset;
+         storage_ptr = pan_ptr_offset(storage_ptr, storage_payload_offset);
       }
 #endif
 
@@ -184,40 +178,22 @@ prepare_tex_descs(struct panvk_image_view *view)
             GENX(pan_sampled_texture_emit)(&pview, &view->descs.tex[plane],
                                            &ptr);
 #if PAN_ARCH >= 9
-            if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
+            if (has_storage) {
                GENX(pan_storage_texture_emit)(
                   &pview, &view->descs.storage_tex[plane], &storage_ptr);
-               storage_ptr.cpu += tex_payload_size;
-               storage_ptr.gpu += tex_payload_size;
+               storage_ptr = pan_ptr_offset(storage_ptr, tex_payload_size);
             }
 #endif
 
-            ptr.cpu += tex_payload_size;
-            ptr.gpu += tex_payload_size;
+            ptr = pan_ptr_offset(ptr, tex_payload_size);
          }
       } else {
          GENX(pan_sampled_texture_emit)(&pview, &view->descs.tex[0], &ptr);
 #if PAN_ARCH >= 9
-         if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT)
+         if (has_storage)
             GENX(pan_storage_texture_emit)(&pview, &view->descs.storage_tex[0],
                                            &storage_ptr);
 #endif
-      }
-
-      if (can_preload_other_aspect) {
-         /* If the depth was present in the aspects mask, we've handled it
-          * already, so move on to the stencil. If it wasn't present, it's the
-          * stencil texture we create first, and we need t handle the depth here.
-          */
-         pview.format = (view->vk.aspects & VK_IMAGE_ASPECT_DEPTH_BIT)
-                           ? panvk_image_stencil_only_pfmt(image)
-                           : panvk_image_depth_only_pfmt(image);
-
-         ptr.cpu += tex_payload_size;
-         ptr.gpu += tex_payload_size;
-
-         GENX(pan_sampled_texture_emit)(&pview,
-                                        &view->descs.zs.other_aspect_tex, &ptr);
       }
    }
 
@@ -399,11 +375,7 @@ panvk_per_arch(CreateImageView)(VkDevice _device,
    else if (view->vk.aspects == VK_IMAGE_ASPECT_DEPTH_BIT)
       view->pview.format = panvk_image_depth_only_pfmt(image);
 
-   /* Attachments need a texture for the FB preload logic. */
-   VkImageUsageFlags tex_usage_mask =
-      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
-      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-      VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+   VkImageUsageFlags tex_usage_mask = VK_IMAGE_USAGE_SAMPLED_BIT;
 
 #if PAN_ARCH >= 9
    /* Valhall passes a texture descriptor to LEA_TEX. */
