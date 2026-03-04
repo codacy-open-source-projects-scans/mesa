@@ -61,8 +61,10 @@ typedef struct nir_xfb_info nir_xfb_info;
 /* Executed by ac_nir_cull when the current primitive is accepted. */
 typedef void (*ac_nir_cull_accepted)(nir_builder *b, void *state);
 
+struct ac_compiler_info;
+
 void
-ac_nir_set_options(struct radeon_info *info, bool use_llvm,
+ac_nir_set_options(const struct ac_compiler_info *info, bool use_llvm,
                    nir_shader_compiler_options *options);
 
 nir_def *
@@ -156,11 +158,12 @@ ac_nir_lower_tes_inputs_to_mem(nir_shader *shader,
                                ac_nir_map_io_driver_location map);
 
 void
-ac_nir_compute_tess_wg_info(const struct radeon_info *info, const ac_nir_tess_io_info *io_info,
-                            unsigned tcs_vertices_out, unsigned wave_size, bool tess_uses_primid,
+ac_nir_compute_tess_wg_info(const struct ac_compiler_info *info,
+                            const ac_nir_tess_io_info *io_info, unsigned tcs_vertices_out,
+                            unsigned wave_size, bool tess_uses_primid,
                             unsigned num_tcs_input_cp, unsigned lds_input_vertex_size,
-                            unsigned num_remapped_tess_level_outputs, unsigned *num_patches_per_wg,
-                            unsigned *lds_size);
+                            unsigned num_remapped_tess_level_outputs,
+                            unsigned *num_patches_per_wg, unsigned *lds_size);
 
 bool
 ac_nir_lower_es_outputs_to_mem(nir_shader *shader,
@@ -176,14 +179,14 @@ ac_nir_lower_gs_inputs_to_mem(nir_shader *shader,
                               bool triangle_strip_adjacency_fix);
 
 bool
-ac_nir_lower_indirect_derefs(nir_shader *shader,
-                             enum amd_gfx_level gfx_level);
+ac_nir_lower_indirect_derefs(nir_shader *shader);
 
 typedef struct {
-   const struct radeon_info *hw_info;
+   const struct ac_compiler_info *compiler_info;
 
    unsigned max_workgroup_size;
    unsigned wave_size;
+
    /* The mask of clip and cull distances that the shader should export.
     *
     * Clip/cull distance components that are missing in export_clipdist_mask are removed, improving
@@ -197,20 +200,23 @@ typedef struct {
     * not exporting any cull distances (2 pos exports -> 1 pos export).
     */
    uint8_t export_clipdist_mask;
+
+   const uint8_t *vs_output_param_offset; /* GFX11+ */
+   bool has_param_exports;
+   bool has_gen_prim_query;
+   bool has_ms_gs_invocations_query;
+
+   /* VS/GS */
    /* The mask of clip and cull distances that the shader should cull against.
     * If no clip and cull distance outputs are present, it will load clip planes and cull
     * either against CLIP_VERTEX or POS.
     */
    uint8_t cull_clipdist_mask;
    bool write_pos_to_clipvertex;
-   const uint8_t *vs_output_param_offset; /* GFX11+ */
-   bool has_param_exports;
    bool can_cull; /* if true, cull distances are not exported because the shader culls against them */
    bool disable_streamout;
-   bool has_gen_prim_query;
    bool has_xfb_prim_query;
    bool use_gfx12_xfb_intrinsic;
-   bool has_gs_invocations_query;
    bool has_gs_primitives_query;
    bool force_vrs;
    bool compact_primitives;
@@ -229,6 +235,9 @@ typedef struct {
    bool export_primitive_id;
    bool export_primitive_id_per_prim;
    uint32_t instance_rate_inputs;
+
+   /* MS */
+   bool multiview;
 } ac_nir_lower_ngg_options;
 
 bool
@@ -240,16 +249,8 @@ ac_nir_lower_ngg_gs(nir_shader *shader, const ac_nir_lower_ngg_options *options,
                     uint32_t *out_lds_vertex_size, uint8_t *out_lds_scratch_size);
 
 bool
-ac_nir_lower_ngg_mesh(nir_shader *shader,
-                      const struct radeon_info *hw_info,
-                      uint32_t clipdist_enable_mask,
-                      const uint8_t *vs_output_param_offset,
-                      bool has_param_exports,
-                      bool *out_needs_scratch_ring,
-                      unsigned wave_size,
-                      unsigned workgroup_size,
-                      bool multiview,
-                      bool has_query);
+ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *options,
+                      bool *out_needs_scratch_ring);
 
 bool
 ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
@@ -365,7 +366,6 @@ ac_nir_lower_ps_early(nir_shader *nir, const ac_nir_lower_ps_early_options *opti
  */
 typedef struct {
    enum amd_gfx_level gfx_level;
-   enum radeon_family family;
    bool use_aco;
 
    /* System values. */

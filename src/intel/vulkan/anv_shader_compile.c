@@ -977,9 +977,20 @@ anv_shader_compile_task(struct anv_device *device,
 static nir_def *
 mesh_load_provoking_vertex(nir_builder *b, void *data)
 {
-   return nir_load_inline_data_intel(
-      b, 1, 32,
-      .base = ANV_INLINE_PARAM_MESH_PROVOKING_VERTEX);
+   const struct anv_pipeline_bind_map *bind_map = data;
+
+   for (uint32_t i = 0; i < bind_map->inline_dwords_count; i++) {
+      if (bind_map->inline_dwords[i] == anv_drv_const_dword(gfx.mesh_provoking_vertex)) {
+         return nir_load_inline_data_intel(
+            b, 1, 16, nir_imm_int(b, 0),
+            .base = i * 4 + anv_drv_const_offset(gfx.mesh_provoking_vertex) % 4);
+      }
+   }
+
+   return nir_load_push_data_intel(b, 1, 16, nir_imm_int(b, 0),
+                                   .base = anv_drv_const_offset(gfx.mesh_provoking_vertex) -
+                                           bind_map->push_ranges[0].start,
+                                   .range = anv_drv_const_size(gfx.mesh_provoking_vertex));
 }
 
 static void
@@ -1009,6 +1020,7 @@ anv_shader_compile_mesh(struct anv_device *device,
                  &task_shader_data->prog_data.task.map :
                  NULL,
       .load_provoking_vertex = mesh_load_provoking_vertex,
+      .load_provoking_vertex_data = (void *)&mesh_shader_data->bind_map,
    };
 
    mesh_shader_data->code = (void *)brw_compile_mesh(compiler, &params);
@@ -1392,6 +1404,21 @@ anv_shader_lower_nir(struct anv_device *device,
        nir->info.cs.has_cooperative_matrix) {
       anv_fixup_subgroup_size(device, nir);
       NIR_PASS(_, nir, brw_nir_lower_cmat, nir->info.api_subgroup_size);
+
+      /* Lowering of nir_instr_type_cmat_call will produce new
+       * nir_instr_type_call instructions that need to be inlined.
+       */
+      bool inlined = false;
+      NIR_PASS(_, nir, nir_opt_dce);
+      NIR_PASS(inlined, nir, nir_inline_functions);
+      nir_remove_non_entrypoints(nir);
+      if (inlined) {
+         NIR_PASS(_, nir, nir_opt_copy_prop_vars);
+         NIR_PASS(_, nir, nir_opt_copy_prop);
+      }
+      NIR_PASS(_, nir, nir_opt_deref);
+      NIR_PASS(_, nir, nir_opt_dce);
+
       NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
                nir_var_function_temp, 16);
    }
@@ -1574,6 +1601,8 @@ anv_shader_lower_nir(struct anv_device *device,
    NIR_PASS(_, nir, anv_nir_lower_driver_values, pdevice);
 
    NIR_PASS(_, nir, anv_nir_update_resource_intel_block);
+
+   NIR_PASS(_, nir, anv_nir_shrink_push_constant_ranges);
 
    NIR_PASS(_, nir, anv_nir_compute_push_layout,
                pdevice, shader_data->key.base.robust_flags,

@@ -359,6 +359,8 @@ etna_init_screen_caps(struct etna_screen *screen)
 
    caps->max_line_width =
    caps->max_line_width_aa =
+      VIV_FEATURE(screen, ETNA_FEATURE_WIDELINE_TRIANGLE_EMU) ? 1.0f : 8192.0f;
+
    caps->max_point_size =
    caps->max_point_size_aa = 8192.0f;
 
@@ -417,6 +419,9 @@ gpu_supports_texture_format(struct etna_screen *screen, uint32_t fmt,
    if (format != PIPE_FORMAT_S8_UINT_Z24_UNORM &&
        (util_format_is_pure_integer(format) || util_format_is_float(format)))
       supported = VIV_FEATURE(screen, ETNA_FEATURE_HALTI2);
+
+   if (format == PIPE_FORMAT_S8_UINT)
+      supported = VIV_FEATURE(screen, ETNA_FEATURE_S8);
 
    if (format == PIPE_FORMAT_S8X24_UINT)
       supported = VIV_FEATURE(screen, ETNA_FEATURE_HALTI5) &&

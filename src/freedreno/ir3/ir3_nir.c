@@ -256,6 +256,7 @@ ir3_lower_bit_size(const nir_instr *instr, UNUSED void *data)
       case nir_op_ishr:
       case nir_op_isub_sat:
       case nir_op_uadd_sat:
+      case nir_op_usub_sat:
       case nir_op_umax:
       case nir_op_umin:
       case nir_op_ushr:
@@ -340,9 +341,7 @@ ir3_optimize_loop(struct ir3_compiler *compiler,
        * fp16/int16 for frag and compute, skip phi precision lowering
        * for other stages.
        */
-      if ((s->info.stage == MESA_SHADER_FRAGMENT) ||
-          (s->info.stage == MESA_SHADER_COMPUTE) ||
-          (s->info.stage == MESA_SHADER_KERNEL)) {
+      if (is_compute_or_frag(s->info.stage)) {
          progress |= OPT(s, nir_opt_phi_precision);
       }
       progress |= OPT(s, nir_opt_algebraic);
@@ -765,7 +764,11 @@ ir3_finalize_nir(struct ir3_compiler *compiler,
    NIR_PASS(_, s, ir3_nir_lower_sparse_residency);
    NIR_PASS(_, s, ir3_nir_min_lod_workaround);
 
-   if (compiler->array_index_add_half)
+   /* for opencl kernels, TPL1_MODE_CNTL should be configured for
+    * isammode=CL and .arraycoordroundmode = ROUND_NEAREST_EVEN,
+    * as opposed to gl/vk compute shaders which follow GL rules:
+    */
+   if (compiler->array_index_add_half && (s->info.stage != MESA_SHADER_KERNEL))
       OPT(s, ir3_nir_lower_array_sampler);
 
    OPT(s, ir3_nir_lower_image_processing);
@@ -1048,8 +1051,7 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
             .filter_data = compiler,
       };
 
-      if (!((s->info.stage == MESA_SHADER_COMPUTE) ||
-            (s->info.stage == MESA_SHADER_KERNEL) ||
+      if (!(mesa_shader_stage_is_compute(s->info.stage) ||
             compiler->info->props.has_getfiberid)) {
          options.subgroup_size = 1;
          options.lower_vote_trivial = true;
@@ -1060,8 +1062,7 @@ ir3_nir_post_finalize(struct ir3_shader *shader)
       OPT(s, ir3_nir_lower_shuffle, shader);
    }
 
-   if ((s->info.stage == MESA_SHADER_COMPUTE) ||
-       (s->info.stage == MESA_SHADER_KERNEL)) {
+   if (mesa_shader_stage_is_compute(s->info.stage)) {
       bool progress = false;
       NIR_PASS(progress, s, ir3_nir_lower_subgroup_id_cs, shader);
 
@@ -1702,7 +1703,7 @@ ir3_get_driver_param_info(const nir_shader *shader, nir_intrinsic_instr *intr,
       param_info->offset = IR3_DP_CS(local_group_size_x);
       break;
    case nir_intrinsic_load_subgroup_size:
-      if (shader->info.stage == MESA_SHADER_COMPUTE) {
+      if (mesa_shader_stage_is_compute(shader->info.stage)) {
          param_info->offset = IR3_DP_CS(subgroup_size);
       } else if (shader->info.stage == MESA_SHADER_FRAGMENT) {
          param_info->offset = IR3_DP_FS(subgroup_size);
@@ -1824,7 +1825,7 @@ ir3_nir_scan_driver_consts(struct ir3_compiler *compiler, nir_shader *shader,
     * hardware to upload these.
     */
    if (!compiler->has_shared_regfile &&
-         shader->info.stage == MESA_SHADER_COMPUTE) {
+       mesa_shader_stage_is_compute(shader->info.stage)) {
       num_driver_params =
          MAX2(num_driver_params, IR3_DP_CS(workgroup_id_z) + 1);
    }
@@ -1903,7 +1904,7 @@ ir3_alloc_driver_params(struct ir3_const_allocations *const_alloc,
     */
    *num_driver_params = align(*num_driver_params, 4);
    unsigned upload_unit = 1;
-   if (shader_stage == MESA_SHADER_COMPUTE ||
+   if (mesa_shader_stage_is_compute(shader_stage) ||
        (*num_driver_params >= IR3_DP_VS(vtxid_base))) {
       upload_unit = compiler->const_upload_unit;
    }

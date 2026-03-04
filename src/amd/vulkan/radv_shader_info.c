@@ -644,23 +644,11 @@ gather_shader_info_tes(struct radv_device *device, const nir_shader *nir, struct
 }
 
 void
-radv_get_legacy_gs_info(const struct radv_device *device, struct radv_shader_info *es_info, struct radv_shader_info *gs_info)
+radv_get_esgs_gsvs_ring_size(const struct radv_device *device, struct radv_shader_regs *regs,
+                             const struct radv_shader_info *es_info, const struct radv_shader_info *gs_info)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   struct radv_legacy_gs_info *out = &gs_info->legacy_gs_info;
-   const unsigned esgs_vertex_stride = es_info ? es_info->esgs_itemsize : out->esgs_itemsize;
-   ac_legacy_gs_subgroup_info info;
-
-   ac_legacy_gs_compute_subgroup_info(gs_info->gs.input_prim, gs_info->gs.vertices_out, gs_info->gs.invocations,
-                                      esgs_vertex_stride, &info);
-
-   const uint32_t lds_granularity = ac_shader_get_lds_alloc_granularity(pdev->info.gfx_level);
-   const uint32_t total_lds_bytes = align(info.esgs_lds_size * 4, lds_granularity);
-
-   out->gs_inst_prims_in_subgroup = info.gs_inst_prims_in_subgroup;
-   out->es_verts_per_subgroup = info.es_verts_per_subgroup;
-   out->gs_prims_per_subgroup = info.gs_prims_per_subgroup;
-   out->lds_size = total_lds_bytes;
+   const unsigned esgs_vertex_stride = es_info ? es_info->esgs_itemsize : gs_info->legacy_gs_info.esgs_itemsize;
 
    unsigned num_se = pdev->info.max_se;
    unsigned wave_size = 64;
@@ -690,9 +678,30 @@ radv_get_legacy_gs_info(const struct radv_device *device, struct radv_shader_inf
    gsvs_ring_size = align(gsvs_ring_size, alignment);
 
    if (pdev->info.gfx_level <= GFX8)
-      out->esgs_ring_size = CLAMP(esgs_ring_size, min_esgs_ring_size, max_size);
+      regs->gs.esgs_ring_size = CLAMP(esgs_ring_size, min_esgs_ring_size, max_size);
 
-   out->gsvs_ring_size = MIN2(gsvs_ring_size, max_size);
+   regs->gs.gsvs_ring_size = MIN2(gsvs_ring_size, max_size);
+}
+
+void
+radv_get_legacy_gs_info(const struct radv_device *device, struct radv_shader_info *es_info,
+                        struct radv_shader_info *gs_info)
+{
+   const struct radv_physical_device *pdev = radv_device_physical(device);
+   struct radv_legacy_gs_info *out = &gs_info->legacy_gs_info;
+   const unsigned esgs_vertex_stride = es_info ? es_info->esgs_itemsize : out->esgs_itemsize;
+   ac_legacy_gs_subgroup_info info;
+
+   ac_legacy_gs_compute_subgroup_info(gs_info->gs.input_prim, gs_info->gs.vertices_out, gs_info->gs.invocations,
+                                      esgs_vertex_stride, &info);
+
+   const uint32_t lds_granularity = ac_shader_get_lds_alloc_granularity(pdev->info.gfx_level);
+   const uint32_t total_lds_bytes = align(info.esgs_lds_size * 4, lds_granularity);
+
+   out->gs_inst_prims_in_subgroup = info.gs_inst_prims_in_subgroup;
+   out->es_verts_per_subgroup = info.es_verts_per_subgroup;
+   out->gs_prims_per_subgroup = info.gs_prims_per_subgroup;
+   out->lds_size = total_lds_bytes;
 }
 
 static void
@@ -874,6 +883,7 @@ gather_shader_info_rt(const nir_shader *nir, struct radv_shader_info *info)
 {
    // TODO: inline push_constants again
    info->loads_dynamic_offsets = true;
+   info->loads_dynamic_descriptors_offset_addr = false;
    info->loads_push_constants = true;
    info->can_inline_all_push_constants = false;
    info->inline_push_constant_mask = 0;
@@ -1019,8 +1029,13 @@ radv_nir_shader_info_pass(struct radv_device *device, const struct nir_shader *n
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct nir_function *func = (struct nir_function *)exec_list_get_head_const(&nir->functions);
 
-   if (layout->use_dynamic_descriptors)
+   if (layout->use_dynamic_descriptors) {
       info->loads_dynamic_offsets = true;
+
+      /* Independent sets only make sense for graphics stages. */
+      if (layout->independent_sets && (mesa_to_vk_shader_stage(nir->info.stage) & RADV_GRAPHICS_STAGE_BITS))
+         info->loads_dynamic_descriptors_offset_addr = true;
+   }
 
    nir_foreach_block (block, func->impl) {
       gather_info_block(nir, block, info, gfx_state, stage_key, consider_force_vrs);
@@ -1477,6 +1492,7 @@ radv_nir_shader_info_merge(const struct radv_shader_stage *src, struct radv_shad
 
    dst_info->loads_push_constants |= src_info->loads_push_constants;
    dst_info->loads_dynamic_offsets |= src_info->loads_dynamic_offsets;
+   dst_info->loads_dynamic_descriptors_offset_addr |= src_info->loads_dynamic_descriptors_offset_addr;
    dst_info->desc_set_used_mask |= src_info->desc_set_used_mask;
    dst_info->uses_view_index |= src_info->uses_view_index;
    dst_info->uses_prim_id |= src_info->uses_prim_id;

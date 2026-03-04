@@ -234,40 +234,44 @@ static bool handle_env_var_force_family(struct radeon_info *info)
 }
 
 void
-ac_fill_cu_info(struct radeon_info *info, struct drm_amdgpu_info_device *device_info)
+ac_fill_compiler_info(struct radeon_info *info, struct drm_amdgpu_info_device *device_info)
 {
-   struct ac_cu_info *cu_info = &info->cu_info;
+   STATIC_ASSERT(sizeof(struct ac_compiler_info) == 52);
+
+   struct ac_compiler_info *out = &info->compiler_info;
+
+   out->gfx_level = info->gfx_level;
 
    if (info->gfx_level >= GFX10_3)
-      cu_info->max_waves_per_simd = 16;
+      out->max_waves_per_simd = 16;
    else if (info->gfx_level == GFX10)
-      cu_info->max_waves_per_simd = 20;
+      out->max_waves_per_simd = 20;
    else if (info->family >= CHIP_POLARIS10 && info->family <= CHIP_VEGAM)
-      cu_info->max_waves_per_simd = 8;
+      out->max_waves_per_simd = 8;
    else
-      cu_info->max_waves_per_simd = 10;
+      out->max_waves_per_simd = 10;
 
    if (info->gfx_level >= GFX10) {
-      cu_info->num_physical_sgprs_per_simd = 108 * cu_info->max_waves_per_simd;
-      cu_info->min_sgpr_alloc = 108;
-      cu_info->max_sgpr_alloc = 108; /* includes VCC, which can be treated as s[106-107] on GFX10+ */
-      cu_info->sgpr_alloc_granularity = 108;
+      out->num_physical_sgprs_per_simd = 108 * out->max_waves_per_simd;
+      out->min_sgpr_alloc = 108;
+      out->max_sgpr_alloc = 108; /* includes VCC, which can be treated as s[106-107] on GFX10+ */
+      out->sgpr_alloc_granularity = 108;
    } else if (info->family == CHIP_TONGA || info->family == CHIP_ICELAND) {
       /* SGPRInitBug: Due to a HW bug, we always have to allocate the same amount of SGPRs. */
-      cu_info->num_physical_sgprs_per_simd = 800;
-      cu_info->min_sgpr_alloc = 96;
-      cu_info->max_sgpr_alloc = 96;
-      cu_info->sgpr_alloc_granularity = 96;
+      out->num_physical_sgprs_per_simd = 800;
+      out->min_sgpr_alloc = 96;
+      out->max_sgpr_alloc = 96;
+      out->sgpr_alloc_granularity = 96;
    } else if (info->gfx_level >= GFX8) {
-      cu_info->num_physical_sgprs_per_simd = 800;
-      cu_info->min_sgpr_alloc = 16;
-      cu_info->max_sgpr_alloc = 102;
-      cu_info->sgpr_alloc_granularity = 16;
+      out->num_physical_sgprs_per_simd = 800;
+      out->min_sgpr_alloc = 16;
+      out->max_sgpr_alloc = 102;
+      out->sgpr_alloc_granularity = 16;
    } else {
-      cu_info->num_physical_sgprs_per_simd = 512;
-      cu_info->min_sgpr_alloc = 8;
-      cu_info->max_sgpr_alloc = 104;
-      cu_info->sgpr_alloc_granularity = 8;
+      out->num_physical_sgprs_per_simd = 512;
+      out->min_sgpr_alloc = 8;
+      out->max_sgpr_alloc = 104;
+      out->sgpr_alloc_granularity = 8;
    }
 
    /* Some GPU info was broken before DRM 3.45.0. */
@@ -276,60 +280,121 @@ ac_fill_cu_info(struct radeon_info *info, struct drm_amdgpu_info_device *device_
        * Gfx6-9 numbers are in Wave64. CDNA also includes Accumulation VGPRs.
        */
       if (info->gfx_level >= GFX10 || (info->gfx_level == GFX9 && info->family >= CHIP_MI100))
-         cu_info->num_physical_wave64_vgprs_per_simd = device_info->num_shader_visible_vgprs / 2;
+         out->num_physical_wave64_vgprs_per_simd = device_info->num_shader_visible_vgprs / 2;
       else
-         cu_info->num_physical_wave64_vgprs_per_simd = device_info->num_shader_visible_vgprs;
+         out->num_physical_wave64_vgprs_per_simd = device_info->num_shader_visible_vgprs;
    } else {
       if (info->family == CHIP_NAVI31 || info->family == CHIP_NAVI32 ||
           info->family == CHIP_STRIX_HALO || info->gfx_level == GFX12) {
-         cu_info->num_physical_wave64_vgprs_per_simd = 768;
+         out->num_physical_wave64_vgprs_per_simd = 768;
       } else if (info->gfx_level >= GFX10) {
-         cu_info->num_physical_wave64_vgprs_per_simd = 512;
+         out->num_physical_wave64_vgprs_per_simd = 512;
       } else {
-         cu_info->num_physical_wave64_vgprs_per_simd = 256;
+         out->num_physical_wave64_vgprs_per_simd = 256;
       }
    }
    if (info->gfx_level >= GFX10_3)
-      cu_info->wave64_vgpr_alloc_granularity = cu_info->num_physical_wave64_vgprs_per_simd / 64;
+      out->wave64_vgpr_alloc_granularity = out->num_physical_wave64_vgprs_per_simd / 64;
    else if (info->gfx_level == GFX9 && info->family >= CHIP_MI200)
-      cu_info->wave64_vgpr_alloc_granularity = 8;
+      out->wave64_vgpr_alloc_granularity = 8;
    else
-      cu_info->wave64_vgpr_alloc_granularity = 4;
-   cu_info->min_wave64_vgpr_alloc = cu_info->wave64_vgpr_alloc_granularity;
-   cu_info->max_vgpr_alloc = 256;
+      out->wave64_vgpr_alloc_granularity = 4;
+   out->min_wave64_vgpr_alloc = out->wave64_vgpr_alloc_granularity;
+   out->max_vgpr_alloc = 256;
 
-   cu_info->num_simd_per_compute_unit = info->gfx_level >= GFX10 ? 2 : 4;
+   out->num_simd_per_compute_unit = info->gfx_level >= GFX10 ? 2 : 4;
+
+   out->hs_offchip_workgroup_dw_size = info->hs_offchip_workgroup_dw_size;
 
    /* Flags */
-   cu_info->has_lds_bank_count_16 = info->family == CHIP_KABINI || info->family == CHIP_STONEY;
-   cu_info->has_sram_ecc_enabled = info->family == CHIP_VEGA20 || info->family == CHIP_MI100 ||
-                                   info->family == CHIP_MI200 || info->family == CHIP_GFX940;
-   cu_info->has_point_sample_accel = info->family == CHIP_STRIX1 || info->family == CHIP_STRIX_HALO ||
-                                     info->family == CHIP_KRACKAN1;
-   cu_info->has_fast_fma32 = info->gfx_level >= GFX9 || info->family == CHIP_TAHITI ||
-                             info->family == CHIP_HAWAII || info->family == CHIP_CARRIZO;
-   cu_info->has_fma_mix = info->gfx_level >= GFX10 ||
-      info->family == CHIP_VEGA12 || info->family == CHIP_VEGA20 ||
-       info->family == CHIP_MI100 || info->family == CHIP_MI200 ||
-       info->family == CHIP_GFX940;
-   cu_info->has_mad32 = info->gfx_level == GFX9 ? info->family <= CHIP_MI200 : info->gfx_level < GFX10_3;
-   cu_info->has_packed_math_16bit = info->gfx_level >= GFX9;
-   cu_info->has_accelerated_dot_product =
+   out->has_lds_bank_count_16 = info->family == CHIP_KABINI || info->family == CHIP_STONEY;
+   out->has_sram_ecc_enabled = info->family == CHIP_VEGA20 || info->family == CHIP_MI100 ||
+                               info->family == CHIP_MI200 || info->family == CHIP_GFX940;
+   out->has_point_sample_accel = info->family == CHIP_STRIX1 || info->family == CHIP_STRIX_HALO ||
+                                 info->family == CHIP_KRACKAN1;
+   out->has_fast_fma32 = info->gfx_level >= GFX9 || info->family == CHIP_TAHITI ||
+                         info->family == CHIP_HAWAII || info->family == CHIP_CARRIZO;
+   out->has_fma_mix = info->gfx_level >= GFX10 || info->family == CHIP_VEGA12 ||
+                      info->family == CHIP_VEGA20 || info->family == CHIP_MI100 ||
+                      info->family == CHIP_MI200 || info->family == CHIP_GFX940;
+   out->has_mad32 =
+      info->gfx_level == GFX9 ? info->family <= CHIP_MI200 : info->gfx_level < GFX10_3;
+   out->has_packed_math_16bit = info->gfx_level >= GFX9;
+   out->has_accelerated_dot_product =
       info->family == CHIP_VEGA20 ||
       (info->family >= CHIP_MI100 && info->family != CHIP_NAVI10 && info->family != CHIP_GFX1013);
    /* GFX1013 is GFX10 plus ray tracing instructions */
-   cu_info->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 || info->family == CHIP_GFX1013;
+   out->has_image_bvh_intersect_ray = info->gfx_level >= GFX10_3 || info->family == CHIP_GFX1013;
 
-   cu_info->has_gfx6_mrt_export_bug =
+   /* On newer chips, it is not necessary for NGG shaders to request
+    * the allocation of GS space in passthrough mode, when they set
+    * PRIMGEN_PASSTHRU_NO_MSG.
+    */
+   out->has_ngg_passthru_no_msg = info->family >= CHIP_NAVI23;
+
+   out->local_invocation_ids_packed =
+      info->gfx_level >= GFX11 || (!info->has_graphics && info->family >= CHIP_MI200);
+
+   out->has_3d_cube_border_color_mipmap = info->has_graphics || info->family == CHIP_MI100;
+
+   out->conformant_trunc_coord = info->drm_minor >= 52 && device_info &&
+                                 device_info->ids_flags & AMDGPU_IDS_FLAGS_CONFORMANT_TRUNC_COORD;
+
+   out->has_attr_ring = info->gfx_level >= GFX11;
+
+   out->mesh_fast_launch_2 = info->mesh_fast_launch_2;
+
+   /* When distributed tessellation is unsupported, switch between SEs
+    * at a higher frequency to manually balance the workload between SEs.
+    */
+   out->smaller_tcs_workgroups = !info->has_distributed_tess && info->max_se > 1;
+
+   out->has_gfx6_mrt_export_bug =
       info->family == CHIP_TAHITI || info->family == CHIP_PITCAIRN || info->family == CHIP_VERDE;
-   cu_info->has_vtx_format_alpha_adjust_bug = info->gfx_level <= GFX8 && info->family != CHIP_STONEY;
+   out->has_vtx_format_alpha_adjust_bug = info->gfx_level <= GFX8 && info->family != CHIP_STONEY;
 
    /* On GFX6-7, SMEM instructions access memory when num_records == 0 or offset >= num_records,
     * which causes VM faults when reading a page that isn't mapped. To prevent the VM faults:
     * - Use a mapped VA instead of zeroes for null descriptors
     * - Make sure the offset stays within mapped VA ranges
     */
-   cu_info->has_smem_oob_access_bug = info->gfx_level <= GFX7;
+   out->has_smem_oob_access_bug = info->gfx_level <= GFX7;
+
+   /* Whether chips are affected by the image load/sample/gather hw bug when
+    * DCC is enabled (ie. WRITE_COMPRESS_ENABLE should be 0).
+    */
+   out->has_image_load_dcc_bug =
+      info->family == CHIP_NAVI23 || info->family == CHIP_VANGOGH || info->family == CHIP_REMBRANDT;
+
+   out->has_ls_vgpr_init_bug = info->family == CHIP_VEGA10 || info->family == CHIP_RAVEN;
+
+   /* On GFX6 and GFX7 except Hawaii, the CB doesn't clamp outputs
+    * to the range supported by the type if a channel has less
+    * than 16 bits and the export format is 16_ABGR.
+    * See waCbNoLt16BitIntClamp in PAL.
+    */
+   out->has_cb_lt16bit_int_clamp_bug = info->gfx_level <= GFX7 && info->family != CHIP_HAWAII;
+
+   out->has_vrs_frag_pos_z_bug =
+      info->family == CHIP_NAVI21 || info->family == CHIP_NAVI22 || info->family == CHIP_VANGOGH;
+
+   /* Some GFX10 chips can hang when NGG exports zero vertices and primitives.
+    * The workaround is to always export a single degenerate triangle.
+    */
+   out->has_ngg_fully_culled_bug = info->gfx_level == GFX10;
+
+   /* The hw starts culling after all exports are finished,
+    * not when all waves in an NGG workgroup are finished,
+    * and if all primitives are culled, the hw deallocates the attribute ring
+    * for the NGG workgroup and reuses it for next one while the previous NGG
+    * workgroup might still be issuing attribute stores.
+    * When there are 2 NGG workgroups in the system with the same attribute ring address,
+    * attributes may be corrupted.
+    * The workaround is to issue and wait for attribute stores before the last export.
+    */
+   out->has_attr_ring_wait_bug = info->gfx_level == GFX11 || info->gfx_level == GFX11_5;
+
+   out->has_primid_instancing_bug = info->gfx_level == GFX6 && info->max_se == 1;
 }
 
 enum ac_query_gpu_info_result
@@ -1041,8 +1106,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       (info->family >= CHIP_POLARIS10 && info->family <= CHIP_POLARIS12) ||
       info->family == CHIP_VEGA10 || info->family == CHIP_RAVEN;
 
-   info->has_ls_vgpr_init_bug = info->family == CHIP_VEGA10 || info->family == CHIP_RAVEN;
-
    /* DB_DFSM_CONTROL.POPS_DRAIN_PS_ON_OVERLAP must be enabled for 8 or more coverage or
     * depth/stencil samples with POPS (PAL waMiscPopsMissedOverlap).
     */
@@ -1055,21 +1118,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
     * Drawing from 0-sized index buffers causes hangs on gfx10.
     */
    info->has_zero_index_buffer_bug = info->gfx_level == GFX6 || info->gfx_level == GFX10;
-
-   /* On GFX6 and GFX7 except Hawaii, the CB doesn't clamp outputs
-    * to the range supported by the type if a channel has less
-    * than 16 bits and the export format is 16_ABGR.
-    * See waCbNoLt16BitIntClamp in PAL.
-    */
-   info->has_cb_lt16bit_int_clamp_bug = info->gfx_level <= GFX7 &&
-                                        info->family != CHIP_HAWAII;
-
-   /* Whether chips are affected by the image load/sample/gather hw bug when
-    * DCC is enabled (ie. WRITE_COMPRESS_ENABLE should be 0).
-    */
-   info->has_image_load_dcc_bug = info->family == CHIP_NAVI23 ||
-                                  info->family == CHIP_VANGOGH ||
-                                  info->family == CHIP_REMBRANDT;
 
    /* DB has a bug when ITERATE_256 is set to 1 that can cause a hang. The
     * workaround is to set DECOMPRESS_ON_Z_PLANES to 2 for 4X MSAA D/S images.
@@ -1133,29 +1181,7 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    info->has_taskmesh_indirect0_bug = info->gfx_level == GFX10_3 &&
                                       info->mec_fw_version < 100;
 
-   /* Some GFX10 chips can hang when NGG exports zero vertices and primitives.
-    * The workaround is to always export a single degenerate triangle.
-    */
-   info->has_ngg_fully_culled_bug = info->gfx_level == GFX10;
-
-   /* On newer chips, it is not necessary for NGG shaders to request
-    * the allocation of GS space in passthrough mode, when they set
-    * PRIMGEN_PASSTHRU_NO_MSG.
-    */
-   info->has_ngg_passthru_no_msg = info->family >= CHIP_NAVI23;
-
    info->has_export_conflict_bug = info->gfx_level == GFX11;
-
-   /* The hw starts culling after all exports are finished,
-    * not when all waves in an NGG workgroup are finished,
-    * and if all primitives are culled, the hw deallocates the attribute ring
-    * for the NGG workgroup and reuses it for next one while the previous NGG
-    * workgroup might still be issuing attribute stores.
-    * When there are 2 NGG workgroups in the system with the same attribute ring address,
-    * attributes may be corrupted.
-    * The workaround is to issue and wait for attribute stores before the last export.
-    */
-   info->has_attr_ring_wait_bug = info->gfx_level == GFX11 || info->gfx_level == GFX11_5;
 
    /* On GFX8-9, CP DMA doesn't support NULL PRT pages:
     * it doesn't read 0 and doesn't discard writes, causing GPU hangs.
@@ -1348,7 +1374,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       }
    }
 
-   info->has_3d_cube_border_color_mipmap = info->has_graphics || info->family == CHIP_MI100;
    info->has_image_opcodes = debug_get_bool_option("AMD_IMAGE_OPCODES",
                                                    info->has_graphics || info->family < CHIP_GFX940);
    info->never_stop_sq_perf_counters = info->gfx_level == GFX10 ||
@@ -1364,7 +1389,82 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    /* On GFX10.3, the polarity of AUTO_FLUSH_MODE is inverted. */
    info->has_sqtt_auto_flush_mode_bug = info->gfx_level == GFX10_3;
 
-   ac_fill_cu_info(info, &device_info);
+   info->mesh_fast_launch_2 = info->gfx_level >= GFX11;
+
+   /* This is the size of all TCS outputs in memory per workgroup.
+    * Hawaii can't handle num_workgroups > 256 with 8K per workgroup, so use 4K.
+    */
+   unsigned max_hs_out_vram_dwords_per_wg = info->family == CHIP_HAWAII ? 4096 : 8192;
+   unsigned max_hs_out_vram_dwords_enum;
+   unsigned max_workgroups_per_se;
+
+   switch (max_hs_out_vram_dwords_per_wg) {
+   case 8192:
+      max_hs_out_vram_dwords_enum = V_03093C_X_8K_DWORDS;
+      break;
+   case 4096:
+      max_hs_out_vram_dwords_enum = V_03093C_X_4K_DWORDS;
+      break;
+   case 2048:
+      max_hs_out_vram_dwords_enum = V_03093C_X_2K_DWORDS;
+      break;
+   case 1024:
+      max_hs_out_vram_dwords_enum = V_03093C_X_1K_DWORDS;
+      break;
+   default:
+      UNREACHABLE("invalid TCS workgroup size");
+   }
+
+   /* Vega10 should limit num_workgroups to 508 (127 per SE)
+    * Gfx7 should limit num_workgroups to 508 (127 per SE)
+    * Gfx6 should limit num_workgroups to 126 (63 per SE)
+    */
+   if (info->gfx_level >= GFX11) {
+      max_workgroups_per_se = 256;
+   } else if (info->gfx_level >= GFX10 ||
+              info->family == CHIP_VEGA12 || info->family == CHIP_VEGA20) {
+      max_workgroups_per_se = 128;
+   } else if (info->gfx_level >= GFX7 && info->family != CHIP_CARRIZO && info->family != CHIP_STONEY) {
+      max_workgroups_per_se = 127;
+   } else {
+      max_workgroups_per_se = 63;
+   }
+
+   /* Limit to 4 workgroups per CU for TCS, which exhausts LDS if each workgroup occupies 16KB.
+    * Note that the offchip allocation isn't deallocated until the corresponding TES waves finish.
+    */
+   unsigned num_offchip_wg_per_cu = 4;
+   unsigned num_workgroups_per_se = MIN2(num_offchip_wg_per_cu * info->max_good_cu_per_sa *
+                                         info->max_sa_per_se, max_workgroups_per_se);
+   unsigned num_workgroups = num_workgroups_per_se * info->max_se;
+
+   if (info->gfx_level >= GFX11) {
+      /* OFFCHIP_BUFFERING is per SE. */
+      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(num_workgroups_per_se - 1) |
+                               S_03093C_OFFCHIP_GRANULARITY_GFX103(max_hs_out_vram_dwords_enum);
+   } else if (info->gfx_level >= GFX10_3) {
+      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(num_workgroups - 1) |
+                               S_03093C_OFFCHIP_GRANULARITY_GFX103(max_hs_out_vram_dwords_enum);
+   } else if (info->gfx_level >= GFX7) {
+      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX7(num_workgroups -
+                                                               (info->gfx_level >= GFX8 ? 1 : 0)) |
+                               S_03093C_OFFCHIP_GRANULARITY_GFX7(max_hs_out_vram_dwords_enum);
+   } else {
+      info->hs_offchip_param = S_0089B0_OFFCHIP_BUFFERING(num_workgroups) |
+                               S_0089B0_OFFCHIP_GRANULARITY(max_hs_out_vram_dwords_enum);
+   }
+
+   /* The typical size of tess factors of 1 TCS workgroup if all patches are triangles. */
+   unsigned typical_tess_factor_size_per_wg = (192 / 3) * 16;
+   unsigned num_tess_factor_wg_per_cu = 3;
+
+   info->hs_offchip_workgroup_dw_size = max_hs_out_vram_dwords_per_wg;
+   info->tess_offchip_ring_size = num_workgroups * max_hs_out_vram_dwords_per_wg * 4;
+   info->tess_factor_ring_size = typical_tess_factor_size_per_wg * num_tess_factor_wg_per_cu *
+                                 info->max_good_cu_per_sa * info->max_sa_per_se * info->max_se;
+   info->total_tess_ring_size = info->tess_offchip_ring_size + info->tess_factor_ring_size;
+
+   ac_fill_compiler_info(info, &device_info);
 
    /* BIG_PAGE is supported since gfx10.3 and requires VRAM. VRAM is only guaranteed
     * with AMDGPU_GEM_CREATE_DISCARDABLE. DISCARDABLE was added in DRM 3.47.0.
@@ -1495,12 +1595,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->pos_ring_offset = attribute_ring_size;
       info->prim_ring_offset = info->pos_ring_offset + pos_ring_size;
       info->total_attribute_pos_prim_ring_size = info->prim_ring_offset + prim_ring_size;
-
-      info->conformant_trunc_coord =
-         info->drm_minor >= 52 &&
-         device_info.ids_flags & AMDGPU_IDS_FLAGS_CONFORMANT_TRUNC_COORD;
-
-      info->has_attr_ring = info->attribute_ring_size_per_se > 0;
    }
 
    if (info->gfx_level >= GFX11 && (info->userq_ip_mask & (1 << AMD_IP_GFX))) {
@@ -1556,89 +1650,14 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
       info->has_set_sh_pairs_packed = info->has_kernelq_reg_shadowing;
    }
 
-   /* This is the size of all TCS outputs in memory per workgroup.
-    * Hawaii can't handle num_workgroups > 256 with 8K per workgroup, so use 4K.
-    */
-   unsigned max_hs_out_vram_dwords_per_wg = info->family == CHIP_HAWAII ? 4096 : 8192;
-   unsigned max_hs_out_vram_dwords_enum;
-   unsigned max_workgroups_per_se;
-
-   switch (max_hs_out_vram_dwords_per_wg) {
-   case 8192:
-      max_hs_out_vram_dwords_enum = V_03093C_X_8K_DWORDS;
-      break;
-   case 4096:
-      max_hs_out_vram_dwords_enum = V_03093C_X_4K_DWORDS;
-      break;
-   case 2048:
-      max_hs_out_vram_dwords_enum = V_03093C_X_2K_DWORDS;
-      break;
-   case 1024:
-      max_hs_out_vram_dwords_enum = V_03093C_X_1K_DWORDS;
-      break;
-   default:
-      UNREACHABLE("invalid TCS workgroup size");
-   }
-
-   /* Vega10 should limit num_workgroups to 508 (127 per SE)
-    * Gfx7 should limit num_workgroups to 508 (127 per SE)
-    * Gfx6 should limit num_workgroups to 126 (63 per SE)
-    */
-   if (info->gfx_level >= GFX11) {
-      max_workgroups_per_se = 256;
-   } else if (info->gfx_level >= GFX10 ||
-              info->family == CHIP_VEGA12 || info->family == CHIP_VEGA20) {
-      max_workgroups_per_se = 128;
-   } else if (info->gfx_level >= GFX7 && info->family != CHIP_CARRIZO && info->family != CHIP_STONEY) {
-      max_workgroups_per_se = 127;
-   } else {
-      max_workgroups_per_se = 63;
-   }
-
-   /* Limit to 4 workgroups per CU for TCS, which exhausts LDS if each workgroup occupies 16KB.
-    * Note that the offchip allocation isn't deallocated until the corresponding TES waves finish.
-    */
-   unsigned num_offchip_wg_per_cu = 4;
-   unsigned num_workgroups_per_se = MIN2(num_offchip_wg_per_cu * info->max_good_cu_per_sa *
-                                         info->max_sa_per_se, max_workgroups_per_se);
-   unsigned num_workgroups = num_workgroups_per_se * info->max_se;
-
-   if (info->gfx_level >= GFX11) {
-      /* OFFCHIP_BUFFERING is per SE. */
-      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(num_workgroups_per_se - 1) |
-                               S_03093C_OFFCHIP_GRANULARITY_GFX103(max_hs_out_vram_dwords_enum);
-   } else if (info->gfx_level >= GFX10_3) {
-      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX103(num_workgroups - 1) |
-                               S_03093C_OFFCHIP_GRANULARITY_GFX103(max_hs_out_vram_dwords_enum);
-   } else if (info->gfx_level >= GFX7) {
-      info->hs_offchip_param = S_03093C_OFFCHIP_BUFFERING_GFX7(num_workgroups -
-                                                               (info->gfx_level >= GFX8 ? 1 : 0)) |
-                               S_03093C_OFFCHIP_GRANULARITY_GFX7(max_hs_out_vram_dwords_enum);
-   } else {
-      info->hs_offchip_param = S_0089B0_OFFCHIP_BUFFERING(num_workgroups) |
-                               S_0089B0_OFFCHIP_GRANULARITY(max_hs_out_vram_dwords_enum);
-   }
-
-   /* The typical size of tess factors of 1 TCS workgroup if all patches are triangles. */
-   unsigned typical_tess_factor_size_per_wg = (192 / 3) * 16;
-   unsigned num_tess_factor_wg_per_cu = 3;
-
-   info->hs_offchip_workgroup_dw_size = max_hs_out_vram_dwords_per_wg;
-   info->tess_offchip_ring_size = num_workgroups * max_hs_out_vram_dwords_per_wg * 4;
-   info->tess_factor_ring_size = typical_tess_factor_size_per_wg * num_tess_factor_wg_per_cu *
-                                 info->max_good_cu_per_sa * info->max_sa_per_se * info->max_se;
-   info->total_tess_ring_size = info->tess_offchip_ring_size + info->tess_factor_ring_size;
-
    if (info->gfx_level >= GFX12)
       info->rt_ip_version = RT_3_1;
    else if (info->gfx_level >= GFX11)
       info->rt_ip_version = RT_2_0;
-   else if (info->cu_info.has_image_bvh_intersect_ray)
+   else if (info->compiler_info.has_image_bvh_intersect_ray)
       info->rt_ip_version = RT_1_1;
 
    set_custom_cu_en_mask(info);
-
-   info->mesh_fast_launch_2 = info->gfx_level >= GFX11;
 
    const char *ib_filename = debug_get_option("AMD_PARSE_IB", NULL);
    if (ib_filename) {
@@ -1793,10 +1812,8 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_htile_tc_z_clear_bug_without_stencil = %i\n", info->has_htile_tc_z_clear_bug_without_stencil);
    fprintf(f, "    has_htile_tc_z_clear_bug_with_stencil = %i\n", info->has_htile_tc_z_clear_bug_with_stencil);
    fprintf(f, "    has_small_prim_filter_sample_loc_bug = %i\n", info->has_small_prim_filter_sample_loc_bug);
-   fprintf(f, "    has_ls_vgpr_init_bug = %i\n", info->has_ls_vgpr_init_bug);
    fprintf(f, "    has_pops_missed_overlap_bug = %i\n", info->has_pops_missed_overlap_bug);
    fprintf(f, "    has_32bit_predication = %i\n", info->has_32bit_predication);
-   fprintf(f, "    has_3d_cube_border_color_mipmap = %i\n", info->has_3d_cube_border_color_mipmap);
    fprintf(f, "    has_image_opcodes = %i\n", info->has_image_opcodes);
    fprintf(f, "    never_stop_sq_perf_counters = %i\n", info->never_stop_sq_perf_counters);
    fprintf(f, "    has_sqtt_rb_harvest_bug = %i\n", info->has_sqtt_rb_harvest_bug);
@@ -1809,7 +1826,6 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    has_set_sh_pairs = %i\n", info->has_set_sh_pairs);
    fprintf(f, "    has_set_sh_pairs_packed = %i\n", info->has_set_sh_pairs_packed);
    fprintf(f, "    has_set_uconfig_pairs = %i\n", info->has_set_uconfig_pairs);
-   fprintf(f, "    conformant_trunc_coord = %i\n", info->conformant_trunc_coord);
    fprintf(f, "    mesh_fast_launch_2 = %i\n", info->mesh_fast_launch_2);
 
    if (info->gfx_level < GFX12) {
@@ -1961,19 +1977,50 @@ void ac_print_gpu_info(FILE *f, const struct radeon_info *info, int fd)
    fprintf(f, "    max_se = %i\n", info->max_se);
    fprintf(f, "    max_sa_per_se = %i\n", info->max_sa_per_se);
    fprintf(f, "    num_cu_per_sh = %i\n", info->num_cu_per_sh);
-   fprintf(f, "    max_waves_per_simd = %i\n", info->cu_info.max_waves_per_simd);
-   fprintf(f, "    num_physical_sgprs_per_simd = %i\n", info->cu_info.num_physical_sgprs_per_simd);
-   fprintf(f, "    num_physical_wave64_vgprs_per_simd = %i\n",
-           info->cu_info.num_physical_wave64_vgprs_per_simd);
-   fprintf(f, "    num_simd_per_compute_unit = %i\n", info->cu_info.num_simd_per_compute_unit);
-   fprintf(f, "    min_sgpr_alloc = %i\n", info->cu_info.min_sgpr_alloc);
-   fprintf(f, "    max_sgpr_alloc = %i\n", info->cu_info.max_sgpr_alloc);
-   fprintf(f, "    sgpr_alloc_granularity = %i\n", info->cu_info.sgpr_alloc_granularity);
-   fprintf(f, "    min_wave64_vgpr_alloc = %i\n", info->cu_info.min_wave64_vgpr_alloc);
-   fprintf(f, "    max_vgpr_alloc = %i\n", info->cu_info.max_vgpr_alloc);
-   fprintf(f, "    wave64_vgpr_alloc_granularity = %i\n", info->cu_info.wave64_vgpr_alloc_granularity);
    fprintf(f, "    max_scratch_waves = %i\n", info->max_scratch_waves);
    fprintf(f, "    has_scratch_base_registers = %i\n", info->has_scratch_base_registers);
+
+   fprintf(f, "Compiler info:\n");
+   fprintf(f, "    max_waves_per_simd = %i\n", info->compiler_info.max_waves_per_simd);
+   fprintf(f, "    num_physical_sgprs_per_simd = %i\n",
+           info->compiler_info.num_physical_sgprs_per_simd);
+   fprintf(f, "    num_physical_wave64_vgprs_per_simd = %i\n",
+           info->compiler_info.num_physical_wave64_vgprs_per_simd);
+   fprintf(f, "    num_simd_per_compute_unit = %i\n",
+           info->compiler_info.num_simd_per_compute_unit);
+   fprintf(f, "    min_sgpr_alloc = %i\n", info->compiler_info.min_sgpr_alloc);
+   fprintf(f, "    max_sgpr_alloc = %i\n", info->compiler_info.max_sgpr_alloc);
+   fprintf(f, "    sgpr_alloc_granularity = %i\n", info->compiler_info.sgpr_alloc_granularity);
+   fprintf(f, "    min_wave64_vgpr_alloc = %i\n", info->compiler_info.min_wave64_vgpr_alloc);
+   fprintf(f, "    max_vgpr_alloc = %i\n", info->compiler_info.max_vgpr_alloc);
+   fprintf(f, "    wave64_vgpr_alloc_granularity = %i\n",
+           info->compiler_info.wave64_vgpr_alloc_granularity);
+   fprintf(f, "    has_lds_bank_count_16 = %i\n", info->compiler_info.has_lds_bank_count_16);
+   fprintf(f, "    has_sram_ecc_enabled = %i\n", info->compiler_info.has_sram_ecc_enabled);
+   fprintf(f, "    has_point_sample_accel = %i\n", info->compiler_info.has_point_sample_accel);
+   fprintf(f, "    has_fast_fma32 = %i\n", info->compiler_info.has_fast_fma32);
+   fprintf(f, "    has_fma_mix = %i\n", info->compiler_info.has_fma_mix);
+   fprintf(f, "    has_mad32 = %i\n", info->compiler_info.has_mad32);
+   fprintf(f, "    has_packed_math_16bit = %i\n", info->compiler_info.has_packed_math_16bit);
+   fprintf(f, "    has_accelerated_dot_product = %i\n", info->compiler_info.has_accelerated_dot_product);
+   fprintf(f, "    has_image_bvh_intersect_ray = %i\n", info->compiler_info.has_image_bvh_intersect_ray);
+   fprintf(f, "    has_ngg_passthru_no_msg = %i\n", info->compiler_info.has_ngg_passthru_no_msg);
+   fprintf(f, "    local_invocation_ids_packed = %i\n", info->compiler_info.local_invocation_ids_packed);
+   fprintf(f, "    has_3d_cube_border_color_mipmap = %i\n", info->compiler_info.has_3d_cube_border_color_mipmap);
+   fprintf(f, "    conformant_trunc_coord = %i\n", info->compiler_info.conformant_trunc_coord);
+   fprintf(f, "    has_attr_ring = %i\n", info->compiler_info.has_attr_ring);
+   fprintf(f, "    smaller_tcs_workgroups = %i\n", info->compiler_info.smaller_tcs_workgroups);
+   fprintf(f, "    has_gfx6_mrt_export_bug = %i\n", info->compiler_info.has_gfx6_mrt_export_bug);
+   fprintf(f, "    has_vtx_format_alpha_adjust_bug = %i\n", info->compiler_info.has_vtx_format_alpha_adjust_bug);
+   fprintf(f, "    has_smem_oob_access_bug = %i\n", info->compiler_info.has_smem_oob_access_bug);
+   fprintf(f, "    has_image_load_dcc_bug = %i\n", info->compiler_info.has_image_load_dcc_bug);
+   fprintf(f, "    has_ls_vgpr_init_bug = %i\n", info->compiler_info.has_ls_vgpr_init_bug);
+   fprintf(f, "    has_cb_lt16bit_int_clamp_bug = %i\n", info->compiler_info.has_cb_lt16bit_int_clamp_bug);
+   fprintf(f, "    has_vrs_frag_pos_z_bug = %i\n", info->compiler_info.has_vrs_frag_pos_z_bug);
+   fprintf(f, "    has_ngg_fully_culled_bug = %i\n", info->compiler_info.has_ngg_fully_culled_bug);
+   fprintf(f, "    has_attr_ring_wait_bug = %i\n", info->compiler_info.has_attr_ring_wait_bug);
+   fprintf(f, "    has_primid_instancing_bug = %i\n", info->compiler_info.has_primid_instancing_bug);
+
    fprintf(f, "Ring info:\n");
    if (info->gfx_level >= GFX11) {
       fprintf(f, "    attribute_ring_size_per_se = %u KB\n",
@@ -2298,8 +2345,9 @@ ac_get_compute_resource_limits(const struct radeon_info *info, unsigned waves_pe
 
       /* Gfx9 should set the limit to max instead of 0 to fix high priority compute. */
       if (info->gfx_level == GFX9 && !max_waves_per_sh) {
-         max_waves_per_sh = info->max_good_cu_per_sa * info->cu_info.num_simd_per_compute_unit *
-                            info->cu_info.max_waves_per_simd;
+         max_waves_per_sh = info->max_good_cu_per_sa *
+                            info->compiler_info.num_simd_per_compute_unit *
+                            info->compiler_info.max_waves_per_simd;
       }
 
       /* On GFX12+, WAVES_PER_SH means waves per SE. */
@@ -2332,11 +2380,8 @@ static uint16_t get_task_num_entries(enum radeon_family fam)
     * Use a low number on smaller chips so we don't waste space,
     * but keep it high on bigger chips so it doesn't inhibit parallelism.
     *
-    * This number is compiled into task/mesh shaders as a constant.
-    * In order to ensure this works fine with the shader cache, we must
-    * base this decision on the chip family, not the number of CUs in
-    * the current GPU. (So, the cache remains consistent for all
-    * chips in the same family.)
+    * TODO: should we base this decision on the number of CUs in the
+    * current GPU instead of the family?
     */
    switch (fam) {
    case CHIP_VANGOGH:

@@ -233,6 +233,7 @@ radv_shader_layout_init(const struct radv_pipeline_layout *pipeline_layout, mesa
 
    layout->use_dynamic_descriptors = pipeline_layout->dynamic_offset_count &&
                                      (pipeline_layout->dynamic_shader_stages & mesa_to_vk_shader_stage(stage));
+   layout->independent_sets = pipeline_layout->independent_sets;
 }
 
 static nir_component_mask_t
@@ -248,7 +249,6 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
                      struct radv_shader_stage *stage)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    enum amd_gfx_level gfx_level = pdev->info.gfx_level;
    bool progress;
 
@@ -301,7 +301,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
       NIR_PASS(progress, stage->nir, nir_opt_load_store_vectorize, &vectorize_opts);
       if (progress) {
          NIR_PASS(_, stage->nir, nir_opt_copy_prop);
-         NIR_PASS(_, stage->nir, nir_opt_shrink_stores, !instance->drirc.debug.disable_shrink_image_store);
+         NIR_PASS(_, stage->nir, nir_opt_shrink_stores, !pdev->cache_key.disable_shrink_image_store);
 
          constant_fold_for_push_const = true;
       }
@@ -340,7 +340,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
             &(ac_nir_lower_image_tex_options){
                .gfx_level = gfx_level,
                .lower_array_layer_round_even =
-                  !pdev->info.conformant_trunc_coord || instance->drirc.debug.disable_trunc_coord,
+                  !pdev->info.compiler_info.conformant_trunc_coord || pdev->cache_key.disable_trunc_coord,
                .fix_derivs_in_divergent_cf =
                   stage->stage == MESA_SHADER_FRAGMENT && !radv_use_llvm_for_stage(pdev, stage->stage),
                .max_wqm_vgprs = 64, // TODO: improve spiller and RA support for linear VGPRs
@@ -425,7 +425,6 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
    } else if (stage->stage == MESA_SHADER_FRAGMENT) {
       ac_nir_lower_ps_late_options late_options = {
          .gfx_level = gfx_level,
-         .family = pdev->info.family,
          .use_aco = !radv_use_llvm_for_stage(pdev, stage->stage),
          .bc_optimize_for_persp = G_0286CC_PERSP_CENTER_ENA(stage->info.ps.spi_ps_input_ena) &&
                                   G_0286CC_PERSP_CENTROID_ENA(stage->info.ps.spi_ps_input_ena),
@@ -492,7 +491,8 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
    NIR_PASS(_, stage->nir, ac_nir_lower_intrinsics_to_args, &stage->args.ac,
             &(ac_nir_lower_intrinsics_to_args_options){
                .gfx_level = gfx_level,
-               .has_ls_vgpr_init_bug = pdev->info.has_ls_vgpr_init_bug && gfx_state && !gfx_state->vs.has_prolog,
+               .has_ls_vgpr_init_bug =
+                  pdev->info.compiler_info.has_ls_vgpr_init_bug && gfx_state && !gfx_state->vs.has_prolog,
                .hw_stage = radv_select_hw_stage(&stage->info, gfx_level),
                .wave_size = stage->info.wave_size,
                .workgroup_size = stage->info.workgroup_size,
@@ -623,11 +623,10 @@ bool
 radv_shader_should_clear_lds(const struct radv_device *device, const nir_shader *shader)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
    return (shader->info.stage == MESA_SHADER_COMPUTE || shader->info.stage == MESA_SHADER_MESH ||
            shader->info.stage == MESA_SHADER_TASK) &&
-          shader->info.shared_size > 0 && instance->drirc.misc.clear_lds;
+          shader->info.shared_size > 0 && pdev->cache_key.clear_lds;
 }
 
 static uint32_t

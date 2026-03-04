@@ -161,6 +161,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_image_robustness = true,
       .EXT_image_view_min_lod = true,
       .EXT_index_type_uint8 = true,
+      .EXT_legacy_dithering = true,
       .EXT_line_rasterization = true,
       .EXT_load_store_op_none = true,
       .EXT_non_seamless_cube_map = true,
@@ -206,6 +207,7 @@ panvk_per_arch(get_physical_device_extensions)(
 
       .ARM_shader_core_builtins = true,
       .ARM_shader_core_properties = has_vk1_1,
+      .ARM_scheduling_controls = PAN_ARCH >= 10,
    };
 }
 
@@ -553,6 +555,9 @@ panvk_per_arch(get_physical_device_features)(
       /* VK_EXT_ycbcr_image_arrays */
       .ycbcrImageArrays = PAN_ARCH >= 10,
 
+      /* VK_EXT_legacy_dithering */
+      .legacyDithering = true,
+
       /* VK_EXT_non_seamless_cube_map */
       .nonSeamlessCubeMap = true,
 
@@ -586,6 +591,9 @@ panvk_per_arch(get_physical_device_features)(
 
       /* VK_ARM_shader_core_builtins */
       .shaderCoreBuiltins = PAN_ARCH >= 9,
+
+      /* VK_ARM_scheduling_controls */
+      .schedulingControls = PAN_ARCH >= 10,
 
       /* VK_EXT_multisampled_render_to_single_sampled */
       .multisampledRenderToSingleSampled = true,
@@ -1115,6 +1123,10 @@ panvk_per_arch(get_physical_device_properties)(
       .shaderCoreCount = util_bitcount(device->kmod.dev->props.shader_present),
       .shaderWarpsPerCore = device->kmod.dev->props.max_threads_per_core /
                             (pan_subgroup_size(PAN_ARCH) * 2),
+
+      /* VK_ARM_scheduling_controls */
+      .schedulingControlsFlags =
+         VK_PHYSICAL_DEVICE_SCHEDULING_CONTROLS_SHADER_CORE_COUNT_ARM,
    };
 
    snprintf(properties->deviceName, sizeof(properties->deviceName), "%s",

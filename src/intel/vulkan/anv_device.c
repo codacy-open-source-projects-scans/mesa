@@ -501,7 +501,7 @@ VkResult anv_CreateDevice(
          decoder->engine = physical_device->queue.families[i].engine_class;
          decoder->dynamic_base = physical_device->va.dynamic_state_pool.addr;
          decoder->surface_base = physical_device->va.internal_surface_state_pool.addr;
-         decoder->instruction_base = physical_device->va.instruction_state_pool.addr;
+         decoder->instruction_base = physical_device->va.shader_heap.addr;
       }
    }
 
@@ -653,7 +653,7 @@ VkResult anv_CreateDevice(
       goto fail_dynamic_state_pool;
 
    result = anv_shader_heap_init(&device->shader_heap, device,
-                                 device->physical->va.instruction_state_pool,
+                                 device->physical->va.shader_heap,
                                  21 /* 2MiB */, 27 /* 64MiB */);
    if (result != VK_SUCCESS)
       goto fail_custom_border_color_pool;
@@ -712,7 +712,7 @@ VkResult anv_CreateDevice(
                                    &(struct anv_state_pool_params) {
                                       .name         = "binding table pool",
                                       .base_address = device->physical->va.binding_table_pool.addr,
-                                      .block_size   = BINDING_TABLE_POOL_BLOCK_SIZE,
+                                      .block_size   = device->physical->instance->binding_table_block_size,
                                       .max_size     = device->physical->va.binding_table_pool.size,
                                    });
    } else {
@@ -730,7 +730,7 @@ VkResult anv_CreateDevice(
                                       .name         = "binding table pool",
                                       .base_address = device->physical->va.internal_surface_state_pool.addr,
                                       .start_offset = bt_pool_offset,
-                                      .block_size   = BINDING_TABLE_POOL_BLOCK_SIZE,
+                                      .block_size   = 64 * 1024,
                                       .max_size     = device->physical->va.internal_surface_state_pool.size,
                                    });
    }

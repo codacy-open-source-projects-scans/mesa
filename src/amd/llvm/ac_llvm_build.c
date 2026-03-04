@@ -37,7 +37,7 @@ struct ac_llvm_flow {
  * The caller is responsible for initializing ctx::module and ctx::builder.
  */
 void ac_llvm_context_init(struct ac_llvm_context *ctx, struct ac_llvm_compiler *compiler,
-                          const struct radeon_info *info, enum ac_float_mode float_mode,
+                          const struct ac_compiler_info *info, enum ac_float_mode float_mode,
                           unsigned wave_size, bool exports_color_null, bool exports_mrtz)
 {
    ctx->context = LLVMContextCreate();
@@ -418,7 +418,7 @@ void ac_build_optimization_barrier(struct ac_llvm_context *ctx, LLVMValueRef *pg
    } else {
       LLVMTypeRef old_type = LLVMTypeOf(*pgpr);
 
-      if (old_type == ctx->i1)
+      if (old_type == ctx->i1 || old_type == ctx->i8)
          *pgpr = LLVMBuildZExt(builder, *pgpr, ctx->i32, "");
 
       if (old_type == LLVMVectorType(ctx->i16, 3))
@@ -430,7 +430,7 @@ void ac_build_optimization_barrier(struct ac_llvm_context *ctx, LLVMValueRef *pg
 
       *pgpr = LLVMBuildCall2(builder, ftype, inlineasm, pgpr, 1, "");
 
-      if (old_type == ctx->i1)
+      if (old_type == ctx->i1 || old_type == ctx->i8)
          *pgpr = LLVMBuildTrunc(builder, *pgpr, old_type, "");
 
       if (old_type == LLVMVectorType(ctx->i16, 3))
@@ -1089,7 +1089,7 @@ LLVMValueRef ac_build_safe_tbuffer_load(struct ac_llvm_context *ctx, LLVMValueRe
                                         bool can_speculate)
 {
    const struct ac_vtx_format_info *vtx_info =
-      ac_get_vtx_format_info(ctx->gfx_level, ctx->info->cu_info.has_vtx_format_alpha_adjust_bug, format);
+      ac_get_vtx_format_info(ctx->gfx_level, ctx->info->has_vtx_format_alpha_adjust_bug, format);
    const unsigned max_channels = vtx_info->num_channels;
    LLVMValueRef voffset_plus_const =
       LLVMBuildAdd(ctx->builder, base_voffset, LLVMConstInt(ctx->i32, const_offset, 0), "");
@@ -1420,7 +1420,7 @@ void ac_build_export(struct ac_llvm_context *ctx, struct ac_export_args *a)
     * X writemask component.
     */
    unsigned enabled_channels = a->enabled_channels;
-   if (ctx->info->cu_info.has_gfx6_mrt_export_bug && enabled_channels &&
+   if (ctx->info->has_gfx6_mrt_export_bug && enabled_channels &&
        a->target <= V_008DFC_SQ_EXP_MRTZ) {
       enabled_channels |= 1;
    }

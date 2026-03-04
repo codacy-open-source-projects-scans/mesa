@@ -148,6 +148,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_calibrated_timestamps             = device->has_reg_timestamp,
       .KHR_compute_shader_derivatives        = true,
       .KHR_cooperative_matrix                = device->has_cooperative_matrix,
+      .NV_cooperative_matrix2                = device->has_cooperative_matrix,
       .KHR_copy_commands2                    = true,
       .KHR_create_renderpass2                = true,
       .KHR_dedicated_allocation              = true,
@@ -288,6 +289,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_depth_range_unrestricted          = device->info.ver >= 20,
       .EXT_descriptor_buffer                 = true,
       .EXT_descriptor_indexing               = true,
+      .EXT_device_address_binding_report     = true,
       .EXT_device_memory_report              = true,
 #ifdef VK_USE_PLATFORM_DISPLAY_KHR
       .EXT_display_control                   = true,
@@ -883,6 +885,9 @@ get_features(const struct anv_physical_device *pdevice,
       /* VK_KHR_cooperative_matrix */
       .cooperativeMatrix = pdevice->has_cooperative_matrix,
 
+      /* VK_NV_cooperative_matrix2 */
+      .cooperativeMatrixPerElementOperations = pdevice->has_cooperative_matrix,
+
       /* VK_KHR_shader_maximal_reconvergence */
       .shaderMaximalReconvergence = true,
 
@@ -1009,6 +1014,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_KHR_internally_synchronized_queues */
       .internallySynchronizedQueues = true,
+
+      /* VK_EXT_device_address_binding_report */
+      .reportAddressBinding = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without

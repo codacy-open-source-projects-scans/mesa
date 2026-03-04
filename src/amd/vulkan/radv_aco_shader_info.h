@@ -124,13 +124,12 @@ radv_aco_convert_opts(struct aco_compiler_options *aco_info, const struct radv_n
    ASSIGN_FIELD(wgp_mode);
    ASSIGN_FIELD(debug.func);
    ASSIGN_FIELD(debug.private_data);
-   aco_info->cu_info = &radv->info->cu_info;
+   aco_info->compiler_info = &radv->info->compiler_info;
    aco_info->is_opengl = false;
    aco_info->optimisations_disabled = stage_key->optimisations_disabled;
    aco_info->gfx_level = radv->info->gfx_level;
    aco_info->family = radv->info->family;
    aco_info->address32_hi = radv->info->address32_hi;
-   aco_info->has_ls_vgpr_init_bug = radv->info->has_ls_vgpr_init_bug;
 }
 #undef ASSIGN_VS_STATE_FIELD
 #undef ASSIGN_VS_STATE_FIELD_CP

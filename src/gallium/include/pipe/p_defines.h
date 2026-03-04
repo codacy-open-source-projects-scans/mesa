@@ -470,7 +470,7 @@ enum pipe_flush_flags
 #define PIPE_BIND_GLOBAL               (1 << 13) /* set_global_binding */
 #define PIPE_BIND_SHADER_BUFFER        (1 << 14) /* set_shader_buffers */
 #define PIPE_BIND_SHADER_IMAGE         (1 << 15) /* set_shader_images */
-/* gap */
+#define PIPE_BIND_OPENCL               (1 << 16) /* potentially higher precision reqs */
 #define PIPE_BIND_COMMAND_ARGS_BUFFER  (1 << 17) /* pipe_draw_info.indirect */
 #define PIPE_BIND_QUERY_BUFFER         (1 << 18) /* get_query_result_resource */
 
@@ -551,6 +551,9 @@ enum pipe_tess_spacing {
 
 /**
  * Query object types
+ *
+ * Note, PIPE_QUERY_x has somehow become ABI between virgl (guest) and
+ * virglrenderer (host).  Mistakes were made, now we live with it.
  */
 enum pipe_query_type {
    PIPE_QUERY_OCCLUSION_COUNTER,
@@ -1059,6 +1062,7 @@ struct pipe_caps {
    bool mesh_shader;
    bool representative_fragment_test;
    bool prefer_persp;
+   bool blit_3d;
 
    int accelerated;
    int min_texel_offset;
@@ -1168,15 +1172,6 @@ struct pipe_caps {
    float min_conservative_raster_dilate;
    float max_conservative_raster_dilate;
    float conservative_raster_dilate_granularity;
-
-   /**
-    * If the driver supports PIPE_QUERY_TIMESTAMP_RAW this should
-    * be set to the scaling factor to multiply the raw timestamp
-    * by to get nanoseconds.
-    *
-    * Should be zero if the driver does not implement the query.
-    */
-   float raw_timestamp_period;
 
    struct pipe_mesh_caps mesh;
 };

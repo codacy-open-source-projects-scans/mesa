@@ -437,6 +437,8 @@ blorp_exec_on_render(struct blorp_batch *batch,
 
    cmd_buffer->state.gfx.vb_dirty = ~0;
    cmd_buffer->state.gfx.dirty |= dirty;
+   if (blorp_uses_bti_rt_writes(batch, params))
+      cmd_buffer->state.descriptors_pointers_dirty |= VK_SHADER_STAGE_ALL_GRAPHICS;
    cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_ALL_GRAPHICS;
 }
 
@@ -449,14 +451,17 @@ blorp_exec_on_compute(struct blorp_batch *batch,
    struct anv_cmd_buffer *cmd_buffer = batch->driver_batch;
    assert(cmd_buffer->queue_family->queueFlags & VK_QUEUE_COMPUTE_BIT);
 
-   genX(flush_pipeline_select_gpgpu)(cmd_buffer);
+   genX(flush_pipeline_select_gpgpu)(cmd_buffer, false);
 
    /* Apply any outstanding flushes in case pipeline select haven't. */
    genX(cmd_buffer_apply_pipe_flushes)(cmd_buffer);
 
    blorp_exec(batch, params);
 
-   cmd_buffer->state.descriptors_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
+   anv_cmd_buffer_dirty_descriptors(cmd_buffer,
+                                    VK_SHADER_STAGE_COMPUTE_BIT,
+                                    "blorp compute");
+   cmd_buffer->state.descriptors_pointers_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
    cmd_buffer->state.push_constants_dirty |= VK_SHADER_STAGE_COMPUTE_BIT;
    cmd_buffer->state.compute.pipeline_dirty = true;
 

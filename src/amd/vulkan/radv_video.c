@@ -910,9 +910,11 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
       pCapabilities->pictureAccessGranularity.width = VK_VIDEO_H265_CTU_MAX_WIDTH;
       if (enc_caps) {
          enc_caps->encodeInputPictureGranularity = pCapabilities->pictureAccessGranularity;
-         /* VCN1 can't enable rate control modes due to missing cu_qp_delta FW interface. */
-         if (pdev->enc_hw_ver == RADV_VIDEO_ENC_HW_1_2)
+         /* VCN1 can't enable rate control modes or qp maps due to missing cu_qp_delta FW interface. */
+         if (pdev->enc_hw_ver == RADV_VIDEO_ENC_HW_1_2) {
             enc_caps->rateControlModes = VK_VIDEO_ENCODE_RATE_CONTROL_MODE_DISABLED_BIT_KHR;
+            enc_caps->flags &= ~VK_VIDEO_ENCODE_CAPABILITY_QUANTIZATION_DELTA_MAP_BIT_KHR;
+         }
       }
 
       ext->flags = VK_VIDEO_ENCODE_H265_CAPABILITY_HRD_COMPLIANCE_BIT_KHR |
@@ -1292,12 +1294,14 @@ radv_BindVideoSessionMemoryKHR(VkDevice _device, VkVideoSessionKHR videoSession,
             device->ws->buffer_unmap(device->ws, vid->sessionctx.mem->bo, false);
          }
          break;
-      case RADV_BIND_ENCODE_AV1_CDF_STORE:
+      case RADV_BIND_ENCODE_CTX:
          copy_bind(&vid->ctx, &pBindSessionMemoryInfos[i]);
-         if (vid->encode)
-            radv_video_enc_init_ctx(device, vid);
          break;
-
+      case RADV_BIND_ENCODE_AV1_CDF_STORE:
+         copy_bind(&vid->default_cdf, &pBindSessionMemoryInfos[i]);
+         if (vid->encode)
+            radv_video_enc_init_cdf(device, vid);
+         break;
       case RADV_BIND_INTRA_ONLY: {
          VkBindImageMemoryInfo bind_image = {
             .sType = VK_STRUCTURE_TYPE_BIND_IMAGE_MEMORY_INFO,

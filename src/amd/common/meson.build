@@ -1,7 +1,7 @@
 # Copyright © 2017 Intel Corporation
 # SPDX-License-Identifier: MIT
 
-amd_json_files = [
+amd_register_files = [
   # Generated:
   '../registers/gfx6.json',
   '../registers/gfx7.json',
@@ -23,9 +23,30 @@ amd_json_files = [
   '../registers/registers-manually-defined.json',
 ]
 
+amd_packet_files = [
+  # The python script expects parameters in this order.
+  '../packets/cp_pm4_table_data_gfx11.json',
+  '../packets/pm4_it_opcodes_gfx11.h',
+
+  '../packets/cp_pm4_table_data_gfx12.json',
+  '../packets/pm4_it_opcodes_gfx12.h',
+]
+
+amd_packet_headers = []
+
+foreach gen : ['gfx11', 'gfx12']
+  amd_packet_headers += custom_target(
+    'amd_cp_packets_' + gen + '.h',
+    input : ['../packets/parse_cp_pm4_table_data_json.py', amd_packet_files],
+    output : 'amd_cp_packets_' + gen + '.h',
+    command : [prog_python, '@INPUT@', gen],
+    capture : true,
+  )
+endforeach
+
 sid_tables_h = custom_target(
   'sid_tables_h',
-  input : ['sid_tables.py', 'sid.h'] + amd_json_files,
+  input : ['sid_tables.py', 'sid.h'] + amd_register_files,
   output : 'sid_tables.h',
   command : [prog_python, '@INPUT@'],
   capture : true,
@@ -33,7 +54,7 @@ sid_tables_h = custom_target(
 
 amdgfxregs_h = custom_target(
   'amdgfxregs_h',
-  input : ['../registers/makeregheader.py'] + amd_json_files,
+  input : ['../registers/makeregheader.py'] + amd_register_files,
   output : 'amdgfxregs.h',
   command : [prog_python, '@INPUT@', '--sort', 'address', '--guard', 'AMDGFXREGS_H'],
   capture : true,
@@ -167,22 +188,24 @@ if dep_elf.found()
   )
 endif
 
+idep_amd_generated_headers = declare_dependency(
+  sources : [amdgfxregs_h, sid_tables_h, amd_packet_headers]
+)
+
 libamd_common = static_library(
   'amd_common',
-  [amd_common_files, sid_tables_h, amdgfxregs_h, gfx10_format_table_c],
+  [amd_common_files, gfx10_format_table_c],
   include_directories : [
     inc_include, inc_src, inc_amd, inc_virtio_gpu,
   ],
   dependencies : [dep_llvm.partial_dependency(compile_args: true, includes: true)] + [
     dep_thread, dep_elf, dep_libdrm_amdgpu, dep_valgrind,
-    idep_mesautil, idep_nir_headers, idep_nir
+    idep_mesautil, idep_nir_headers, idep_nir, idep_amd_generated_headers
   ],
   link_with: [ link_with ],
   gnu_symbol_visibility : 'hidden',
   c_args : c_args
 )
-
-idep_amdgfxregs_h = declare_dependency(sources : [amdgfxregs_h])
 
 executable(
   'ac_ib_parser',
@@ -191,7 +214,7 @@ executable(
   include_directories : [
     inc_amd, inc_include, inc_src,
   ],
-  dependencies : [idep_amdgfxregs_h, idep_mesautil, idep_nir_headers],
+  dependencies : [idep_amd_generated_headers, idep_mesautil, idep_nir_headers],
 )
 
 if with_tests and not with_platform_windows
@@ -205,7 +228,7 @@ if with_tests and not with_platform_windows
         inc_amd, inc_include, inc_src,
       ],
       c_args : cpp_args_addrlib,
-      dependencies: [idep_amdgfxregs_h, dep_libdrm_amdgpu, idep_mesautil],
+      dependencies: [idep_amd_generated_headers, dep_libdrm_amdgpu, idep_mesautil],
     ),
     suite: ['amd']
   )
@@ -222,7 +245,7 @@ if with_tests and not with_platform_windows
           inc_amd, inc_include, inc_src,
         ],
         c_args : cpp_args_addrlib,
-        dependencies: [idep_amdgfxregs_h, dep_libdrm_amdgpu, idep_mesautil, dep_openmp],
+        dependencies: [idep_amd_generated_headers, dep_libdrm_amdgpu, idep_mesautil, dep_openmp],
       ),
       suite: ['amd']
     )

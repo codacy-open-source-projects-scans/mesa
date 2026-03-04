@@ -61,19 +61,19 @@ radv_meta_nir_build_fs_noop(struct radv_device *dev)
 }
 
 static void
-radv_meta_nir_build_resolve_shader_core(struct radv_device *device, nir_builder *b, bool is_integer, int samples,
-                                        nir_variable *input_img, nir_variable *color, nir_def *img_coord)
+radv_meta_nir_build_resolve_shader_core(nir_builder *b, bool use_fmask, int samples, VkImageAspectFlags aspects,
+                                        VkResolveModeFlagBits resolve_mode, nir_variable *input_img,
+                                        nir_variable *output, nir_def *img_coord)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
    nir_deref_instr *input_img_deref = nir_build_deref_var(b, input_img);
    nir_def *sample0 = nir_txf_ms(b, img_coord, nir_imm_int(b, 0), .texture_deref = input_img_deref);
 
-   if (is_integer || samples <= 1) {
-      nir_store_var(b, color, sample0, 0xf);
+   if (resolve_mode == VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) {
+      nir_store_var(b, output, sample0, 0xf);
       return;
    }
 
-   if (pdev->use_fmask) {
+   if (aspects == VK_IMAGE_ASPECT_COLOR_BIT && use_fmask) {
       nir_def *all_same = nir_samples_identical(b, img_coord, .texture_deref = input_img_deref);
       nir_push_if(b, nir_inot(b, all_same));
    }
@@ -81,15 +81,37 @@ radv_meta_nir_build_resolve_shader_core(struct radv_device *device, nir_builder 
    nir_def *accum = sample0;
    for (int i = 1; i < samples; i++) {
       nir_def *sample = nir_txf_ms(b, img_coord, nir_imm_int(b, i), .texture_deref = input_img_deref);
-      accum = nir_fadd(b, accum, sample);
+
+      switch (resolve_mode) {
+      case VK_RESOLVE_MODE_AVERAGE_BIT:
+         assert(aspects == VK_IMAGE_ASPECT_COLOR_BIT || aspects == VK_IMAGE_ASPECT_DEPTH_BIT);
+         accum = nir_fadd(b, accum, sample);
+         break;
+      case VK_RESOLVE_MODE_MIN_BIT:
+         if (aspects == VK_IMAGE_ASPECT_DEPTH_BIT)
+            accum = nir_fmin(b, accum, sample);
+         else
+            accum = nir_umin(b, accum, sample);
+         break;
+      case VK_RESOLVE_MODE_MAX_BIT:
+         if (aspects == VK_IMAGE_ASPECT_DEPTH_BIT)
+            accum = nir_fmax(b, accum, sample);
+         else
+            accum = nir_umax(b, accum, sample);
+         break;
+      default:
+         UNREACHABLE("invalid resolve mode");
+      }
    }
 
-   accum = nir_fdiv_imm(b, accum, samples);
-   nir_store_var(b, color, accum, 0xf);
+   if (resolve_mode == VK_RESOLVE_MODE_AVERAGE_BIT)
+      accum = nir_fdiv_imm(b, accum, samples);
 
-   if (pdev->use_fmask) {
+   nir_store_var(b, output, accum, 0xf);
+
+   if (aspects == VK_IMAGE_ASPECT_COLOR_BIT && use_fmask) {
       nir_push_else(b, NULL);
-      nir_store_var(b, color, sample0, 0xf);
+      nir_store_var(b, output, sample0, 0xf);
       nir_pop_if(b, NULL);
    }
 }
@@ -868,9 +890,9 @@ radv_meta_nir_build_clear_dcc_comp_to_single_shader(struct radv_device *dev, boo
 }
 
 nir_shader *
-radv_meta_nir_build_copy_vrs_htile_shader(struct radv_device *device, const struct radeon_surf *surf)
+radv_meta_nir_build_copy_vrs_htile_shader(struct radv_device *device, enum amd_gfx_level gfx_level,
+                                          uint32_t gb_addr_config, const struct radeon_surf *surf)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(device);
    nir_builder b = radv_meta_nir_init_shader(device, MESA_SHADER_COMPUTE, "meta_copy_vrs_htile");
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
@@ -895,8 +917,8 @@ radv_meta_nir_build_copy_vrs_htile_shader(struct radv_device *device, const stru
    /* Get the HTILE addr from coordinates. */
    nir_def *zero = nir_imm_int(&b, 0);
    nir_def *htile_offset =
-      ac_nir_htile_addr_from_coord(&b, &pdev->info, &surf->u.gfx9.zs.htile_equation, htile_pitch, htile_slice_size,
-                                   nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), zero, zero);
+      ac_nir_htile_addr_from_coord(&b, gfx_level, gb_addr_config, &surf->u.gfx9.zs.htile_equation, htile_pitch,
+                                   htile_slice_size, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), zero, zero);
 
    /* Set up the input VRS image descriptor. */
    const struct glsl_type *vrs_sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_2D, false, false, GLSL_TYPE_FLOAT);
@@ -950,9 +972,9 @@ radv_meta_nir_build_copy_vrs_htile_shader(struct radv_device *device, const stru
 }
 
 nir_shader *
-radv_meta_nir_build_dcc_retile_compute_shader(struct radv_device *dev, const struct radeon_surf *surf)
+radv_meta_nir_build_dcc_retile_compute_shader(struct radv_device *dev, enum amd_gfx_level gfx_level,
+                                              uint32_t gb_addr_config, const struct radeon_surf *surf)
 {
-   const struct radv_physical_device *pdev = radv_device_physical(dev);
    enum glsl_sampler_dim dim = GLSL_SAMPLER_DIM_BUF;
    const struct glsl_type *buf_type = glsl_image_type(dim, false, GLSL_TYPE_UINT);
    nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "dcc_retile_compute");
@@ -982,12 +1004,12 @@ radv_meta_nir_build_dcc_retile_compute_shader(struct radv_device *dev, const str
    coord =
       nir_imul(&b, coord, nir_imm_ivec2(&b, surf->u.gfx9.color.dcc_block_width, surf->u.gfx9.color.dcc_block_height));
 
-   nir_def *src = ac_nir_dcc_addr_from_coord(&b, &pdev->info, surf->bpe, &surf->u.gfx9.color.dcc_equation,
+   nir_def *src = ac_nir_dcc_addr_from_coord(&b, gfx_level, gb_addr_config, surf->bpe, &surf->u.gfx9.color.dcc_equation,
                                              src_dcc_pitch, src_dcc_height, zero, nir_channel(&b, coord, 0),
                                              nir_channel(&b, coord, 1), zero, zero, zero);
-   nir_def *dst = ac_nir_dcc_addr_from_coord(&b, &pdev->info, surf->bpe, &surf->u.gfx9.color.display_dcc_equation,
-                                             dst_dcc_pitch, dst_dcc_height, zero, nir_channel(&b, coord, 0),
-                                             nir_channel(&b, coord, 1), zero, zero, zero);
+   nir_def *dst = ac_nir_dcc_addr_from_coord(
+      &b, gfx_level, gb_addr_config, surf->bpe, &surf->u.gfx9.color.display_dcc_equation, dst_dcc_pitch, dst_dcc_height,
+      zero, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), zero, zero, zero);
 
    nir_def *dcc_val = nir_image_deref_load(&b, 1, 32, input_dcc_ref, nir_vec4(&b, src, src, src, src),
                                            nir_undef(&b, 1, 32), nir_imm_int(&b, 0), .image_dim = dim,
@@ -1207,15 +1229,36 @@ radv_meta_resolve_compute_type_name(enum radv_meta_resolve_compute_type type)
    }
 }
 
-nir_shader *
-radv_meta_nir_build_resolve_compute_shader(struct radv_device *dev, enum radv_meta_resolve_compute_type type,
-                                           int samples)
+static const char *
+get_resolve_mode_str(VkResolveModeFlagBits resolve_mode)
 {
-   enum glsl_base_type img_base_type = type == RADV_META_RESOLVE_COMPUTE_INTEGER ? GLSL_TYPE_UINT : GLSL_TYPE_FLOAT;
+   switch (resolve_mode) {
+   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
+      return "zero";
+   case VK_RESOLVE_MODE_AVERAGE_BIT:
+      return "average";
+   case VK_RESOLVE_MODE_MIN_BIT:
+      return "min";
+   case VK_RESOLVE_MODE_MAX_BIT:
+      return "max";
+   default:
+      UNREACHABLE("invalid resolve mode");
+   }
+}
+
+nir_shader *
+radv_meta_nir_build_resolve_cs(struct radv_device *dev, bool use_fmask, enum radv_meta_resolve_compute_type type,
+                               int samples, VkImageAspectFlags aspects, VkResolveModeFlagBits resolve_mode)
+{
+   enum glsl_base_type img_base_type =
+      (aspects == VK_IMAGE_ASPECT_COLOR_BIT && type == RADV_META_RESOLVE_COMPUTE_INTEGER) ||
+            aspects == VK_IMAGE_ASPECT_STENCIL_BIT
+         ? GLSL_TYPE_UINT
+         : GLSL_TYPE_FLOAT;
    const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, true, img_base_type);
    const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, img_base_type);
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_resolve_cs-%d-%s", samples,
-                                             radv_meta_resolve_compute_type_name(type));
+
+   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_resolve_cs");
    b.shader->info.workgroup_size[0] = 8;
    b.shader->info.workgroup_size[1] = 8;
 
@@ -1238,131 +1281,62 @@ radv_meta_nir_build_resolve_compute_shader(struct radv_device *dev, enum radv_me
    nir_def *src_img_coord =
       nir_vec3(&b, nir_channel(&b, src_coord, 0), nir_channel(&b, src_coord, 1), nir_channel(&b, global_id, 2));
 
-   nir_variable *color = nir_local_variable_create(b.impl, glsl_vec4_type(), "color");
+   nir_variable *output_var = nir_local_variable_create(b.impl, glsl_vec4_type(), "output_var");
+   radv_meta_nir_build_resolve_shader_core(&b, false, samples, aspects, resolve_mode, input_img, output_var,
+                                           src_img_coord);
+   nir_def *outval = nir_load_var(&b, output_var);
 
-   radv_meta_nir_build_resolve_shader_core(dev, &b, type == RADV_META_RESOLVE_COMPUTE_INTEGER, samples, input_img,
-                                           color, src_img_coord);
+   if (aspects == VK_IMAGE_ASPECT_COLOR_BIT) {
+      if (type == RADV_META_RESOLVE_COMPUTE_NORM_SRGB)
+         outval = radv_meta_build_resolve_srgb_conversion(&b, outval);
 
-   nir_def *outval = nir_load_var(&b, color);
-   if (type == RADV_META_RESOLVE_COMPUTE_NORM_SRGB)
-      outval = radv_meta_build_resolve_srgb_conversion(&b, outval);
-
-   if (type == RADV_META_RESOLVE_COMPUTE_NORM || type == RADV_META_RESOLVE_COMPUTE_NORM_SRGB)
-      outval = nir_f2f32(&b, nir_f2f16_rtz(&b, outval));
-
-   nir_def *dst_img_coord = nir_vec4(&b, nir_channel(&b, dst_coord, 0), nir_channel(&b, dst_coord, 1),
-                                     nir_channel(&b, dst_coord, 2), nir_undef(&b, 1, 32));
-
-   nir_image_deref_store(&b, &nir_build_deref_var(&b, output_img)->def, dst_img_coord, nir_undef(&b, 1, 32), outval,
-                         nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true);
-   return b.shader;
-}
-
-static const char *
-get_resolve_mode_str(VkResolveModeFlagBits resolve_mode)
-{
-   switch (resolve_mode) {
-   case VK_RESOLVE_MODE_SAMPLE_ZERO_BIT:
-      return "zero";
-   case VK_RESOLVE_MODE_AVERAGE_BIT:
-      return "average";
-   case VK_RESOLVE_MODE_MIN_BIT:
-      return "min";
-   case VK_RESOLVE_MODE_MAX_BIT:
-      return "max";
-   default:
-      UNREACHABLE("invalid resolve mode");
-   }
-}
-
-nir_shader *
-radv_meta_nir_build_depth_stencil_resolve_compute_shader(struct radv_device *dev, int samples,
-                                                         enum radv_meta_resolve_type index,
-                                                         VkResolveModeFlagBits resolve_mode)
-{
-   enum glsl_base_type img_base_type = index == RADV_META_DEPTH_RESOLVE ? GLSL_TYPE_FLOAT : GLSL_TYPE_UINT;
-   const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, true, img_base_type);
-   const struct glsl_type *img_type = glsl_image_type(GLSL_SAMPLER_DIM_2D, true, img_base_type);
-
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_COMPUTE, "meta_resolve_cs_%s-%s-%d",
-                                             index == RADV_META_DEPTH_RESOLVE ? "depth" : "stencil",
-                                             get_resolve_mode_str(resolve_mode), samples);
-   b.shader->info.workgroup_size[0] = 8;
-   b.shader->info.workgroup_size[1] = 8;
-
-   nir_variable *input_img = nir_variable_create(b.shader, nir_var_uniform, sampler_type, "s_tex");
-   input_img->data.descriptor_set = 0;
-   input_img->data.binding = 0;
-
-   nir_variable *output_img = nir_variable_create(b.shader, nir_var_image, img_type, "out_img");
-   output_img->data.descriptor_set = 0;
-   output_img->data.binding = 1;
-
-   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 3);
-
-   nir_def *offset = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8);
-
-   nir_def *resolve_coord = nir_iadd(&b, nir_trim_vector(&b, global_id, 2), offset);
-
-   nir_def *img_coord =
-      nir_vec3(&b, nir_channel(&b, resolve_coord, 0), nir_channel(&b, resolve_coord, 1), nir_channel(&b, global_id, 2));
-
-   nir_deref_instr *input_img_deref = nir_build_deref_var(&b, input_img);
-   nir_def *outval = nir_txf_ms(&b, img_coord, nir_imm_int(&b, 0), .texture_deref = input_img_deref);
-
-   if (resolve_mode != VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) {
-      for (int i = 1; i < samples; i++) {
-         nir_def *si = nir_txf_ms(&b, img_coord, nir_imm_int(&b, i), .texture_deref = input_img_deref);
-
-         switch (resolve_mode) {
-         case VK_RESOLVE_MODE_AVERAGE_BIT:
-            assert(index == RADV_META_DEPTH_RESOLVE);
-            outval = nir_fadd(&b, outval, si);
-            break;
-         case VK_RESOLVE_MODE_MIN_BIT:
-            if (index == RADV_META_DEPTH_RESOLVE)
-               outval = nir_fmin(&b, outval, si);
-            else
-               outval = nir_umin(&b, outval, si);
-            break;
-         case VK_RESOLVE_MODE_MAX_BIT:
-            if (index == RADV_META_DEPTH_RESOLVE)
-               outval = nir_fmax(&b, outval, si);
-            else
-               outval = nir_umax(&b, outval, si);
-            break;
-         default:
-            UNREACHABLE("invalid resolve mode");
-         }
-      }
-
-      if (resolve_mode == VK_RESOLVE_MODE_AVERAGE_BIT)
-         outval = nir_fdiv_imm(&b, outval, samples);
+      if (type == RADV_META_RESOLVE_COMPUTE_NORM || type == RADV_META_RESOLVE_COMPUTE_NORM_SRGB)
+         outval = nir_f2f32(&b, nir_f2f16_rtz(&b, outval));
    }
 
-   nir_def *coord = nir_vec4(&b, nir_channel(&b, img_coord, 0), nir_channel(&b, img_coord, 1),
-                             nir_channel(&b, img_coord, 2), nir_undef(&b, 1, 32));
+   nir_def *coord = nir_vec4(&b, nir_channel(&b, dst_coord, 0), nir_channel(&b, dst_coord, 1),
+                             nir_channel(&b, dst_coord, 2), nir_undef(&b, 1, 32));
    nir_image_deref_store(&b, &nir_build_deref_var(&b, output_img)->def, coord, nir_undef(&b, 1, 32), outval,
                          nir_imm_int(&b, 0), .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = true);
    return b.shader;
 }
 
 nir_shader *
-radv_meta_nir_build_resolve_fragment_shader(struct radv_device *dev, bool is_integer, int samples)
+radv_meta_nir_build_resolve_fs(struct radv_device *dev, bool use_fmask, int samples, bool is_integer,
+                               VkImageAspectFlags aspects, VkResolveModeFlagBits resolve_mode)
 {
-   enum glsl_base_type img_base_type = is_integer ? GLSL_TYPE_UINT : GLSL_TYPE_FLOAT;
+   enum glsl_base_type img_base_type =
+      (aspects == VK_IMAGE_ASPECT_COLOR_BIT && is_integer) || aspects == VK_IMAGE_ASPECT_STENCIL_BIT ? GLSL_TYPE_UINT
+                                                                                                     : GLSL_TYPE_FLOAT;
    const struct glsl_type *vec4 = glsl_vec4_type();
    const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, false, img_base_type);
 
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs-%d-%s", samples,
-                                             is_integer ? "int" : "float");
+   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs");
+
+   uint32_t location, writemask;
+   switch (aspects) {
+   case VK_IMAGE_ASPECT_COLOR_BIT:
+      location = FRAG_RESULT_DATA0;
+      writemask = 0xf;
+      break;
+   case VK_IMAGE_ASPECT_DEPTH_BIT:
+      location = FRAG_RESULT_DEPTH;
+      writemask = 0x1;
+      break;
+   case VK_IMAGE_ASPECT_STENCIL_BIT:
+      location = FRAG_RESULT_STENCIL;
+      writemask = 0x1;
+      break;
+   default:
+      UNREACHABLE("Unhandled aspect");
+   }
 
    nir_variable *input_img = nir_variable_create(b.shader, nir_var_uniform, sampler_type, "s_tex");
    input_img->data.descriptor_set = 0;
    input_img->data.binding = 0;
 
-   nir_variable *color_out = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_color");
-   color_out->data.location = FRAG_RESULT_DATA0;
+   nir_variable *fs_out = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_out");
+   fs_out->data.location = location;
 
    nir_def *pos_in = nir_trim_vector(&b, nir_load_frag_coord(&b), 2);
    nir_def *src_offset = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8);
@@ -1370,86 +1344,24 @@ radv_meta_nir_build_resolve_fragment_shader(struct radv_device *dev, bool is_int
    nir_def *pos_int = nir_f2i32(&b, pos_in);
 
    nir_def *img_coord = nir_trim_vector(&b, nir_iadd(&b, pos_int, src_offset), 2);
-   nir_variable *color = nir_local_variable_create(b.impl, glsl_vec4_type(), "color");
 
-   radv_meta_nir_build_resolve_shader_core(dev, &b, is_integer, samples, input_img, color, img_coord);
+   nir_variable *output_var = nir_local_variable_create(b.impl, glsl_vec4_type(), "output_var");
+   radv_meta_nir_build_resolve_shader_core(&b, use_fmask, samples, aspects, resolve_mode, input_img, output_var,
+                                           img_coord);
+   nir_def *outval = nir_load_var(&b, output_var);
 
-   nir_def *outval = nir_load_var(&b, color);
-   nir_store_var(&b, color_out, outval, 0xf);
-   return b.shader;
-}
-
-nir_shader *
-radv_meta_nir_build_depth_stencil_resolve_fragment_shader(struct radv_device *dev, int samples,
-                                                          enum radv_meta_resolve_type index,
-                                                          VkResolveModeFlagBits resolve_mode)
-{
-   enum glsl_base_type img_base_type = index == RADV_META_DEPTH_RESOLVE ? GLSL_TYPE_FLOAT : GLSL_TYPE_UINT;
-   const struct glsl_type *vec4 = glsl_vec4_type();
-   const struct glsl_type *sampler_type = glsl_sampler_type(GLSL_SAMPLER_DIM_MS, false, false, img_base_type);
-
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs_%s-%s-%d",
-                                             index == RADV_META_DEPTH_RESOLVE ? "depth" : "stencil",
-                                             get_resolve_mode_str(resolve_mode), samples);
-
-   nir_variable *input_img = nir_variable_create(b.shader, nir_var_uniform, sampler_type, "s_tex");
-   input_img->data.descriptor_set = 0;
-   input_img->data.binding = 0;
-
-   nir_variable *fs_out = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_out");
-   fs_out->data.location = index == RADV_META_DEPTH_RESOLVE ? FRAG_RESULT_DEPTH : FRAG_RESULT_STENCIL;
-
-   nir_def *pos_in = nir_trim_vector(&b, nir_load_frag_coord(&b), 2);
-
-   nir_def *pos_int = nir_f2i32(&b, pos_in);
-
-   nir_def *img_coord = nir_trim_vector(&b, pos_int, 2);
-
-   nir_deref_instr *input_img_deref = nir_build_deref_var(&b, input_img);
-   nir_def *outval = nir_txf_ms(&b, img_coord, nir_imm_int(&b, 0), .texture_deref = input_img_deref);
-
-   if (resolve_mode != VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) {
-      for (int i = 1; i < samples; i++) {
-         nir_def *si = nir_txf_ms(&b, img_coord, nir_imm_int(&b, i), .texture_deref = input_img_deref);
-
-         switch (resolve_mode) {
-         case VK_RESOLVE_MODE_AVERAGE_BIT:
-            assert(index == RADV_META_DEPTH_RESOLVE);
-            outval = nir_fadd(&b, outval, si);
-            break;
-         case VK_RESOLVE_MODE_MIN_BIT:
-            if (index == RADV_META_DEPTH_RESOLVE)
-               outval = nir_fmin(&b, outval, si);
-            else
-               outval = nir_umin(&b, outval, si);
-            break;
-         case VK_RESOLVE_MODE_MAX_BIT:
-            if (index == RADV_META_DEPTH_RESOLVE)
-               outval = nir_fmax(&b, outval, si);
-            else
-               outval = nir_umax(&b, outval, si);
-            break;
-         default:
-            UNREACHABLE("invalid resolve mode");
-         }
-      }
-
-      if (resolve_mode == VK_RESOLVE_MODE_AVERAGE_BIT)
-         outval = nir_fdiv_imm(&b, outval, samples);
-   }
-
-   nir_store_var(&b, fs_out, outval, 0x1);
+   nir_store_var(&b, fs_out, outval, writemask);
 
    return b.shader;
 }
 
 nir_shader *
-radv_meta_nir_build_resolve_fs(struct radv_device *dev)
+radv_meta_nir_build_resolve_hw(struct radv_device *dev)
 {
    const struct glsl_type *vec4 = glsl_vec4_type();
    nir_variable *f_color;
 
-   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_fs");
+   nir_builder b = radv_meta_nir_init_shader(dev, MESA_SHADER_FRAGMENT, "meta_resolve_hw");
 
    f_color = nir_variable_create(b.shader, nir_var_shader_out, vec4, "f_color");
    f_color->data.location = FRAG_RESULT_DATA0;

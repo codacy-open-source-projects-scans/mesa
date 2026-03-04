@@ -286,10 +286,10 @@ init_common_queue_state(struct anv_queue *queue, struct anv_batch *batch)
 
       sba.InstructionBaseAddress =
          (struct anv_address) {
-            .offset = device->physical->va.instruction_state_pool.addr,
+            .offset = device->physical->va.shader_heap.addr,
          };
       sba.InstructionBufferSize =
-         device->physical->va.instruction_state_pool.size / 4096;
+         device->physical->va.shader_heap.size / 4096;
 
       sba.InstructionMOCS = mocs;
       sba.InstructionBaseAddressModifyEnable = true;
@@ -411,7 +411,7 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
 
    struct anv_batch *batch = &submit->batch;
 
-   genX(emit_pipeline_select)(batch, _3D, device);
+   genX(emit_pipeline_select)(batch, _3D, device, false);
 
 #if GFX_VER == 9
    anv_batch_write_reg(batch, GENX(CACHE_MODE_1), cm1) {
@@ -639,6 +639,27 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
    }
 #endif
 
+
+   /* Force push constant gather at 3DSTATE_CONSTANT* command parsing, not
+    * when emitting 3DSTATE_BINDING_TABLE_POINTER* commands.
+    *
+    * 3DSTATE_BINDING_TABLE_POINTERS_* have to be programmed prior.
+    *
+    * Do it on all platforms for safety.
+    */
+   anv_batch_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_VS), _);
+   anv_batch_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_HS), _);
+   anv_batch_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_DS), _);
+   anv_batch_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_GS), _);
+   anv_batch_emit(batch, GENX(3DSTATE_BINDING_TABLE_POINTERS_PS), _);
+
+#if GFX_VER == 9
+   anv_batch_write_reg(batch, GENX(COMMON_SLICE_CHICKEN2), csc2) {
+      csc2.DisableGatheratSetShaderCommonSlice = true;
+      csc2.DisableGatheratSetShaderCommonSliceMask = true;
+   }
+#endif
+
    /* Set the "CONSTANT_BUFFER Address Offset Disable" bit, so
     * 3DSTATE_CONSTANT_XS buffer 0 is an absolute address.
     *
@@ -648,6 +669,10 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
    anv_batch_write_reg(batch, GENX(CS_DEBUG_MODE2), csdm2) {
       csdm2.CONSTANT_BUFFERAddressOffsetDisable = true;
       csdm2.CONSTANT_BUFFERAddressOffsetDisableMask = true;
+#if GFX_VER == 9
+      csdm2.DisableGatheratSetShader = true;
+      csdm2.DisableGatheratSetShaderMask = true;
+#endif
    }
 
    init_common_queue_state(queue, batch);
@@ -693,7 +718,7 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
                                       ANV_PIPE_FLUSH_BITS | ANV_PIPE_INVALIDATE_BITS);
 #endif
 
-   genX(emit_pipeline_select)(batch, GPGPU, device);
+   genX(emit_pipeline_select)(batch, GPGPU, device, false);
    anv_batch_emit(batch, GENX(CFE_STATE), cfe) {
       cfe.MaximumNumberofThreads =
          devinfo->max_cs_threads * devinfo->subslice_total;
@@ -709,7 +734,7 @@ init_render_queue_state(struct anv_queue *queue, bool is_companion_rcs_batch)
                                       ANV_PIPE_FLUSH_BITS | ANV_PIPE_INVALIDATE_BITS);
 #endif
 
-   genX(emit_pipeline_select)(batch, _3D, device);
+   genX(emit_pipeline_select)(batch, _3D, device, false);
 #endif
 
 #if GFX_VERx10 >= 125
@@ -768,7 +793,7 @@ init_compute_queue_state(struct anv_queue *queue)
 
    struct anv_batch *batch = &submit->batch;
 
-   genX(emit_pipeline_select)(batch, GPGPU, queue->device);
+   genX(emit_pipeline_select)(batch, GPGPU, queue->device, false);
 
 #if GFX_VER == 12
    if (queue->device->info->has_aux_map) {

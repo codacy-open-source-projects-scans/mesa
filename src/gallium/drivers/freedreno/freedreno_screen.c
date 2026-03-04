@@ -132,6 +132,12 @@ fd_screen_get_timestamp(struct pipe_screen *pscreen)
    }
 }
 
+static uint64_t
+fd_screen_convert_timestamp(struct pipe_screen *pscreen, uint64_t raw_timestamp)
+{
+   return ticks_to_ns(raw_timestamp);
+}
+
 static void
 fd_screen_destroy(struct pipe_screen *pscreen)
 {
@@ -182,7 +188,7 @@ get_memory_size(struct fd_screen *screen)
    if (fd_device_version(screen->dev) >= FD_VERSION_VA_SIZE) {
       uint64_t va_size;
       if (!fd_pipe_get_param(screen->pipe, FD_VA_SIZE, &va_size)) {
-         system_memory = MIN2(system_memory, va_size);
+         system_memory = MIN2(system_memory / 2, va_size);
       }
    }
 
@@ -387,6 +393,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->glsl_tess_levels_as_inputs = true;
    caps->texture_mirror_clamp_to_edge = true;
    caps->gl_spirv = true;
+   caps->cl_gl_sharing = true;
    caps->fbfetch_coherent = true;
    caps->has_const_bw = true;
 
@@ -682,8 +689,6 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    if (is_a6xx(screen)) {
       caps->shader_clock = true;
-      /*  PIPE_QUERY_TIMESTAMP_RAW: 19.2MHz RBBM always-on timer */
-      caps->raw_timestamp_period = 1000000000.0 / 19200000.0;
    }
 }
 
@@ -856,6 +861,22 @@ fd_screen_get_fd(struct pipe_screen *pscreen)
    return fd_device_fd(screen->dev);
 }
 
+static void
+__debug_init(void)
+{
+   fd_mesa_debug = debug_get_option_fd_mesa_debug();
+
+   if (FD_DBG(NOBIN))
+      fd_binning_enabled = false;
+}
+
+static void
+fd_screen_debug_init(void)
+{
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+   util_call_once(&once, __debug_init);
+}
+
 struct pipe_screen *
 fd_screen_create(int fd,
                  const struct pipe_screen_config *config,
@@ -869,10 +890,7 @@ fd_screen_create(int fd,
    struct pipe_screen *pscreen;
    uint64_t val;
 
-   fd_mesa_debug = debug_get_option_fd_mesa_debug();
-
-   if (FD_DBG(NOBIN))
-      fd_binning_enabled = false;
+   fd_screen_debug_init();
 
    if (!screen)
       return NULL;
@@ -1073,6 +1091,9 @@ fd_screen_create(int fd,
    pscreen->get_sample_pixel_grid = fd_get_sample_pixel_grid;
 
    pscreen->get_timestamp = fd_screen_get_timestamp;
+
+   if (is_a6xx(screen))
+      pscreen->convert_timestamp = fd_screen_convert_timestamp;
 
    pscreen->fence_reference = _fd_fence_ref;
    pscreen->fence_finish = fd_pipe_fence_finish;

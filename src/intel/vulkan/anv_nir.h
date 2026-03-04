@@ -35,8 +35,13 @@ struct vk_pipeline_robustness_state;
 
 #define anv_drv_const_offset(field) \
    (offsetof(struct anv_push_constants, field))
+#define anv_drv_const_dword(field) \
+   (offsetof(struct anv_push_constants, field) / 4)
 #define anv_drv_const_size(field) \
    (sizeof(((struct anv_push_constants *)0)->field))
+#define anv_drv_const_includes_offset(field, offset) \
+   ((offset) >= anv_drv_const_offset(field) && \
+    (offset) < (anv_drv_const_offset(field) + anv_drv_const_size(field)))
 
 #define anv_load_driver_uniform(b, components, field)                   \
    nir_load_push_data_intel(b, components,                              \
@@ -117,6 +122,8 @@ struct anv_nir_push_layout_info {
    bool fragment_dynamic;
    bool mesh_dynamic;
 };
+
+bool anv_nir_shrink_push_constant_ranges(nir_shader *nir);
 
 bool anv_nir_compute_push_layout(nir_shader *nir,
                                  const struct anv_physical_device *pdevice,

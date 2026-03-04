@@ -114,30 +114,19 @@ a618-angle:
 a618-vk:
   extends:
     - .lava-arm64-test-vk
-    - .lava-sc7180-trogdor-kingoftown:arm64
+    - .lava-sc7180-trogdor-wormdingler-rev1-boe:arm64
     - .collabora-turnip-rules
-  parallel: 8
+  parallel: 11
   variables:
     DEQP_SUITE: freedreno-a618-vk
     FLAKES_CHANNEL: "#freedreno-ci"
-    FDO_CI_CONCURRENT: 6  # We get OOMkills if we go too wide since VKCTS 1.4.4.0
-
-a618-vk-full:
-  extends:
-    - a618-vk
-    - .collabora-turnip-manual-rules
-  # We use a longer timeout to keep the parallel down so that we don't lock up
-  # too many runners for a long time when a dev is trying out at full VK status.
-  timeout: 2h
-  parallel: 3
-  variables:
-    DEQP_SUITE: freedreno-a618-vk-full
+    FDO_CI_CONCURRENT: 7  # We get OOMkills if we go too wide since VKCTS 1.4.4.0
 
 a618-vk-asan:
   extends:
     - .lava-arm64-test-asan-vk
     - .lava-sc7180-trogdor-kingoftown:arm64
-    - .collabora-turnip-manual-rules
+    - .collabora-turnip-rules
   timeout: 2h
   variables:
     DEQP_SUITE: freedreno-a618-vk-asan

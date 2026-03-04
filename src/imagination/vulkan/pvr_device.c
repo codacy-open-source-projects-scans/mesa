@@ -701,7 +701,7 @@ VkResult pvr_CreateBuffer(VkDevice _device,
                           VkBuffer *pBuffer)
 {
    VK_FROM_HANDLE(pvr_device, device, _device);
-   const uint32_t alignment = 4096;
+   const uint32_t alignment = device->pdevice->ws->page_size;
    struct pvr_buffer *buffer;
 
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO);
@@ -986,8 +986,9 @@ void pvr_GetBufferMemoryRequirements2(
       size += PVR_BUFFER_MEMORY_PADDING_SIZE;
    }
 
+   /* Use align64 to prevent overflow for large buffers (> 4GB). */
    pMemoryRequirements->memoryRequirements.size =
-      ALIGN_POT(size, buffer->alignment);
+      align64(size, buffer->alignment);
 
    vk_foreach_struct (ext, pMemoryRequirements->pNext) {
       switch (ext->sType) {
@@ -1004,6 +1005,61 @@ void pvr_GetBufferMemoryRequirements2(
          break;
       }
    }
+}
+
+void pvr_GetDeviceBufferMemoryRequirements(
+   VkDevice _device,
+   const VkDeviceBufferMemoryRequirements *pInfo,
+   VkMemoryRequirements2 *pMemoryRequirements)
+{
+   VK_FROM_HANDLE(pvr_device, device, _device);
+   struct pvr_buffer buffer = { 0 };
+
+   /* Initialize a minimal buffer structure */
+   vk_buffer_init(&device->vk, &buffer.vk, pInfo->pCreateInfo);
+   buffer.alignment = device->pdevice->ws->page_size;
+
+   VkBufferMemoryRequirementsInfo2 buffer_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_REQUIREMENTS_INFO_2,
+      .buffer = pvr_buffer_to_handle(&buffer),
+   };
+
+   pvr_GetBufferMemoryRequirements2(_device, &buffer_info, pMemoryRequirements);
+
+   /* Clean up the temporary buffer */
+   vk_buffer_finish(&buffer.vk);
+}
+
+void pvr_GetDeviceImageMemoryRequirements(
+   VkDevice _device,
+   const VkDeviceImageMemoryRequirements *pInfo,
+   VkMemoryRequirements2 *pMemoryRequirements)
+{
+   VK_FROM_HANDLE(pvr_device, device, _device);
+   struct pvr_image image = { 0 };
+
+   vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
+   pvr_image_init(device, pInfo->pCreateInfo, &image);
+
+   VkImageMemoryRequirementsInfo2 image_info = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+      .image = pvr_image_to_handle(&image),
+   };
+
+   pvr_GetImageMemoryRequirements2(_device, &image_info, pMemoryRequirements);
+
+   pvr_image_fini(device, &image);
+   vk_image_finish(&image.vk);
+}
+
+void pvr_GetDeviceImageSparseMemoryRequirements(
+   VkDevice device,
+   const VkDeviceImageMemoryRequirements *pInfo,
+   uint32_t *pSparseMemoryRequirementCount,
+   VkSparseImageMemoryRequirements2 *pSparseMemoryRequirements)
+{
+   /* Sparse images are not yet supported */
+   *pSparseMemoryRequirementCount = 0;
 }
 
 void pvr_GetImageMemoryRequirements2(VkDevice _device,

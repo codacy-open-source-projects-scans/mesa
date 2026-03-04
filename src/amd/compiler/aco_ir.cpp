@@ -76,16 +76,16 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
 
    /* GFX6: There is 64KB LDS per CU, but a single workgroup can only use 32KB. */
    program->dev.lds_limit = program->gfx_level >= GFX7 ? 65536 : 32768;
-   program->dev.has_16bank_lds = options->cu_info->has_lds_bank_count_16;
+   program->dev.has_16bank_lds = options->compiler_info->has_lds_bank_count_16;
 
-   program->dev.max_waves_per_simd = options->cu_info->max_waves_per_simd;
-   program->dev.simd_per_cu = options->cu_info->num_simd_per_compute_unit;
-   program->dev.physical_sgprs = options->cu_info->num_physical_sgprs_per_simd;
-   program->dev.sgpr_alloc_granule = options->cu_info->sgpr_alloc_granularity;
-   program->dev.sgpr_limit = options->cu_info->max_sgpr_alloc;
-   program->dev.physical_vgprs = options->cu_info->num_physical_wave64_vgprs_per_simd;
-   program->dev.vgpr_alloc_granule = options->cu_info->wave64_vgpr_alloc_granularity;
-   program->dev.vgpr_limit = options->cu_info->max_vgpr_alloc;
+   program->dev.max_waves_per_simd = options->compiler_info->max_waves_per_simd;
+   program->dev.simd_per_cu = options->compiler_info->num_simd_per_compute_unit;
+   program->dev.physical_sgprs = options->compiler_info->num_physical_sgprs_per_simd;
+   program->dev.sgpr_alloc_granule = options->compiler_info->sgpr_alloc_granularity;
+   program->dev.sgpr_limit = options->compiler_info->max_sgpr_alloc;
+   program->dev.physical_vgprs = options->compiler_info->num_physical_wave64_vgprs_per_simd;
+   program->dev.vgpr_alloc_granule = options->compiler_info->wave64_vgpr_alloc_granularity;
+   program->dev.vgpr_limit = options->compiler_info->max_vgpr_alloc;
 
    /* preserve_s2 works by removing the first 4 SGPRs from use, unless they're a precolored
     * definition/operand. */
@@ -111,15 +111,15 @@ init_program(Program* program, Stage stage, const struct aco_shader_info* info,
     */
    program->dev.xnack_enabled = false;
 
-   program->dev.sram_ecc_enabled = options->cu_info->has_sram_ecc_enabled;
-   program->dev.has_point_sample_accel = options->cu_info->has_point_sample_accel;
-   program->dev.has_gfx6_mrt_export_bug = options->cu_info->has_gfx6_mrt_export_bug;
+   program->dev.sram_ecc_enabled = options->compiler_info->has_sram_ecc_enabled;
+   program->dev.has_point_sample_accel = options->compiler_info->has_point_sample_accel;
+   program->dev.has_gfx6_mrt_export_bug = options->compiler_info->has_gfx6_mrt_export_bug;
 
-   program->dev.has_fast_fma32 = options->cu_info->has_fast_fma32;
+   program->dev.has_fast_fma32 = options->compiler_info->has_fast_fma32;
    program->dev.has_mac_legacy32 = program->gfx_level <= GFX7 || program->gfx_level == GFX10;
    program->dev.has_fmac_legacy32 = program->gfx_level >= GFX10_3 && program->gfx_level < GFX12;
-   program->dev.fused_mad_mix = options->cu_info->has_fma_mix;
-   program->dev.has_mad32 = options->cu_info->has_mad32;
+   program->dev.fused_mad_mix = options->compiler_info->has_fma_mix;
+   program->dev.has_mad32 = options->compiler_info->has_mad32;
 
    if (program->gfx_level >= GFX12) {
       program->dev.scratch_global_offset_min = -8388608;
@@ -450,6 +450,10 @@ opcode_supports_dpp(amd_gfx_level gfx_level, aco_opcode opcode, bool vop3p)
    case aco_opcode::v_fma_mixhi_f16:
    case aco_opcode::p_v_fma_mixlo_f16_rtz:
    case aco_opcode::p_v_fma_mixhi_f16_rtz:
+   case aco_opcode::v_dot4_f32_fp8_fp8:
+   case aco_opcode::v_dot4_f32_fp8_bf8:
+   case aco_opcode::v_dot4_f32_bf8_fp8:
+   case aco_opcode::v_dot4_f32_bf8_bf8:
    case aco_opcode::v_dot2_f32_f16:
    case aco_opcode::v_dot2_f32_bf16: return gfx_level >= GFX11;
    default: return !vop3p;
@@ -1190,6 +1194,8 @@ get_swapped_opcode(aco_opcode opcode, unsigned idx0, unsigned idx1)
    case aco_opcode::v_dot2_f32_bf16:
    case aco_opcode::v_dot2_f16_f16:
    case aco_opcode::v_dot2_bf16_bf16:
+   case aco_opcode::v_dot4_f32_fp8_fp8:
+   case aco_opcode::v_dot4_f32_bf8_bf8:
    case aco_opcode::v_fma_mix_f32:
    case aco_opcode::v_fma_mixlo_f16:
    case aco_opcode::v_fma_mixhi_f16:
@@ -1209,6 +1215,16 @@ get_swapped_opcode(aco_opcode opcode, unsigned idx0, unsigned idx1)
       if (idx1 == 2)
          return aco_opcode::num_opcodes;
       return aco_opcode::v_subb_co_u32;
+   }
+   case aco_opcode::v_dot4_f32_fp8_bf8: {
+      if (idx1 == 2)
+         return aco_opcode::num_opcodes;
+      return aco_opcode::v_dot4_f32_bf8_fp8;
+   }
+   case aco_opcode::v_dot4_f32_bf8_fp8: {
+      if (idx1 == 2)
+         return aco_opcode::num_opcodes;
+      return aco_opcode::v_dot4_f32_fp8_bf8;
    }
    case aco_opcode::v_med3_f32: /* order matters for clamp+GFX8+denorm ftz. */
    default: return aco_opcode::num_opcodes;
@@ -1492,7 +1508,8 @@ get_tied_defs(Instruction* instr)
        instr->opcode == aco_opcode::v_fmac_legacy_f32 ||
        instr->opcode == aco_opcode::v_pk_fmac_f16 || instr->opcode == aco_opcode::v_writelane_b32 ||
        instr->opcode == aco_opcode::v_writelane_b32_e64 ||
-       instr->opcode == aco_opcode::v_dot4c_i32_i8 || instr->opcode == aco_opcode::s_fmac_f32 ||
+       instr->opcode == aco_opcode::v_dot4c_i32_i8 ||
+       instr->opcode == aco_opcode::v_dot2c_f32_f16 || instr->opcode == aco_opcode::s_fmac_f32 ||
        instr->opcode == aco_opcode::s_fmac_f16) {
       ops.push_back(2);
    } else if (instr->opcode == aco_opcode::s_addk_i32 || instr->opcode == aco_opcode::s_mulk_i32 ||

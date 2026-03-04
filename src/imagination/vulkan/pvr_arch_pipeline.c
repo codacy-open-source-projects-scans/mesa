@@ -1547,8 +1547,11 @@ static void pvr_graphics_pipeline_setup_fragment_coeff_program(
       assert(vtxout_range->count > 0);
       assert(vtxout_range->start >= 4);
 
-      assert(vtxout_range->count ==
-             cf_range->count / ROGUE_USC_COEFFICIENT_SET_SIZE);
+      if (vtxout_range->count !=
+          cf_range->count / ROGUE_USC_COEFFICIENT_SET_SIZE) {
+         pvr_finishme("Mismatch in vs output/fs input counts; "
+                      "amend nir var linking.");
+      }
 
       unsigned count = vtxout_range->count;
 
@@ -2667,7 +2670,9 @@ pvr_preprocess_shader_data(pco_data *data,
       pvr_init_fs_blend(data, state->cb);
       pvr_init_fs_tile_buffers(data);
 
-      data->fs.uses.alpha_to_coverage = state->ms->alpha_to_coverage_enable;
+      data->fs.uses.alpha_to_coverage = false;
+      if (state->ms)
+         data->fs.uses.alpha_to_coverage = state->ms->alpha_to_coverage_enable;
 
       if (BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_CB_COLOR_WRITE_ENABLES) ||
           (state->cb && state->cb->color_write_enables !=
@@ -2791,6 +2796,14 @@ static void pvr_early_init_shader_data(pco_data *data,
    }
 }
 
+static bool pvr_build_fs_passthrough(bool no_fragment_shader,
+                                     const struct pvr_device_info *dev_info)
+{
+   bool is_arch_rogue = dev_info->ident.arch == PVR_DEVICE_ARCH_ROGUE;
+
+   return is_arch_rogue && no_fragment_shader;
+}
+
 /* Compiles and uploads shaders and PDS programs. */
 static VkResult
 pvr_graphics_pipeline_compile(struct pvr_device *const device,
@@ -2837,6 +2850,7 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
 
    struct pvr_pds_vertex_dma vtx_dma_descriptions[PVR_MAX_VERTEX_ATTRIB_DMAS];
    uint32_t vtx_dma_count = 0;
+   bool build_fs_passthrough = false;
 
    for (mesa_shader_stage stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
       size_t stage_index = gfx_pipeline->stage_indices[stage];
@@ -2885,6 +2899,17 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
          pco_rev_link_nir(pco_ctx, nir_shaders[stage], consumer);
 
       consumer = nir_shaders[stage];
+   }
+
+   /* Check if the fragment passthrough shader should be built. */
+   build_fs_passthrough =
+      pvr_build_fs_passthrough(!nir_shaders[MESA_SHADER_FRAGMENT],
+                               &device->pdevice->dev_info);
+
+   if (build_fs_passthrough) {
+      nir_shader *fs_pass = pvr_usc_fs_pfo_passthrough_nir(pco_ctx);
+      ralloc_steal(shader_mem_ctx, fs_pass);
+      nir_shaders[MESA_SHADER_FRAGMENT] = fs_pass;
    }
 
    for (mesa_shader_stage stage = 0; stage < MESA_SHADER_STAGES; ++stage) {
@@ -2979,6 +3004,7 @@ pvr_graphics_pipeline_compile(struct pvr_device *const device,
 
    if (*fs) {
       pvr_fragment_state_save(gfx_pipeline, *fs);
+      fragment_state->is_passthrough = build_fs_passthrough;
 
       if (pCreateInfo->flags & VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR) {
          struct pvr_stats stats = pco_get_pvr_stats(*fs);

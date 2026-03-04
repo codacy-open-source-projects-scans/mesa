@@ -142,13 +142,12 @@ enum aco_compiler_debug_level {
 };
 
 struct aco_compiler_options {
-   const struct ac_cu_info* cu_info;
+   const struct ac_compiler_info* compiler_info;
    bool dump_ir;
    bool dump_preoptir;
    bool record_asm;
    bool record_ir;
    bool record_stats;
-   bool has_ls_vgpr_init_bug;
    bool optimisations_disabled;
    uint8_t enable_mrt_output_nan_fixup;
    bool wgp_mode;

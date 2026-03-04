@@ -2975,7 +2975,11 @@ tu_trace_end_render_pass(struct tu_cmd_buffer *cmd, bool gmem)
       cmd->state.lrz.valid,
       cmd->state.rp.lrz_disable_reason ? cmd->state.rp.lrz_disable_reason
                                        : "",
-      lrz_disabled_at_draw, lrz_write_disabled_at_draw, addr);
+      lrz_disabled_at_draw,
+      cmd->state.rp.lrz_write_disable_reason
+         ? cmd->state.rp.lrz_write_disable_reason
+         : "",
+      lrz_write_disabled_at_draw, addr);
 }
 
 static void
@@ -4213,7 +4217,7 @@ tu_cmd_render_tiles(struct tu_cmd_buffer *cmd,
     * via the patchpoints, so we need to re-emit them if they are reused for a
     * later render pass.
     */
-   if (cmd->state.pass->has_fdm)
+   if (cmd->fdm_bin_patchpoints.size != 0)
       cmd->state.dirty |= TU_CMD_DIRTY_FDM;
 
    /* Reset the gmem store CS entry lists so that the next render pass
@@ -6341,6 +6345,7 @@ tu_render_pass_state_merge(struct tu_render_pass_state *dst,
    }
    if (!dst->lrz_write_disabled_at_draw &&
        src->lrz_write_disabled_at_draw) {
+      dst->lrz_write_disable_reason = src->lrz_write_disable_reason;
       dst->lrz_write_disabled_at_draw =
          dst->drawcall_count + src->lrz_write_disabled_at_draw;
    }

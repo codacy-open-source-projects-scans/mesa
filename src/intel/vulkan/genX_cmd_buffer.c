@@ -26,6 +26,7 @@
 
 #include "anv_private.h"
 #include "anv_measure.h"
+#include "vk_common_entrypoints.h"
 #include "vk_render_pass.h"
 #include "vk_synchronization.h"
 #include "vk_util.h"
@@ -49,7 +50,8 @@ static void emit_pipe_control(struct anv_batch *batch,
                               enum anv_pipe_bits bits);
 
 static void genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
-                                        uint32_t pipeline);
+                                        uint32_t pipeline,
+                                        bool uses_systolic);
 
 static enum anv_pipe_bits
 convert_pc_to_bits(struct GENX(PIPE_CONTROL) *pc) {
@@ -161,11 +163,11 @@ fill_state_base_addr(struct anv_cmd_buffer *cmd_buffer,
 
    sba->InstructionBaseAddress =
       (struct anv_address) {
-         .offset = device->physical->va.instruction_state_pool.addr,
+         .offset = device->physical->va.shader_heap.addr,
       };
 
    sba->InstructionMOCS = mocs;
-   sba->InstructionBufferSize = (device->physical->va.instruction_state_pool.size / 4096);
+   sba->InstructionBufferSize = (device->physical->va.shader_heap.size / 4096);
    sba->InstructionBaseAddressModifyEnable = true;
    sba->InstructionBuffersizeModifyEnable = true;
 
@@ -326,9 +328,12 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
    /* Wa_1607854226:
     *
     *  Put the pipeline back into its current mode.
+    *
+    * This workaround is on platforms where PIPELINE_SELECT doesn't carry
+    * systolic mode state, so there's no need to save/restore it here.
     */
    if (gfx12_wa_pipeline != UINT32_MAX)
-      genX(flush_pipeline_select)(cmd_buffer, gfx12_wa_pipeline);
+      genX(flush_pipeline_select)(cmd_buffer, gfx12_wa_pipeline, false);
 #endif
 
    /* After re-setting the surface state base address, we have to do some
@@ -409,7 +414,7 @@ genX(cmd_buffer_emit_state_base_address)(struct anv_cmd_buffer *cmd_buffer)
    /* If we have emitted a new state base address we probably need to re-emit
     * binding tables.
     */
-   cmd_buffer->state.descriptors_dirty |= ~0;
+   anv_cmd_buffer_dirty_descriptors(cmd_buffer, ~0, "state base address");
 }
 
 void
@@ -418,14 +423,31 @@ genX(cmd_buffer_emit_bt_pool_base_address)(struct anv_cmd_buffer *cmd_buffer)
    if (!anv_cmd_buffer_is_render_or_compute_queue(cmd_buffer))
       return;
 
-   /* If we are emitting a new state base address we probably need to re-emit
-    * binding tables.
-    */
-   cmd_buffer->state.descriptors_dirty |= ~0;
-
 #if GFX_VERx10 >= 125
+   struct anv_address btp = anv_cmd_buffer_surface_base_address(cmd_buffer);
+   if (anv_address_equals(cmd_buffer->state.btp, btp))
+      return;
+
    struct anv_device *device = cmd_buffer->device;
    const uint32_t mocs = isl_mocs(&device->isl_dev, 0, false);
+
+   trace_intel_begin_btp(cmd_buffer->batch.trace);
+
+   /* Disable stall tracing to avoid leaving a tracepoint with random
+    * timestamp if the STATE_BASE_ADDRESS instruction sequence is skipped
+    * over.
+    */
+   struct u_trace *tmp_trace = cmd_buffer->batch.trace;
+   cmd_buffer->batch.trace = NULL;
+
+   struct mi_builder b;
+   mi_builder_init(&b, device->info, &cmd_buffer->batch);
+   mi_builder_set_mocs(&b, isl_mocs(&device->isl_dev, 0, false));
+   struct mi_goto_target t = MI_GOTO_TARGET_INIT;
+   mi_goto_if(&b,
+              mi_ieq(&b, mi_reg64(ANV_BTP_ADDR_REG),
+                         mi_imm(anv_address_physical(btp))),
+              &t);
 
    /* We're changing base location of binding tables which affects the state
     * cache. We're adding texture cache invalidation following a
@@ -445,9 +467,8 @@ genX(cmd_buffer_emit_bt_pool_base_address)(struct anv_cmd_buffer *cmd_buffer)
                                  "pre BINDING_TABLE_POOL_ALLOC stall");
    anv_batch_emit(
       &cmd_buffer->batch, GENX(3DSTATE_BINDING_TABLE_POOL_ALLOC), btpa) {
-      btpa.BindingTablePoolBaseAddress =
-         anv_cmd_buffer_surface_base_address(cmd_buffer);
-      btpa.BindingTablePoolBufferSize = device->physical->va.binding_table_pool.size / 4096;
+      btpa.BindingTablePoolBaseAddress = btp;
+      btpa.BindingTablePoolBufferSize = BINDING_TABLE_VIEW_SIZE / 4096;
       btpa.MOCS = mocs;
    }
    genX(batch_emit_pipe_control)(&cmd_buffer->batch,
@@ -457,9 +478,24 @@ genX(cmd_buffer_emit_bt_pool_base_address)(struct anv_cmd_buffer *cmd_buffer)
                                  ANV_PIPE_STATE_CACHE_INVALIDATE_BIT,
                                  "post BINDING_TABLE_POOL_ALLOC invalidate");
 
+   mi_store(&b, mi_reg64(ANV_BTP_ADDR_REG),
+                mi_imm(anv_address_physical(btp)));
+
+   mi_goto_target(&b, &t);
+
+   cmd_buffer->batch.trace = tmp_trace;
+   cmd_buffer->state.btp = btp;
+
+   trace_intel_end_btp(cmd_buffer->batch.trace, anv_address_physical(btp));
+
 #else /* GFX_VERx10 < 125 */
    genX(cmd_buffer_emit_state_base_address)(cmd_buffer);
 #endif
+
+   /* If we are emitting a new state base address we probably need to re-emit
+    * binding tables.
+    */
+   anv_cmd_buffer_dirty_descriptors(cmd_buffer, ~0, "bt pool address");
 }
 
 static void
@@ -3440,20 +3476,11 @@ aux_op_renders(enum isl_aux_op aux_op)
 static void
 add_pending_pipe_bits_for_color_aux_op(struct anv_cmd_buffer *cmd_buffer,
                                        enum isl_aux_op next_aux_op,
-                                       enum anv_pipe_bits pipe_bits)
+                                       enum anv_pipe_bits pipe_bits,
+                                       const char *reason)
 {
    const enum isl_aux_op last_aux_op = cmd_buffer->state.color_aux_op;
    assert(next_aux_op != last_aux_op);
-
-   char flush_reason[64] = {};
-   if (INTEL_DEBUG(DEBUG_PIPE_CONTROL) ||
-       u_trace_enabled(&cmd_buffer->device->ds.trace_context)) {
-      int ret = snprintf(flush_reason, sizeof(flush_reason),
-                         "color aux-op: %s -> %s",
-                         isl_aux_op_to_name(last_aux_op),
-                         isl_aux_op_to_name(next_aux_op));
-      assert(ret < sizeof(flush_reason));
-   }
 
    anv_add_pending_pipe_bits(cmd_buffer,
                              aux_op_clears(next_aux_op) ?
@@ -3461,7 +3488,7 @@ add_pending_pipe_bits_for_color_aux_op(struct anv_cmd_buffer *cmd_buffer,
                              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                              aux_op_clears(next_aux_op) ?
                              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT : 0,
-                             pipe_bits, flush_reason);
+                             pipe_bits, reason);
 }
 
 void
@@ -3491,7 +3518,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    clear pass, to ensure correct ordering between pixels.
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE);
+         cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE,
+         "aux color !aux->aux");
 
 #elif GFX_VERx10 == 125
       /* From the ACM Bspec 47704 (r52663), "Render Target Fast Clear":
@@ -3517,7 +3545,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
             ANV_PIPE_HDC_PIPELINE_FLUSH_BIT |
             ANV_PIPE_DATA_CACHE_FLUSH_BIT |
-            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT);
+            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT,
+            "aux color !aux->aux");
 
 #elif GFX_VERx10 == 120
       /* From the TGL Bspec 47704 (r52663), "Render Target Fast Clear":
@@ -3540,7 +3569,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
             ANV_PIPE_DEPTH_STALL_BIT  |
             ANV_PIPE_TILE_CACHE_FLUSH_BIT |
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT);
+            ANV_PIPE_TEXTURE_CACHE_INVALIDATE_BIT,
+            "aux color !aux->aux");
 
 #else
       /* From the Sky Lake PRM Vol. 7, "MCS Buffer for Render Target(s)":
@@ -3568,9 +3598,9 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
       add_pending_pipe_bits_for_color_aux_op(
             cmd_buffer, next_aux_op,
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_END_OF_PIPE_SYNC_BIT);
+            ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+            "aux color !aux->aux");
 #endif
-
    } else if (aux_op_clears(last_aux_op) && !aux_op_clears(next_aux_op)) {
 #if GFX_VERx10 >= 125
       /* From the ACM PRM Vol. 9, "Color Fast Clear Synchronization":
@@ -3582,7 +3612,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    RT flush = 1
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE);
+         cmd_buffer, next_aux_op, ANV_PIPE_RT_BTI_CHANGE,
+         "aux color aux->!aux");
 
 #elif GFX_VERx10 == 120
       /* From the TGL PRM Vol. 9, "Color Fast Clear Synchronization":
@@ -3603,10 +3634,11 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        * Replace the Tile Cache flush with an L3 fabric flush.
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op,
-            ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_L3_FABRIC_FLUSH_BIT |
-            ANV_PIPE_DEPTH_STALL_BIT);
+         cmd_buffer, next_aux_op,
+         ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+         ANV_PIPE_L3_FABRIC_FLUSH_BIT |
+         ANV_PIPE_DEPTH_STALL_BIT,
+         "aux color aux->!aux");
 
 #else
       /* From the Sky Lake PRM Vol. 7, "Render Target Fast Clear":
@@ -3622,9 +3654,10 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
        *    synchronization.
        */
       add_pending_pipe_bits_for_color_aux_op(
-            cmd_buffer, next_aux_op,
-            ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_END_OF_PIPE_SYNC_BIT);
+         cmd_buffer, next_aux_op,
+         ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
+         ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+         "aux color aux->!aux");
 #endif
 
    } else if (aux_op_renders(last_aux_op) != aux_op_renders(next_aux_op)) {
@@ -3647,7 +3680,8 @@ genX(cmd_buffer_update_color_aux_op)(struct anv_cmd_buffer *cmd_buffer,
       add_pending_pipe_bits_for_color_aux_op(
             cmd_buffer, next_aux_op,
             ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT |
-            ANV_PIPE_END_OF_PIPE_SYNC_BIT);
+            ANV_PIPE_END_OF_PIPE_SYNC_BIT,
+            "aux color render->!render");
    }
 
    if (last_aux_op != ISL_AUX_OP_FAST_CLEAR &&
@@ -3762,6 +3796,7 @@ genX(BeginCommandBuffer)(
        * pipeline mode is 3D. This avoid some stalling/state-emission.
        */
       cmd_buffer->state.current_pipeline = _3D;
+      cmd_buffer->state.current_pipeline_systolic = false;
    }
 
 
@@ -3845,12 +3880,12 @@ genX(BeginCommandBuffer)(
          vk_get_command_buffer_inheritance_as_rendering_resume(cmd_buffer->vk.level,
                                                                pBeginInfo,
                                                                gcbiar_data);
+      const VkCommandBufferInheritanceRenderingInfo *inheritance_info =
+         vk_get_command_buffer_inheritance_rendering_info(cmd_buffer->vk.level,
+                                                          pBeginInfo);
       if (resume_info != NULL) {
          genX(CmdBeginRendering)(commandBuffer, resume_info);
       } else {
-         const VkCommandBufferInheritanceRenderingInfo *inheritance_info =
-            vk_get_command_buffer_inheritance_rendering_info(cmd_buffer->vk.level,
-                                                             pBeginInfo);
          assert(inheritance_info);
 
          gfx->rendering_flags = inheritance_info->flags;
@@ -3877,6 +3912,16 @@ genX(BeginCommandBuffer)(
 
          cmd_buffer->state.gfx.dirty |= ANV_CMD_DIRTY_RENDER_AREA |
                                         ANV_CMD_DIRTY_RENDER_TARGETS;
+      }
+
+      const VkRenderingAttachmentLocationInfo *att_loc_info =
+         inheritance_info ?
+         vk_find_struct_const(inheritance_info->pNext,
+                              RENDERING_ATTACHMENT_LOCATION_INFO) :
+         NULL;
+      if (att_loc_info != NULL) {
+         vk_common_CmdSetRenderingAttachmentLocationsKHR(
+            commandBuffer, att_loc_info);
       }
    }
 
@@ -4234,8 +4279,11 @@ genX(CmdExecuteCommands)(
 
       /* Set the current pipeline state to the secondary's state if it did
        * program the PIPELINE_SELECT instruction. */
-      if (secondary->state.current_pipeline != UINT32_MAX)
+      if (secondary->state.current_pipeline != UINT32_MAX) {
          container->state.current_pipeline = secondary->state.current_pipeline;
+         container->state.current_pipeline_systolic =
+            secondary->state.current_pipeline_systolic;
+      }
    }
 
    /* The secondary isn't counted in our VF cache tracking so we need to
@@ -4324,6 +4372,7 @@ genX(CmdExecuteCommands)(
 
       /* Memcpy is done using the 3D pipeline. */
       container->state.current_pipeline = _3D;
+      container->state.current_pipeline_systolic = false;
    }
 }
 
@@ -5320,7 +5369,8 @@ genX(batch_emit_breakpoint)(struct anv_batch *batch,
  */
 void
 genX(emit_pipeline_select)(struct anv_batch *batch, uint32_t pipeline,
-                           const struct anv_device *device)
+                           const struct anv_device *device,
+                           bool uses_systolic)
 {
    /* Bspec 55860: Xe2+ no longer requires PIPELINE_SELECT */
 #if GFX_VER < 20
@@ -5331,12 +5381,7 @@ genX(emit_pipeline_select)(struct anv_batch *batch, uint32_t pipeline,
 #endif
       ps.PipelineSelection = pipeline;
 #if GFX_VERx10 == 125
-      /* It might still be better to only enable this when the compute
-       * pipeline will have DPAS instructions.
-       */
-      ps.SystolicModeEnable = pipeline == GPGPU &&
-         device->vk.enabled_extensions.KHR_cooperative_matrix &&
-         device->vk.enabled_features.cooperativeMatrix;
+      ps.SystolicModeEnable = uses_systolic;
 #endif
    }
 #endif /* if GFX_VER < 20 */
@@ -5344,11 +5389,14 @@ genX(emit_pipeline_select)(struct anv_batch *batch, uint32_t pipeline,
 
 static void
 genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
-                            uint32_t pipeline)
+                            uint32_t pipeline,
+                            bool uses_systolic)
 {
    UNUSED const struct intel_device_info *devinfo = cmd_buffer->device->info;
 
-   if (cmd_buffer->state.current_pipeline == pipeline)
+   /* Track systolic for PIPELINE_SELECT only in Gfx125. */
+   if (cmd_buffer->state.current_pipeline == pipeline &&
+       (GFX_VERx10 != 125 || cmd_buffer->state.current_pipeline_systolic == uses_systolic))
       return;
 
 #if GFX_VER < 20
@@ -5499,7 +5547,8 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
    }
 #endif
 
-   genX(emit_pipeline_select)(&cmd_buffer->batch, pipeline, cmd_buffer->device);
+   genX(emit_pipeline_select)(&cmd_buffer->batch, pipeline, cmd_buffer->device,
+                              uses_systolic);
 
 #if GFX_VER == 9
    if (devinfo->platform == INTEL_PLATFORM_GLK) {
@@ -5533,18 +5582,21 @@ genX(flush_pipeline_select)(struct anv_cmd_buffer *cmd_buffer,
 #endif
 #endif /* GFX_VER < 20 */
    cmd_buffer->state.current_pipeline = pipeline;
+   cmd_buffer->state.current_pipeline_systolic = uses_systolic;
 }
 
 void
 genX(flush_pipeline_select_3d)(struct anv_cmd_buffer *cmd_buffer)
 {
-   genX(flush_pipeline_select)(cmd_buffer, _3D);
+   const bool uses_systolic = false;
+   genX(flush_pipeline_select)(cmd_buffer, _3D, uses_systolic);
 }
 
 void
-genX(flush_pipeline_select_gpgpu)(struct anv_cmd_buffer *cmd_buffer)
+genX(flush_pipeline_select_gpgpu)(struct anv_cmd_buffer *cmd_buffer,
+                                  bool uses_systolic)
 {
-   genX(flush_pipeline_select)(cmd_buffer, GPGPU);
+   genX(flush_pipeline_select)(cmd_buffer, GPGPU, uses_systolic);
 }
 
 void
@@ -7035,16 +7087,18 @@ void genX(cmd_emit_timestamp)(struct anv_batch *batch,
             fd.Address = addr;
          }
       } else {
-         genx_batch_emit_pipe_control_write(batch, device->info, 0,
-                                            WriteTimestamp, addr, 0, 0);
+         genX(batch_emit_pipe_control_write)(batch, device->info, 0,
+                                             WriteTimestamp, addr, 0, 0,
+                                             NULL /* no reason */);
       }
       break;
    }
 
    case ANV_TIMESTAMP_CAPTURE_AT_CS_STALL:
-      genx_batch_emit_pipe_control_write
-           (batch, device->info, 0, WriteTimestamp, addr, 0,
-            ANV_PIPE_CS_STALL_BIT);
+      genX(batch_emit_pipe_control_write)(batch, device->info, 0,
+                                          WriteTimestamp, addr, 0,
+                                          ANV_PIPE_CS_STALL_BIT,
+                                          NULL /* no reason */);
       break;
 
 #if GFX_VERx10 >= 125

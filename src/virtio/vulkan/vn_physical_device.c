@@ -1412,7 +1412,7 @@ vn_physical_device_get_passthrough_extensions(
       .EXT_depth_clip_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_depth_range_unrestricted = true,
-      .EXT_descriptor_heap = VN_DEBUG(DESC_HEAP),
+      .EXT_descriptor_heap = !VN_DEBUG(NO_DESC_HEAP),
       .EXT_extended_dynamic_state3 = true,
       .EXT_dynamic_rendering_unused_attachments = true,
       .EXT_external_memory_acquire_unmodified = true,
@@ -3103,6 +3103,8 @@ vn_GetPhysicalDeviceDescriptorSizeEXT(VkPhysicalDevice physicalDevice,
                vn_call_vkGetPhysicalDeviceDescriptorSizeEXT(
                   ring, physicalDevice, vn_descriptor_heap_types[i]);
          }
+
+         physical_dev->descriptor_sizes_initialized = true;
       }
       simple_mtx_unlock(&physical_dev->mutex);
    }
