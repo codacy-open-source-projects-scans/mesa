@@ -334,6 +334,7 @@ ac_fill_compiler_info(struct radeon_info *info, struct drm_amdgpu_info_device *d
 
    out->local_invocation_ids_packed =
       info->gfx_level >= GFX11 || (!info->has_graphics && info->family >= CHIP_MI200);
+   out->has_fmask = info->gfx_level <= GFX10_3;
 
    out->has_3d_cube_border_color_mipmap = info->has_graphics || info->family == CHIP_MI100;
 
@@ -2449,11 +2450,7 @@ void ac_get_task_info(const struct radeon_info *info,
 
 uint32_t ac_memory_ops_per_clock(uint32_t vram_type)
 {
-   /* Based on MemoryOpsPerClockTable from PAL. */
    switch (vram_type) {
-   case AMDGPU_VRAM_TYPE_GDDR1:
-   case AMDGPU_VRAM_TYPE_GDDR3: /* last in low-end Evergreen */
-   case AMDGPU_VRAM_TYPE_GDDR4: /* last in R7xx, not used much */
    case AMDGPU_VRAM_TYPE_UNKNOWN:
    default:
       return 0;
@@ -2461,7 +2458,12 @@ uint32_t ac_memory_ops_per_clock(uint32_t vram_type)
    case AMDGPU_VRAM_TYPE_DDR3:
    case AMDGPU_VRAM_TYPE_DDR4:
    case AMDGPU_VRAM_TYPE_LPDDR4:
+   case AMDGPU_VRAM_TYPE_GDDR1:
+   case AMDGPU_VRAM_TYPE_GDDR3: /* last in low-end Evergreen */
+   case AMDGPU_VRAM_TYPE_GDDR4: /* last in R7xx, not used much */
    case AMDGPU_VRAM_TYPE_HBM: /* same for HBM2 and HBM3 */
+   case AMDGPU_VRAM_TYPE_HBM3E:
+   case AMDGPU_VRAM_TYPE_HBM4: /* higher throughput is due to a wider bus */
       return 2;
    case AMDGPU_VRAM_TYPE_DDR5:
    case AMDGPU_VRAM_TYPE_LPDDR5:

@@ -237,6 +237,8 @@ struct vpe_caps {
     uint32_t is_apu                 : 1; /**< is APU */
     uint32_t bg_color_check_support : 1; /**< background color check support */
 
+    uint32_t prefer_external_scaler_coef : 1; /**< prefer external scaler coeff */
+
     /** resource capability */
     struct {
         uint32_t num_dpp;             /**< num of dpp */
@@ -998,18 +1000,6 @@ struct vpe_engine {
     struct vpe_check_support_funcs check_funcs; /**< vpe check format support funcs */
 };
 
-#ifdef VPE_REGISTER_PROFILE
-/** @struct vpe_register_count
- *  @brief VPE register profiling information
- */
-struct vpe_register_count {
-    uint64_t total_register_count;        /**< Total Registers Accessed */
-    uint64_t burstmode_register_count;    /**< Burst Mode Registers Accessed */
-    uint64_t nonburstmode_register_count; /**< Non-Burst Mode Registers Accessed */
-    uint64_t total_config_count;          /**< Total Config Descriptors */
-    uint64_t reused_config_count;         /**< Total Re-used Config Descriptors */
-};
-#endif
 #ifdef __cplusplus
 }
 #endif

@@ -1151,6 +1151,11 @@ enum anv_pipeline_bind_mask {
    ANV_PIPELINE_BIND_MASK_UNALIGNED_INV_X = BITFIELD_BIT(10),
 };
 
+enum anv_pipeline_behavior {
+   ANV_PIPELINE_BEHAVIOR_CLEAR_UNTYPED = BITFIELD_BIT(0),
+   ANV_PIPELINE_BEHAVIOR_CLEAR_TYPED   = BITFIELD_BIT(1),
+};
+
 #define ANV_PIPELINE_BIND_MASK_SET(i) (ANV_PIPELINE_BIND_MASK_SET0 << i)
 
 #define ANV_INLINE_DWORD_PUSH_ADDRESS_LDW      (UINT8_MAX - 0)
@@ -1170,11 +1175,6 @@ struct anv_pipeline_bind_map {
    uint8_t surface_count;
    uint8_t sampler_count;
    uint16_t embedded_sampler_count;
-
-   /* Dwords promoted from push constants (each element is a dword index in
-    * anv_push_constants (we can index up to 1024 bytes).
-    */
-   uint8_t  promoted_push_dwords[4];
 
    struct anv_pipeline_binding *                surface_to_descriptor;
    struct anv_pipeline_binding *                sampler_to_descriptor;
@@ -1203,6 +1203,9 @@ struct anv_pipeline_bind_map {
 
    /* Number of dynamic descriptor in each set */
    uint8_t                                      dynamic_descriptors[MAX_SETS];
+
+   /* Bitfield of inferred behavior of the shader (enum anv_pipeline_behavior) */
+   uint8_t                                      inferred_behavior;
 };
 
 struct anv_push_descriptor_info {
@@ -1825,6 +1828,8 @@ struct anv_instance {
     bool                                        force_sampler_prefetch;
     bool                                        force_compute_surface_prefetch;
     unsigned                                    binding_table_block_size;
+    bool                                        barrier_post_typed_clear_shader;
+    bool                                        barrier_post_untyped_clear_shader;
 
     /* HW workarounds */
     bool                                        no_16bit;
@@ -7062,6 +7067,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(anv_video_session, vk.base,
    case 300:                                    \
       genX_thing = &gfx30_##thing;              \
       break;                                    \
+   case 350:                                    \
+      genX_thing = &gfx35_##thing;              \
+      break;                                    \
    default:                                     \
       UNREACHABLE("Unknown hardware generation"); \
    }                                            \
@@ -7088,6 +7096,9 @@ VK_DEFINE_NONDISP_HANDLE_CASTS(anv_video_session, vk.base,
 #  include "anv_genX.h"
 #  undef genX
 #  define genX(x) gfx30_##x
+#  include "anv_genX.h"
+#  undef genX
+#  define genX(x) gfx35_##x
 #  include "anv_genX.h"
 #  undef genX
 #endif

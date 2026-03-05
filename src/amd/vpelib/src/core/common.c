@@ -633,3 +633,35 @@ enum vpe_status vpe_check_tone_map_support(
     return status;
 }
 
+enum vpe_status vpe_check_blending_support(
+    struct vpe *vpe, const struct vpe_stream *stream, uint32_t stream_idx)
+{
+    enum vpe_status  result   = VPE_STATUS_OK;
+    struct vpe_priv *vpe_priv = container_of(vpe, struct vpe_priv, pub);
+
+    /* if top-bottom blending is not supported,
+     * the 1st stream still can support blending with background,
+     * however, the 2nd stream and onward can not enable blending.
+     */
+    if (stream_idx && stream->blend_info.blending &&
+        !vpe_priv->pub.caps->color_caps.mpc.top_bottom_blending) {
+        result = VPE_STATUS_ALPHA_BLENDING_NOT_SUPPORTED;
+    }
+    return result;
+}
+
+// Returns the smallest number greater than (or equal to) seg_size divisible by alignment
+uint32_t vpe_align_seg(uint32_t seg_size, uint32_t alignment)
+{
+    VPE_ASSERT(alignment != 0);
+
+    uint32_t aligned_size = seg_size;
+    if (alignment != 0) {
+        uint32_t rem = seg_size % alignment;
+        if (rem != 0) {
+            aligned_size = seg_size + alignment - rem;
+        }
+    }
+    return aligned_size;
+}
+
