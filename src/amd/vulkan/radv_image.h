@@ -67,7 +67,7 @@ struct radv_image {
    /* Metadata for the HiZ workaround on GFX12 with both depth and stencil planes. It's used to
     * track whether HiZ metadata are in-sync with main image data, per-level.
     */
-   uint64_t hiz_valid_offset;
+   uint64_t hiz_metadata_offset;
 
    /* For VK_ANDROID_native_buffer, the WSI image owns the memory, */
    VkDeviceMemory owned_memory;
@@ -270,6 +270,24 @@ radv_image_decompress_htile_on_image_stores(const struct radv_device *device, co
    return true;
 }
 
+/**
+ * Return whether the image has HiZ for depth surfaces (GFX12).
+ */
+static inline bool
+radv_image_has_hiz(const struct radv_image *image)
+{
+   return image->planes[0].surface.flags & RADEON_SURF_Z_OR_SBUFFER && image->planes[0].surface.u.gfx9.zs.hiz.offset;
+}
+
+/**
+ * Return whether the image has HiZ metadata to implement a workaround (GFX12).
+ */
+static inline bool
+radv_image_has_hiz_metadata(const struct radv_image *image)
+{
+   return radv_image_has_hiz(image) && image->hiz_metadata_offset;
+}
+
 static inline bool
 radv_image_has_clear_value(const struct radv_image *image)
 {
@@ -327,12 +345,12 @@ radv_get_ds_clear_value_va(const struct radv_image *image, uint32_t base_level)
 }
 
 static inline uint64_t
-radv_get_hiz_valid_va(const struct radv_image *image, uint32_t base_level)
+radv_get_hiz_metadata_va(const struct radv_image *image, uint32_t base_level)
 {
-   assert(image->hiz_valid_offset != 0);
+   assert(image->hiz_metadata_offset != 0);
 
    uint64_t va = image->bindings[0].addr;
-   va += image->hiz_valid_offset + base_level * 4;
+   va += image->hiz_metadata_offset + base_level * 4;
    return va;
 }
 
@@ -359,19 +377,6 @@ radv_gfx12_get_hiz_initial_value(void)
    /* The first component is the minimum value accross the s-tile, and the second component is the
     * maximum value.
     */
-   return zmin | (zmax << 16);
-}
-
-static inline uint32_t
-radv_gfx12_get_hiz_clear_value(VkClearDepthStencilValue value)
-{
-   const uint32_t max_zval = UINT16_MAX;
-   uint32_t zmin, zmax;
-
-   zmin = lroundf(value.depth * max_zval);
-   zmin &= max_zval;
-   zmax = zmin;
-
    return zmin | (zmax << 16);
 }
 

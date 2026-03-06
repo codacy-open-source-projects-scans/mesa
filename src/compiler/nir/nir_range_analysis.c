@@ -41,13 +41,15 @@ struct analysis_query {
 
 struct analysis_state {
    nir_shader *shader;
-   struct hash_table *range_ht;
+   void *range_ht;
 
    struct util_dynarray query_stack;
    struct util_dynarray result_stack;
 
    size_t query_size;
-   uintptr_t (*get_key)(struct analysis_query *q);
+   uint32_t (*get_key)(struct analysis_query *q);
+   bool (*lookup)(void *table, uint32_t key, uint32_t *value);
+   void (*insert)(void *table, uint32_t key, uint32_t value);
    void (*process_query)(struct analysis_state *state, struct analysis_query *q,
                          uint32_t *result, const uint32_t *src);
 };
@@ -73,14 +75,12 @@ perform_analysis(struct analysis_state *state)
          (struct analysis_query *)((char *)util_dynarray_end(&state->query_stack) - state->query_size);
       uint32_t *result = util_dynarray_element(&state->result_stack, uint32_t, cur->result_index);
 
-      uintptr_t key = state->get_key(cur);
-      struct hash_entry *he = NULL;
+      uint32_t key = state->get_key(cur);
       /* There might be a cycle-resolving entry for loop header phis. Ignore this when finishing
        * them by testing pushed_queries.
        */
-      if (cur->pushed_queries == 0 && key &&
-          (he = _mesa_hash_table_search(state->range_ht, (void *)key))) {
-         *result = (uintptr_t)he->data;
+      if (cur->pushed_queries == 0 && key != UINT32_MAX &&
+          state->lookup(state->range_ht, key, result)) {
          state->query_stack.size -= state->query_size;
          continue;
       }
@@ -99,8 +99,8 @@ perform_analysis(struct analysis_state *state)
          continue;
       }
 
-      if (key)
-         _mesa_hash_table_insert(state->range_ht, (void *)key, (void *)(uintptr_t)*result);
+      if (key != UINT32_MAX)
+         state->insert(state->range_ht, key, *result);
 
       state->query_stack.size -= state->query_size;
    }
@@ -396,15 +396,36 @@ push_fp_query(struct analysis_state *state, const nir_def *def)
    pushed_q->def = def;
 }
 
-static uintptr_t
+static uint32_t
 get_fp_key(struct analysis_query *q)
 {
    struct fp_query *fp_q = (struct fp_query *)q;
 
    if (!nir_def_is_alu(fp_q->def))
-      return 0;
+      return UINT32_MAX;
 
-   return (uintptr_t)fp_q->def;
+   return fp_q->def->index;
+}
+
+static bool
+fp_lookup(void *table, uint32_t key, uint32_t *value)
+{
+   nir_fp_analysis_state *state = table;
+   if (BITSET_TEST(state->bitset, key)) {
+      *value = *(uint32_t *)util_sparse_array_get(&state->arr, key);
+      return true;
+   } else {
+      return false;
+   }
+}
+
+static void
+fp_insert(void *table, uint32_t key, uint32_t value)
+{
+   nir_fp_analysis_state *state = table;
+   BITSET_SET(state->bitset, key);
+   state->max = MAX2(state->max, (int)key);
+   *(uint32_t *)util_sparse_array_get(&state->arr, key) = value;
 }
 
 static inline bool
@@ -1321,22 +1342,58 @@ process_fp_query(struct analysis_state *state, struct analysis_query *aq, uint32
 #undef _______
 
 struct fp_result_range
-nir_analyze_fp_range(struct hash_table *range_ht, const nir_def *def)
+nir_analyze_fp_range(nir_fp_analysis_state *fp_state, const nir_def *def)
 {
    struct fp_query query_alloc[64];
    uint32_t result_alloc[64];
 
    struct analysis_state state;
-   state.range_ht = range_ht;
+   state.range_ht = fp_state;
    util_dynarray_init_from_stack(&state.query_stack, query_alloc, sizeof(query_alloc));
    util_dynarray_init_from_stack(&state.result_stack, result_alloc, sizeof(result_alloc));
    state.query_size = sizeof(struct fp_query);
    state.get_key = &get_fp_key;
+   state.lookup = &fp_lookup;
+   state.insert = &fp_insert;
    state.process_query = &process_fp_query;
 
    push_fp_query(&state, def);
 
    return unpack_data(perform_analysis(&state));
+}
+
+nir_fp_analysis_state
+nir_create_fp_analysis_state(nir_function_impl *impl)
+{
+   nir_fp_analysis_state state;
+   state.impl = impl;
+   /* Over-allocate the bitset, so that we can keep using the allocated table memory
+    * even when new SSA values are added. */
+   state.size = BITSET_BYTES(impl->ssa_alloc + impl->ssa_alloc / 4u);
+   state.max = -1;
+   state.bitset = calloc(state.size, 1);
+   util_sparse_array_init(&state.arr, 4, 256);
+   return state;
+}
+
+void
+nir_invalidate_fp_analysis_state(nir_fp_analysis_state *state)
+{
+   if (BITSET_BYTES(state->impl->ssa_alloc) > state->size) {
+      state->size = BITSET_BYTES(state->impl->ssa_alloc + state->impl->ssa_alloc / 4u);
+      free(state->bitset);
+      state->bitset = calloc(state->size, 1);
+   } else if (state->max >= 0) {
+      memset(state->bitset, 0, BITSET_BYTES(state->max + 1));
+   }
+   state->max = -1;
+}
+
+void
+nir_free_fp_analysis_state(nir_fp_analysis_state *state)
+{
+   util_sparse_array_finish(&state->arr);
+   free(state->bitset);
 }
 
 static uint32_t
@@ -1432,15 +1489,32 @@ push_scalar_query(struct analysis_state *state, nir_scalar scalar)
    pushed_q->scalar = scalar;
 }
 
-static uintptr_t
+static uint32_t
 get_scalar_key(struct analysis_query *q)
 {
    nir_scalar scalar = ((struct scalar_query *)q)->scalar;
    /* keys can't be 0, so we have to add 1 to the index */
    unsigned shift_amount = ffs(NIR_MAX_VEC_COMPONENTS) - 1;
    return nir_scalar_is_const(scalar)
-             ? 0
-             : ((uintptr_t)(scalar.def->index + 1) << shift_amount) | scalar.comp;
+             ? UINT32_MAX
+             : ((scalar.def->index + 1) << shift_amount) | scalar.comp;
+}
+
+static bool
+scalar_lookup(void *table, uint32_t key, uint32_t *value)
+{
+   struct hash_table *ht = table;
+   struct hash_entry *he = _mesa_hash_table_search(ht, (void *)(uintptr_t)key);
+   if (he)
+      *value = (uintptr_t)he->data;
+   return he != NULL;
+}
+
+static void
+scalar_insert(void *table, uint32_t key, uint32_t value)
+{
+   struct hash_table *ht = table;
+   _mesa_hash_table_insert(ht, (void *)(uintptr_t)key, (void *)(uintptr_t)value);
 }
 
 static void
@@ -1981,7 +2055,7 @@ get_phi_uub(struct analysis_state *state, struct scalar_query q, uint32_t *resul
    if (!prev || prev->type == nir_cf_node_block) {
       /* Resolve cycles by inserting max into range_ht. */
       uint32_t max = bitmask(q.scalar.def->bit_size);
-      _mesa_hash_table_insert(state->range_ht, (void *)get_scalar_key(&q.head), (void *)(uintptr_t)max);
+      scalar_insert(state->range_ht, get_scalar_key(&q.head), max);
 
       struct set *visited = _mesa_pointer_set_create(NULL);
       nir_scalar *defs = alloca(sizeof(nir_scalar) * 64);
@@ -2029,10 +2103,13 @@ nir_unsigned_upper_bound(nir_shader *shader, struct hash_table *range_ht,
    util_dynarray_init_from_stack(&state.result_stack, result_alloc, sizeof(result_alloc));
    state.query_size = sizeof(struct scalar_query);
    state.get_key = &get_scalar_key;
+   state.lookup = &scalar_lookup,
+   state.insert = &scalar_insert,
    state.process_query = &process_uub_query;
 
    push_scalar_query(&state, scalar);
 
+   _mesa_hash_table_set_deleted_key(range_ht, (void *)(uintptr_t)UINT32_MAX);
    return perform_analysis(&state);
 }
 
@@ -2420,9 +2497,12 @@ nir_def_num_lsb_zero(struct hash_table *numlsb_ht, nir_scalar def)
    util_dynarray_init_from_stack(&state.result_stack, result_alloc, sizeof(result_alloc));
    state.query_size = sizeof(struct scalar_query);
    state.get_key = &get_scalar_key;
+   state.lookup = &scalar_lookup,
+   state.insert = &scalar_insert,
    state.process_query = &process_num_lsb_query;
 
    push_scalar_query(&state, def);
 
+   _mesa_hash_table_set_deleted_key(numlsb_ht, (void *)(uintptr_t)UINT32_MAX);
    return perform_analysis(&state);
 }
