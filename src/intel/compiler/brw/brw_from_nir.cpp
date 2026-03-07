@@ -1915,6 +1915,7 @@ get_nir_def(nir_to_brw_state &ntb, const nir_def &def, bool all_sources_uniform)
       case nir_intrinsic_load_ssbo_uniform_block_intel:
       case nir_intrinsic_load_ubo_uniform_block_intel:
       case nir_intrinsic_load_workgroup_id:
+      case nir_intrinsic_load_indirect_address_intel:
          is_scalar = true;
          break;
 
@@ -1924,6 +1925,7 @@ get_nir_def(nir_to_brw_state &ntb, const nir_def &def, bool all_sources_uniform)
 
       case nir_intrinsic_load_push_data_intel:
       case nir_intrinsic_load_inline_data_intel:
+      case nir_intrinsic_load_shader_indirect_data_intel:
          is_scalar = get_nir_src(ntb, instr->src[0], 0).is_scalar;
          break;
 
@@ -4172,7 +4174,8 @@ memory_address(nir_to_brw_state &ntb,
    const intel_device_info *devinfo = ntb.devinfo;
    const nir_src *nir_src_offset = nir_get_io_offset_src(instr);
    const brw_reg src_offset = get_nir_src_imm(ntb, *nir_src_offset);
-   const brw_builder ubld = src_offset.is_scalar ? bld.scalar_group() : bld;
+   const brw_builder ubld = (src_offset.is_scalar || src_offset.file == IMM) ?
+      bld.scalar_group() : bld;
    brw_reg address;
 
    if ((brw_lsc_supports_base_offset(devinfo) == false) ||
@@ -4257,6 +4260,13 @@ brw_from_nir_emit_cs_intrinsic(nir_to_brw_state &ntb,
 
    case nir_intrinsic_load_subgroup_id:
       s.cs_payload().load_subgroup_id(bld, dest);
+      break;
+
+   case nir_intrinsic_load_indirect_address_intel:
+      (dest.is_scalar ? bld.scalar_group() : bld).AND(
+         retype(dest, BRW_TYPE_UD),
+         retype(brw_vec1_grf(0, 0), BRW_TYPE_UD),
+         brw_imm_ud(INTEL_MASK(31, 6)));
       break;
 
    case nir_intrinsic_load_local_invocation_id:
@@ -4907,6 +4917,7 @@ brw_from_nir_emit_intrinsic(nir_to_brw_state &ntb,
    case nir_intrinsic_global_atomic_swap:
    case nir_intrinsic_load_scratch:
    case nir_intrinsic_store_scratch:
+   case nir_intrinsic_load_shader_indirect_data_intel:
       brw_from_nir_emit_memory_access(ntb, bld, xbld, instr);
       break;
 
@@ -6125,6 +6136,14 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
       break;
    }
 
+   case nir_intrinsic_load_shader_indirect_data_intel: {
+      mode = MEMORY_MODE_CONSTANT;
+      binding_type = LSC_ADDR_SURFTYPE_FLAT;
+      srcs[MEMORY_LOGICAL_ADDRESS] =
+         memory_address(ntb, bld, instr, *binding_type, &address_offset);
+      no_mask_handle = srcs[MEMORY_LOGICAL_ADDRESS].is_scalar;
+      break;
+   }
    case nir_intrinsic_load_global_constant_uniform_block_intel:
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_constant:
@@ -6194,7 +6213,9 @@ brw_from_nir_emit_memory_access(nir_to_brw_state &ntb,
       instr->intrinsic == nir_intrinsic_load_ubo_uniform_block_intel ||
       instr->intrinsic == nir_intrinsic_load_ssbo_uniform_block_intel ||
       instr->intrinsic == nir_intrinsic_load_shared_uniform_block_intel ||
-      instr->intrinsic == nir_intrinsic_load_global_constant_uniform_block_intel;
+      instr->intrinsic == nir_intrinsic_load_global_constant_uniform_block_intel ||
+      (instr->intrinsic == nir_intrinsic_load_shader_indirect_data_intel &&
+       nir_src_is_const(instr->src[0]));
    const bool block = convergent_block_load ||
       instr->intrinsic == nir_intrinsic_load_global_block_intel ||
       instr->intrinsic == nir_intrinsic_load_shared_block_intel ||

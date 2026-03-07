@@ -80,6 +80,7 @@ static const struct {
    { "bmg", 0xe202 },
    { "ptl", 0xb080 },
    { "nvl-u", 0xd740 },
+   { "nvl", 0xd750 },
 };
 
 /**
@@ -1217,9 +1218,16 @@ static const struct intel_device_info intel_device_info_lnl = {
    .ver = 30,                                                   \
    .verx10 = 300
 
+#define XE3_URB_MIN_MAX_ENTRIES                                 \
+   XEHP_URB_MIN_MAX_ENTRIES
+
+#define XE3_PLACEHOLDER_THREADS_AND_URB                         \
+   XEHP_PLACEHOLDER_THREADS_AND_URB,                            \
+   XE3_URB_MIN_MAX_ENTRIES
+
 #define XE3_CONFIG(platform_suffix)                             \
    XE3_FEATURES, XE2_PAT_ENTRIES,                               \
-   XEHP_PLACEHOLDER_THREADS_AND_URB,                            \
+   XE3_PLACEHOLDER_THREADS_AND_URB,                             \
    .platform = INTEL_PLATFORM_ ## platform_suffix
 
 
@@ -1242,6 +1250,27 @@ static const struct intel_device_info intel_device_info_nvl_s_hx_ul = {
 
 static const struct intel_device_info intel_device_info_nvl_u_h = {
    XE3_CONFIG(NVL_U),
+   .has_local_mem = false,
+};
+
+#define XE3P_PLACEHOLDER_THREADS_AND_URB                        \
+   XE3_PLACEHOLDER_THREADS_AND_URB,                             \
+   .num_thread_per_eu = 8 /* BSpec 74198 */,                    \
+   .urb.min_entries[MESA_SHADER_TASK] = 2,                      \
+   .urb.min_entries[MESA_SHADER_MESH] = 2
+
+#define XE3P_FEATURES                                           \
+   XE3_FEATURES,                                                \
+   .ver = 35,                                                   \
+   .verx10 = 350
+
+#define XE3P_CONFIG(platform_suffix)                            \
+   XE3P_FEATURES, XE2_PAT_ENTRIES,                              \
+   XE3P_PLACEHOLDER_THREADS_AND_URB,                            \
+   .platform = INTEL_PLATFORM_ ## platform_suffix
+
+static const struct intel_device_info intel_device_info_nvl_p = {
+   XE3P_CONFIG(NVL_P),
    .has_local_mem = false,
 };
 
@@ -1571,6 +1600,7 @@ intel_device_info_init_common(int pci_id, bool building,
    case 12:
    case 20:
    case 30:
+   case 35:
       devinfo->max_wm_threads = 128 /* threads-per-PSD */
                               * devinfo->num_slices
                               * 8; /* subslices per slice */

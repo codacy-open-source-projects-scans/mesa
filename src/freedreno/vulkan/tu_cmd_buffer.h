@@ -19,6 +19,7 @@
 #include "tu_pass.h"
 #include "tu_pipeline.h"
 #include "tu_image.h"
+#include "tu_tile_config.h"
 
 enum tu_draw_state_group_id
 {
@@ -550,6 +551,7 @@ struct tu_cmd_state
       const struct tu_framebuffer *framebuffer;
       VkRect2D render_areas[MAX_VIEWS];
       bool per_layer_render_area;
+      bool fdm_subsampled;
       enum tu_gmem_layout gmem_layout;
 
       const struct tu_image_view **attachments;
@@ -559,6 +561,7 @@ struct tu_cmd_state
    } suspended_pass;
 
    bool fdm_enabled;
+   bool fdm_subsampled;
 
    bool tessfactor_addr_set;
    bool predication_active;
@@ -865,7 +868,7 @@ typedef void (*tu_fdm_bin_apply_t)(struct tu_cmd_buffer *cmd,
                                    VkOffset2D common_bin_offset,
                                    const VkOffset2D *hw_viewport_offsets,
                                    unsigned views,
-                                   const VkExtent2D *frag_areas,
+                                   const struct tu_tile_config *tile_config,
                                    const VkRect2D *bins,
                                    bool binning);
 
@@ -924,18 +927,18 @@ _tu_create_fdm_bin_patchpoint(struct tu_cmd_buffer *cmd,
     * sysmem is required, and uses up the dwords that have been reserved.
     */
    unsigned num_views = MAX2(cmd->state.pass->num_views, 1);
-   VkExtent2D unscaled_frag_areas[num_views];
+   struct tu_tile_config dummy_config = {};
    VkOffset2D hw_viewport_offsets[num_views];
    VkRect2D bins[num_views];
    for (unsigned i = 0; i < num_views; i++) {
-      unscaled_frag_areas[i] = (VkExtent2D) { 1, 1 };
+      dummy_config.frag_areas[i] = (VkExtent2D) { 1, 1 };
       bins[i] = (VkRect2D) {
          { 0, 0 },
          { MAX_VIEWPORT_SIZE, MAX_VIEWPORT_SIZE },
       };
       hw_viewport_offsets[i] = (VkOffset2D) { 0, 0 };
    }
-   apply(cmd, cs, state, (VkOffset2D) {0, 0}, hw_viewport_offsets, num_views, unscaled_frag_areas, bins, false);
+   apply(cmd, cs, state, (VkOffset2D) {0, 0}, hw_viewport_offsets, num_views, &dummy_config, bins, false);
    assert(tu_cs_get_cur_iova(cs) == patch.iova + patch.size * sizeof(uint32_t));
 
    util_dynarray_append(&cmd->fdm_bin_patchpoints, patch);
@@ -953,5 +956,44 @@ void
 tu7_set_thread_br_patchpoint(struct tu_cmd_buffer *cmd,
                              struct tu_cs *cs,
                              bool force_disable_cb);
+
+/* For bin offsetting we want to do "Euclidean division," where the remainder
+ * (i.e. the offset of the bin) is always positive. Unfortunately C/C++
+ * remainder and division don't do this, so we have to implement it ourselves.
+ *
+ * For example, we should have:
+ *
+ * euclid_rem(-3, 4) = 1
+ * euclid_rem(-4, 4) = 0
+ * euclid_rem(-4, 4) = 3
+ */
+
+static inline int32_t
+euclid_rem(int32_t divisor, int32_t divisend)
+{
+   if (divisor >= 0)
+      return divisor % divisend;
+   int32_t tmp = divisend - (-divisor % divisend);
+   return tmp == divisend ? 0 : tmp;
+}
+
+/* Calculate how much the bins for a given view should be shifted to the left
+ * and upwards, given the application-provided FDM offset.
+ */
+static inline VkOffset2D
+tu_bin_offset(VkOffset2D fdm_offset, const struct tu_tiling_config *tiling)
+{
+   return (VkOffset2D) {
+      euclid_rem(-fdm_offset.x, tiling->tile0.width),
+      euclid_rem(-fdm_offset.y, tiling->tile0.height),
+   };
+}
+
+static inline uint32_t
+tu_fdm_num_layers(const struct tu_cmd_buffer *cmd)
+{
+   return cmd->state.pass->num_views ? cmd->state.pass->num_views : 
+      (cmd->state.fdm_per_layer ? cmd->state.framebuffer->layers : 1);
+}
 
 #endif /* TU_CMD_BUFFER_H */

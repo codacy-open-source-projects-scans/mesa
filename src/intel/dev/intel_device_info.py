@@ -137,6 +137,7 @@ Enum("intel_platform",
       "INTEL_PLATFORM_PTL",
       "INTEL_PLATFORM_WCL",
       "INTEL_PLATFORM_NVL_U",
+      "INTEL_PLATFORM_NVL_P",
       ])
 
 Struct("intel_memory_class_instance",
@@ -219,8 +220,8 @@ Struct("intel_device_info_mem_desc",
 
 Struct("intel_device_info_urb_desc",
        [Member("int", "size"),
-        Member("int", "min_entries", array=4),
-        Member("int", "max_entries", array=4)])
+        Member("int", "min_entries", array=8),
+        Member("int", "max_entries", array=8)])
 
 Struct("intel_device_info_pat_desc",
        [Member("intel_device_info_pat_entry", "cached_coherent",
