@@ -767,16 +767,16 @@ optimizations.extend([
    (('feq', ('fabs', a), ('fabs', a)), ('feq', a, a)),
 
    # b < fsat(NaN) -> b < 0 -> false, and b < Nan -> false.
-   (('flt', '#b(is_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('flt', b, a)),
+   (('flt', '#b(is_a_number_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('flt', b, a)),
 
    # fsat(NaN) >= b -> 0 >= b -> false, and NaN >= b -> false.
-   (('fge', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fge', a, b)),
+   (('fge', ('fsat(is_used_once)', a), '#b(is_a_number_gt_0_and_lt_1)'), ('fge', a, b)),
 
    # b == fsat(NaN) -> b == 0 -> false, and b == NaN -> false.
-   (('feq', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('feq', a, b)),
+   (('feq', ('fsat(is_used_once)', a), '#b(is_a_number_gt_0_and_lt_1)'), ('feq', a, b)),
 
    # b != fsat(NaN) -> b != 0 -> true, and b != NaN -> true.
-   (('fneu', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fneu', a, b)),
+   (('fneu', ('fsat(is_used_once)', a), '#b(is_a_number_gt_0_and_lt_1)'), ('fneu', a, b)),
 
    # fsat(NaN) >= 1 -> 0 >= 1 -> false, and NaN >= 1 -> false.
    (('fge', ('fsat(is_used_once)', a), 1.0), ('fge', a, 1.0)),
@@ -1055,10 +1055,11 @@ optimizations.extend([
    # fmin(0.0, b)) while the right one is "b", so this optimization is not NaN correct.
    (('fmin(nsz)', ('fsat(nnan)', a), '#b(is_zero_to_one)'), ('fsat', ('fmin', a, b))),
 
-   # If a >= 0 ... 1 + a >= 1 ... so fsat(1 + a) = 1
-   # But 1 + NaN is NaN and fsat(NaN) = 0.
-   (('fsat(nnan)', ('fadd', 1.0, 'a(is_not_negative)')), 1.0),
-   (('fsat', ('fadd', 1.0, 'a(is_a_number_not_negative)')), 1.0),
+   (('fsat(nnan)', 'a(is_ge_pos_one)'), 1.0),
+   (('fsat', 'a(is_a_number_ge_pos_one)'), 1.0),
+
+   (('fsat(nnan,nsz)', 'a(is_zero_to_one)'), ('fcanonicalize', a)),
+   (('fsat(nsz)', 'a(is_a_number_zero_to_one)'), ('fcanonicalize', a)),
 
    # Let constant folding do its job. This can have emergent behaviour.
    (('fneg', ('bcsel(is_used_once)', a, '#b', '#c')), ('bcsel', a, ('fneg', b), ('fneg', c))),
@@ -1927,7 +1928,6 @@ optimizations.extend([
    (('ffract(nnan)', 'a(is_integral)'), 0.0),
    (('ffract', ('ffract', a)), ('ffract', a)),
    (('fabs', 'a(is_not_negative)'), ('fcanonicalize', a)),
-   (('iabs', 'a(is_not_negative)'), a),
    (('fsat', 'a(is_not_positive)'), 0.0),
 
    (('fmin(nnan,nsz)', 'a(is_not_negative)', 1.0), ('fsat', a), '!options->lower_fsat'),
@@ -2763,7 +2763,7 @@ optimizations.extend([
    (('b2i16', ('vec2', ('ult', 'a@16', b), ('ult', 'c@16', d))),
     ('umin', 1, ('usub_sat', ('vec2', b, d), ('vec2', a, c))),
     'options->vectorize_vec2_16bit && !options->lower_usub_sat'),
-   (('b2i16', ('vec2', ('uge', 'a@16', '#b(is_not_zero)'), ('uge', 'c@16', '#d(is_not_zero)'))),
+   (('b2i16', ('vec2', ('uge', 'a@16', '#b(is_not_uint_zero)'), ('uge', 'c@16', '#d(is_not_uint_zero)'))),
     ('umin', 1, ('usub_sat', ('vec2', a, c), ('iadd', ('vec2', b, d), -1))),
     'options->vectorize_vec2_16bit && !options->lower_usub_sat'),
    (('b2i16', ('vec2', ('uge', '#a(is_not_uint_max)', 'b@16'), ('uge', '#c(is_not_uint_max)', 'd@16'))),
@@ -3730,10 +3730,10 @@ late_optimizations.extend([
    # new patterns like these.  The patterns that compare with zero are removed
    # because they are unlikely to be created in by anything in
    # late_optimizations.
-   (('flt', '#b(is_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('flt', b, a)),
-   (('fge', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fge', a, b)),
-   (('feq', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('feq', a, b)),
-   (('fneu', ('fsat(is_used_once)', a), '#b(is_gt_0_and_lt_1)'), ('fneu', a, b)),
+   (('flt', '#b(is_a_number_gt_0_and_lt_1)', ('fsat(is_used_once)', a)), ('flt', b, a)),
+   (('fge', ('fsat(is_used_once)', a), '#b(is_a_number_gt_0_and_lt_1)'), ('fge', a, b)),
+   (('feq', ('fsat(is_used_once)', a), '#b(is_a_number_gt_0_and_lt_1)'), ('feq', a, b)),
+   (('fneu', ('fsat(is_used_once)', a), '#b(is_a_number_gt_0_and_lt_1)'), ('fneu', a, b)),
 
    (('fge', ('fsat(is_used_once)', a), 1.0), ('fge', a, 1.0)),
 
@@ -3815,7 +3815,7 @@ late_optimizations.extend([
 
    # Putting this in 'optimizations' interferes with the bcsel(a, op(b, c),
    # op(b, d)) => op(b, bcsel(a, c, d)) transformations.  I do not know why.
-   (('bcsel', ('feq', ('fsqrt', 'a(is_not_negative)'), 0.0), intBitsToFloat(0x7f7fffff), ('frsq', a)),
+   (('bcsel@32', ('feq', ('fsqrt', 'a(is_a_number_not_negative)'), 0.0), intBitsToFloat(0x7f7fffff), ('frsq', a)),
     ('fmin', ('frsq', a), intBitsToFloat(0x7f7fffff))),
 
    # Things that look like DPH in the source shader may get expanded to

@@ -169,64 +169,6 @@ MULTIPLE(16)
 MULTIPLE(32)
 MULTIPLE(64)
 
-static inline bool
-is_zero_to_one(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
-               unsigned src, unsigned num_components,
-               const uint8_t *swizzle)
-{
-   /* only constant srcs: */
-   if (!nir_src_is_const(instr->src[src].src))
-      return false;
-
-   for (unsigned i = 0; i < num_components; i++) {
-      nir_alu_type type = nir_op_infos[instr->op].input_types[src];
-      switch (nir_alu_type_get_base_type(type)) {
-      case nir_type_float: {
-         double val = nir_src_comp_as_float(instr->src[src].src, swizzle[i]);
-         if (isnan(val) || val < 0.0f || val > 1.0f)
-            return false;
-         break;
-      }
-      default:
-         return false;
-      }
-   }
-
-   return true;
-}
-
-/**
- * Exclusive compare with (0, 1).
- *
- * This differs from \c is_zero_to_one because that function tests 0 <= src <=
- * 1 while this function tests 0 < src < 1.
- */
-static inline bool
-is_gt_0_and_lt_1(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
-                 unsigned src, unsigned num_components,
-                 const uint8_t *swizzle)
-{
-   /* only constant srcs: */
-   if (!nir_src_is_const(instr->src[src].src))
-      return false;
-
-   for (unsigned i = 0; i < num_components; i++) {
-      nir_alu_type type = nir_op_infos[instr->op].input_types[src];
-      switch (nir_alu_type_get_base_type(type)) {
-      case nir_type_float: {
-         double val = nir_src_comp_as_float(instr->src[src].src, swizzle[i]);
-         if (isnan(val) || val <= 0.0f || val >= 1.0f)
-            return false;
-         break;
-      }
-      default:
-         return false;
-      }
-   }
-
-   return true;
-}
-
 /**
  * x & 1 != 0
  */
@@ -873,6 +815,26 @@ is_not_uint_max(UNUSED const nir_search_state *state, const nir_alu_instr *instr
    return true;
 }
 
+/**
+ * Returns whether at least one bit is 1.
+ */
+static inline bool
+is_not_uint_zero(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
+                unsigned src, unsigned num_components,
+                const uint8_t *swizzle)
+{
+   if (nir_src_as_const_value(instr->src[src].src) == NULL)
+      return false;
+
+   for (unsigned i = 0; i < num_components; i++) {
+      const uint64_t c = nir_src_comp_as_uint(instr->src[src].src, swizzle[i]);
+      if (c == 0)
+         return false;
+   }
+
+   return true;
+}
+
 static inline bool
 no_signed_wrap(const nir_alu_instr *instr)
 {
@@ -891,125 +853,33 @@ xz_components_unused(const nir_alu_instr *instr)
    return (nir_def_components_read(&instr->def) & 0x5) == 0;
 }
 
-static inline bool
-is_integral(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
-            UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range r = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-
-   return r.is_integral;
-}
-
-/**
- * Is the value finite?
- */
-static inline bool
-is_finite(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
-          unsigned src, UNUSED unsigned num_components,
-          UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-
-   return v.is_finite;
-}
-
-static inline bool
-is_finite_not_zero(UNUSED const nir_search_state *state, const nir_alu_instr *instr,
-                   unsigned src, UNUSED unsigned num_components,
-                   UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-
-   return v.is_finite &&
-          (v.range == lt_zero || v.range == gt_zero || v.range == ne_zero);
-}
-
-#define RELATION(r)                                                                                    \
-   static inline bool                                                                                  \
-   is_##r(const nir_search_state *state, const nir_alu_instr *instr,                                   \
-          unsigned src, UNUSED unsigned num_components,                                                \
-          UNUSED const uint8_t *swizzle)                                                               \
-   {                                                                                                   \
-      const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa); \
-      return v.range == r;                                                                             \
-   }                                                                                                   \
-                                                                                                       \
-   static inline bool                                                                                  \
-   is_a_number_##r(const nir_search_state *state, const nir_alu_instr *instr,                          \
-                   unsigned src, UNUSED unsigned num_components,                                       \
-                   UNUSED const uint8_t *swizzle)                                                      \
-   {                                                                                                   \
-      const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa); \
-      return v.is_a_number && v.range == r;                                                            \
+#define RELATION(r, exclude)                                                                         \
+   static inline bool                                                                                \
+   is_##r(const nir_search_state *state, const nir_alu_instr *instr,                                 \
+          unsigned src, UNUSED unsigned num_components,                                              \
+          UNUSED const uint8_t *swizzle)                                                             \
+   {                                                                                                 \
+      const fp_class_mask fp_class = nir_analyze_fp_class(state->range_ht, instr->src[src].src.ssa); \
+      return (fp_class & (exclude)) == 0;                                                            \
    }
 
-RELATION(lt_zero)
-RELATION(le_zero)
-RELATION(gt_zero)
-RELATION(ge_zero)
-RELATION(ne_zero)
+#define RELATION_AND_NUM(r, exclude) \
+   RELATION(r, exclude)              \
+   RELATION(a_number_##r, (exclude) | FP_CLASS_NAN)
 
-static inline bool
-is_not_negative(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
-                UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.range == ge_zero || v.range == gt_zero || v.range == eq_zero;
-}
-
-static inline bool
-is_a_number_not_negative(const nir_search_state *state, const nir_alu_instr *instr,
-                         unsigned src, UNUSED unsigned num_components,
-                         UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.is_a_number &&
-          (v.range == ge_zero || v.range == gt_zero || v.range == eq_zero);
-}
-
-static inline bool
-is_not_positive(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
-                UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.range == le_zero || v.range == lt_zero || v.range == eq_zero;
-}
-
-static inline bool
-is_a_number_not_positive(const nir_search_state *state, const nir_alu_instr *instr,
-                         unsigned src, UNUSED unsigned num_components,
-                         UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.is_a_number &&
-          (v.range == le_zero || v.range == lt_zero || v.range == eq_zero);
-}
-
-static inline bool
-is_not_zero(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
-            UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.range == lt_zero || v.range == gt_zero || v.range == ne_zero;
-}
-
-static inline bool
-is_a_number_not_zero(const nir_search_state *state, const nir_alu_instr *instr,
-                     unsigned src, UNUSED unsigned num_components,
-                     UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.is_a_number &&
-          (v.range == lt_zero || v.range == gt_zero || v.range == ne_zero);
-}
-
-static inline bool
-is_a_number(const nir_search_state *state, const nir_alu_instr *instr, unsigned src,
-            UNUSED unsigned num_components, UNUSED const uint8_t *swizzle)
-{
-   const struct fp_result_range v = nir_analyze_fp_range(state->range_ht, instr->src[src].src.ssa);
-   return v.is_a_number;
-}
+RELATION_AND_NUM(lt_zero, FP_CLASS_ANY_POS | FP_CLASS_ANY_ZERO)
+RELATION_AND_NUM(not_positive, FP_CLASS_ANY_POS)
+RELATION_AND_NUM(gt_zero, FP_CLASS_ANY_NEG | FP_CLASS_ANY_ZERO)
+RELATION_AND_NUM(not_negative, FP_CLASS_ANY_NEG)
+RELATION_AND_NUM(not_zero, FP_CLASS_ANY_ZERO)
+RELATION_AND_NUM(zero_to_one, FP_CLASS_ANY_NEG | FP_CLASS_GT_POS_ONE | FP_CLASS_POS_INF)
+RELATION_AND_NUM(le_pos_one, FP_CLASS_GT_POS_ONE | FP_CLASS_POS_INF)
+RELATION_AND_NUM(gt_0_and_lt_1, FP_CLASS_ANY_NEG | FP_CLASS_ANY_ZERO | FP_CLASS_POS_ONE | FP_CLASS_GT_POS_ONE | FP_CLASS_POS_INF)
+RELATION_AND_NUM(ge_pos_one, FP_CLASS_ANY_NEG | FP_CLASS_ANY_ZERO | FP_CLASS_GT_ZERO_LT_POS_ONE)
+RELATION(a_number, FP_CLASS_NAN)
+RELATION(finite, FP_CLASS_ANY_INF | FP_CLASS_NAN)
+RELATION(finite_not_zero, FP_CLASS_ANY_INF | FP_CLASS_NAN | FP_CLASS_ANY_ZERO)
+RELATION(integral, FP_CLASS_NON_INTEGRAL)
 
 static inline bool
 compare_component(const nir_alu_instr *instr, unsigned src, unsigned component,
