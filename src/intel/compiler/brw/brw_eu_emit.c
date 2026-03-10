@@ -264,8 +264,15 @@ brw_set_src1(struct brw_codegen *p, brw_eu_inst *inst, struct brw_reg reg)
        *
        *    "Accumulator registers may be accessed explicitly as src0
        *    operands only."
+       *
+       * Bspec 47251 (r48459) says for [ACM, ACMPLUS, ATS, PVC, RLT, MAR, MTL,
+       * ARL]:
+       *
+       *    Accumulator registers may be accessed explicitly on src0 and src1
+       *    operand.
        */
-      assert(!brw_reg_is_arf(reg, BRW_ARF_ACCUMULATOR));
+      assert(devinfo->verx10 >= 125 ||
+             !brw_reg_is_arf(reg, BRW_ARF_ACCUMULATOR));
 
       brw_eu_inst_set_src1_file_type(devinfo, inst, phys_file(reg), reg.type);
       brw_eu_inst_set_src1_abs(devinfo, inst, reg.abs);
@@ -621,11 +628,7 @@ brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
                                         to_3src_align1_hstride(src1.hstride));
 
       brw_eu_inst_set_3src_a1_src1_subreg_nr(devinfo, inst, phys_subnr(devinfo, src1));
-      if (src1.file == ARF) {
-         brw_eu_inst_set_3src_src1_reg_nr(devinfo, inst, BRW_ARF_ACCUMULATOR);
-      } else {
-         brw_eu_inst_set_3src_src1_reg_nr(devinfo, inst, phys_nr(devinfo, src1));
-      }
+      brw_eu_inst_set_3src_src1_reg_nr(devinfo, inst, phys_nr(devinfo, src1));
       brw_eu_inst_set_3src_src1_abs(devinfo, inst, src1.abs);
       brw_eu_inst_set_3src_src1_negate(devinfo, inst, src1.negate);
 
@@ -640,13 +643,6 @@ brw_alu3(struct brw_codegen *p, unsigned opcode, struct brw_reg dest,
          brw_eu_inst_set_3src_src2_abs(devinfo, inst, src2.abs);
          brw_eu_inst_set_3src_src2_negate(devinfo, inst, src2.negate);
       }
-
-      assert(src0.file == FIXED_GRF ||
-             src0.file == IMM);
-      assert(src1.file == FIXED_GRF ||
-             brw_reg_is_arf(src1, BRW_ARF_ACCUMULATOR));
-      assert(src2.file == FIXED_GRF ||
-             src2.file == IMM);
 
       if (devinfo->ver >= 12) {
          if (src0.file == IMM) {
