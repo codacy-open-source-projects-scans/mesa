@@ -34,9 +34,13 @@ src3 = ('src', 3)
 src4 = ('src', 4)
 
 class Index(object):
-    def __init__(self, c_data_type, name):
+    def __init__(self, c_data_type, name, size):
+        # 64bit non struct types are possible, but intrinsics set/get
+        # need to be updated for that.
+        assert "struct" in c_data_type or size == 1
         self.c_data_type = c_data_type
         self.name = name
+        self.size = size
 
 class Intrinsic(object):
    """Class that represents all the information about an intrinsic opcode.
@@ -83,7 +87,14 @@ class Intrinsic(object):
        self.has_dest = (dest_components >= 0)
        self.dest_components = dest_components
        self.num_indices = len(indices)
+       self.num_index_slots = sum([idx.size for idx in indices])
        self.indices = indices
+       self.index_map = []
+       prefix = 0
+       for idx in indices:
+           self.index_map.append(prefix + 1)
+           prefix += idx.size
+       assert prefix <= 9
        self.flags = flags
        self.sysval = sysval
        self.bit_sizes = bit_sizes if isinstance(bit_sizes, list) else []
@@ -104,8 +115,8 @@ QUADGROUP_FLAGS = [CAN_ELIMINATE, QUADGROUP]
 INTR_INDICES = []
 INTR_OPCODES = {}
 
-def index(c_data_type, name):
-    idx = Index(c_data_type, name)
+def index(c_data_type, name, size = 1):
+    idx = Index(c_data_type, name, size)
     INTR_INDICES.append(idx)
     globals()[name.upper()] = idx
 
@@ -283,11 +294,10 @@ index("mesa_scope", "memory_scope")
 index("mesa_scope", "execution_scope")
 
 # Semantics of an IO instruction
-index("struct nir_io_semantics", "io_semantics")
+index("struct nir_io_semantics", "io_semantics", size = 2)
 
 # Transform feedback info
-index("struct nir_io_xfb", "io_xfb")
-index("struct nir_io_xfb", "io_xfb2")
+index("struct nir_io_xfb", "io_xfb", size = 2)
 
 # Ray query values accessible from the RayQueryKHR object
 index("nir_ray_query_value", "ray_query_value")
@@ -1316,7 +1326,7 @@ def store(name, srcs, indices=[], flags=[]):
     intrinsic("store_" + name, [0] + srcs, indices=indices, flags=flags)
 
 # src[] = { value, offset }.
-store("output", [1], [BASE, RANGE, WRITE_MASK, COMPONENT, SRC_TYPE, IO_SEMANTICS, IO_XFB, IO_XFB2])
+store("output", [1], [BASE, RANGE, WRITE_MASK, COMPONENT, SRC_TYPE, IO_SEMANTICS, IO_XFB])
 # src[] = { value, offset }.
 store("pixel_local", [1], [BASE, RANGE, WRITE_MASK, COMPONENT, FORMAT, SRC_TYPE, IO_SEMANTICS])
 # src[] = { value, vertex, offset }.
@@ -2644,7 +2654,7 @@ store("urb_lsc_intel", [1], [BASE])
 # & task shaders on Gfx12.5+
 #
 # src[] = { offset }.
-load("shader_indirect_data_intel", [1], [BASE, RANGE])
+load("shader_indirect_data_intel", [1], [BASE, RANGE, ALIGN_MUL, ALIGN_OFFSET])
 
 # Return a handle for a shader's input or output URB memory.
 system_value("urb_input_handle_intel", 1)

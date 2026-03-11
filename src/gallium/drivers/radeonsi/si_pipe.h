@@ -20,6 +20,7 @@
 #include "util/log.h"
 #include "ac_cmdbuf.h"
 #include "ac_descriptors.h"
+#include "ac_guardband.h"
 #include "ac_sqtt.h"
 #include "ac_spm.h"
 #include "si_perfetto.h"
@@ -510,9 +511,6 @@ struct si_screen {
    uint64_t multimedia_debug_flags;
    char renderer_string[183];
 
-   unsigned pa_sc_raster_config;
-   unsigned pa_sc_raster_config_1;
-   unsigned se_tile_repeat;
    unsigned gs_table_depth;
    unsigned eqaa_force_coverage_samples;
    unsigned eqaa_force_z_samples;
@@ -750,20 +748,12 @@ struct si_framebuffer {
    bool gfx12_has_hiz;
 };
 
-enum si_quant_mode
-{
-   /* The small prim precision computation depends on the enum values to be like this. */
-   SI_QUANT_MODE_16_8_FIXED_POINT_1_256TH,
-   SI_QUANT_MODE_14_10_FIXED_POINT_1_1024TH,
-   SI_QUANT_MODE_12_12_FIXED_POINT_1_4096TH,
-};
-
 struct si_signed_scissor {
    int minx;
    int miny;
    int maxx;
    int maxy;
-   enum si_quant_mode quant_mode;
+   enum ac_quant_mode quant_mode;
 };
 
 struct si_viewports {

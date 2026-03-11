@@ -90,9 +90,11 @@ struct blorp_surface_info
    struct isl_surf aux_surf;
    struct blorp_address aux_addr;
    enum isl_aux_usage aux_usage;
+   enum isl_format aux_format;
 
    union isl_color_value clear_color;
    struct blorp_address clear_color_addr;
+   bool has_replicated_pixel;
 
    struct isl_view view;
 

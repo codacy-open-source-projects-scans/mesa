@@ -1919,7 +1919,7 @@ static inline nir_cmat_reduce nir_cmat_call_reduce_flags(nir_cmat_call_instr *ca
 
 #include "nir_intrinsics.h"
 
-#define NIR_INTRINSIC_MAX_CONST_INDEX 8
+#define NIR_INTRINSIC_MAX_CONST_INDEX 9
 
 /** Represents an intrinsic
  *
@@ -2054,12 +2054,10 @@ typedef struct nir_io_semantics {
    unsigned interp_explicit_strict : 1; /* preserve original vertex order */
    /* Skip nir_validate of the intrinsic. Any new code that sets it will ba NAK'd. */
    unsigned no_validate : 1;
+   unsigned padding;
 } nir_io_semantics;
 
-/* Transform feedback info for 2 outputs. nir_intrinsic_store_output contains
- * this structure twice to support up to 4 outputs. The structure is limited
- * to 32 bits because it's stored in nir_intrinsic_instr::const_index[].
- */
+/* Transform feedback info for 4 outputs. */
 typedef struct nir_io_xfb {
    struct {
       /* start_component is equal to the index of out[]; add 2 for io_xfb2 */
@@ -2069,7 +2067,7 @@ typedef struct nir_io_xfb {
       uint8_t buffer : 4;         /* buffer index, max 3 */
       uint8_t offset;             /* transform feedback buffer offset in dwords,
                                      max (1K - 4) bytes */
-   } out[2];
+   } out[4];
 } nir_io_xfb;
 
 unsigned
@@ -2115,6 +2113,9 @@ typedef struct nir_intrinsic_info {
 
    /** the number of constant indices used by the intrinsic */
    uint8_t num_indices;
+
+   /** the number of 32bit slots used for storing constant indices. */
+   uint8_t num_index_slots;
 
    /** list of indices */
    uint8_t indices[NIR_INTRINSIC_MAX_CONST_INDEX];
@@ -5733,7 +5734,6 @@ bool nir_scale_fdiv(nir_shader *shader);
 bool nir_lower_alu_to_scalar(nir_shader *shader, nir_instr_filter_cb cb, const void *data);
 bool nir_lower_alu_width(nir_shader *shader, nir_vectorize_cb cb, const void *data);
 bool nir_lower_alu_vec8_16_srcs(nir_shader *shader);
-bool nir_lower_bool_to_bitsize(nir_shader *shader);
 bool nir_lower_bool_to_float(nir_shader *shader, bool has_fcsel_ne);
 bool nir_lower_bool_to_int32(nir_shader *shader);
 bool nir_opt_simplify_convert_alu_types(nir_shader *shader);

@@ -166,6 +166,7 @@ blorp_surface_info_init(struct blorp_batch *batch,
    info->addr = surf->addr;
 
    info->aux_usage = surf->aux_usage;
+   info->aux_format = surf->surf->format;
    if (!blorp_address_is_null(surf->aux_addr)) {
       info->aux_surf = *surf->aux_surf;
       info->aux_addr = surf->aux_addr;
@@ -173,6 +174,7 @@ blorp_surface_info_init(struct blorp_batch *batch,
 
    info->clear_color = surf->clear_color;
    info->clear_color_addr = surf->clear_color_addr;
+   info->has_replicated_pixel = surf->has_replicated_pixel;
 
    isl_surf_usage_flags_t view_usage;
    if (is_dest) {

@@ -1587,12 +1587,58 @@ isl_tiling_get_info(enum isl_tiling tiling,
 
 #undef SET_SWIZ
 
+   uint32_t max_miptail_levels = tiling_max_mip_tail(tiling, dim, samples);
+   if (dim == ISL_SURF_DIM_3D && format_bpb == 64) {
+      /* Apply a workaround from isl_choose_miptail_start_level() more
+       * broadly. Enables tests with block compressed images to pass. A number
+       * of these tests simply perform uploads and downloads, so presumably
+       * this issue affects uncompressed formats as well.
+       */
+      if (tiling == ISL_TILING_SKL_Yf) {
+         max_miptail_levels = MIN2(max_miptail_levels, 2);
+      } else if (tiling == ISL_TILING_SKL_Ys) {
+         max_miptail_levels = MIN2(max_miptail_levels, 6);
+      }
+   }
+
+   if (dim == ISL_SURF_DIM_3D && format_bpb == 128) {
+      /* Apply a workaround from isl_choose_miptail_start_level() more
+       * broadly. Enables tests with block compressed images to pass. A number
+       * of these tests simply perform uploads and downloads, so presumably
+       * this issue affects uncompressed formats as well.
+       *
+       * Enables other tests to pass when compression is disabled.
+       */
+      if (tiling == ISL_TILING_SKL_Yf ||
+          tiling == ISL_TILING_ICL_Yf) {
+         max_miptail_levels = MIN2(max_miptail_levels, 2);
+      } else if (tiling == ISL_TILING_SKL_Ys ||
+                 tiling == ISL_TILING_ICL_Ys) {
+         max_miptail_levels = MIN2(max_miptail_levels, 6);
+      }
+   }
+
+   if (dim == ISL_SURF_DIM_2D && format_bpb == 128) {
+      /* Apply a workaround from isl_choose_miptail_start_level() more
+       * broadly. Enables tests with block compressed images to pass. A number
+       * of these tests simply perform uploads and downloads, so presumably
+       * this issue affects uncompressed formats as well.
+       */
+      if (tiling == ISL_TILING_SKL_Yf ||
+          tiling == ISL_TILING_ICL_Yf) {
+        max_miptail_levels = MIN2(max_miptail_levels, 7);
+      } else if (tiling == ISL_TILING_SKL_Ys ||
+                 tiling == ISL_TILING_ICL_Ys) {
+        max_miptail_levels = MIN2(max_miptail_levels, 11);
+      }
+   }
+
    *tile_info = (struct isl_tile_info) {
       .tiling = tiling,
       .format_bpb = format_bpb,
       .logical_extent_el = logical_el,
       .phys_extent_B = phys_B,
-      .max_miptail_levels = tiling_max_mip_tail(tiling, dim, samples),
+      .max_miptail_levels = max_miptail_levels,
       .swiz = swiz,
       .swiz_count = swiz_count,
    };
@@ -2231,23 +2277,6 @@ isl_choose_miptail_start_level(const struct isl_device *dev,
       }
    }
 
-   if (isl_tiling_is_std_y(tile_info->tiling) &&
-       info->dim == ISL_SURF_DIM_3D &&
-       fmtl->txc != ISL_TXC_NONE &&
-       (fmtl->bpb == 128 || (fmtl->bpb == 64 && ISL_GFX_VER(dev) == 9))) {
-       /* Although the note above is for lossless compression, this seems to
-        * affect 64bpb and 128bpb formats as well. At the moment, only
-        * block-compressed texture tests are affected, so limit the workaround
-        * to those for now.
-        */
-       if (tile_info->tiling == ISL_TILING_SKL_Yf ||
-           tile_info->tiling == ISL_TILING_ICL_Yf) {
-          max_miptail_levels = MIN2(max_miptail_levels, 2);
-       } else {
-          max_miptail_levels = MIN2(max_miptail_levels, 6);
-       }
-   }
-
    if (info->dim != ISL_SURF_DIM_3D &&
        _isl_surf_info_supports_ccs(dev, info->format, info->usage)) {
       /* SKL PRMs, Volume 5: Memory Views, Tiling and Mip Tails for 2D
@@ -2257,21 +2286,6 @@ isl_choose_miptail_start_level(const struct isl_device *dev,
        *     Tail which contains MIPs for Slots greater than 11."
        *
        * Reduce the slot consumption to keep compression enabled.
-       */
-      if (tile_info->tiling == ISL_TILING_SKL_Yf ||
-          tile_info->tiling == ISL_TILING_ICL_Yf) {
-         max_miptail_levels = MIN2(max_miptail_levels, 7);
-      } else {
-         max_miptail_levels = MIN2(max_miptail_levels, 11);
-      }
-   }
-
-   if (isl_tiling_is_std_y(tile_info->tiling) &&
-       info->dim == ISL_SURF_DIM_2D &&
-       fmtl->txc != ISL_TXC_NONE && fmtl->bpb == 128) {
-      /* Although the note above is for lossless compression, this seems to
-       * affect 128bpb formats as well. At the moment, only block-compressed
-       * texture tests are affected, so limit the workaround to those for now.
        */
       if (tile_info->tiling == ISL_TILING_SKL_Yf ||
           tile_info->tiling == ISL_TILING_ICL_Yf) {
@@ -4778,8 +4792,21 @@ isl_surf_get_image_surf(const struct isl_device *dev,
    /* Even for cube maps there will be only single face, therefore drop the
     * corresponding flag if present.
     */
-   const isl_surf_usage_flags_t usage =
+   isl_surf_usage_flags_t usage =
       surf->usage & (~ISL_SURF_USAGE_CUBE_BIT);
+
+   if (!util_is_aligned(*offset_B, surf->alignment_B)) {
+      /* Aux-tt alignment only applies to the beginning of the resource. */
+      usage |= ISL_SURF_USAGE_NO_AUX_TT_ALIGNMENT_BIT;
+
+      /* The sparse flag can be dropped if only opaque binds are supported. */
+      usage &= ~ISL_SURF_USAGE_SPARSE_BIT;
+
+      /* Sequential use by multiple engines comes with alignment requirements
+       * that should be ignored.
+       */
+      usage &= ~ISL_SURF_USAGE_MULTI_ENGINE_SEQ_BIT;
+   }
 
    bool ok UNUSED;
    ok = isl_surf_init(dev, image_surf,
