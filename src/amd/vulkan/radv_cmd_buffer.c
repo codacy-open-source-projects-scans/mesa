@@ -10609,8 +10609,8 @@ radv_cs_emit_indirect_draw_packet(struct radv_cmd_buffer *cmd_buffer, bool index
       radeon_emit(0);
       radeon_emit(vertex_offset_reg);
       radeon_emit(start_instance_reg);
-      radeon_emit(draw_id_reg | S_2C3_DRAW_INDEX_ENABLE(draw_id_enable) | S_2C3_COUNT_INDIRECT_ENABLE(!!count_va) |
-                  S_2C3_THREAD_TRACE_MARKER_ENABLE(sqtt_en));
+      radeon_emit(draw_id_reg | S_2C_4_DRAW_INDEX_ENABLE(draw_id_enable) | S_2C_4_COUNT_INDIRECT_ENABLE(!!count_va) |
+                  S_2C_4_THREAD_TRACE_MARKER_ENABLE(sqtt_en));
       radeon_emit(draw_count); /* count */
       radeon_emit(count_va);   /* count_addr */
       radeon_emit(count_va >> 32);
@@ -15060,7 +15060,7 @@ radv_emit_set_predication_state(struct radv_cmd_buffer *cmd_buffer, bool draw_vi
    if (va) {
       assert(pred_op == PREDICATION_OP_BOOL32 || pred_op == PREDICATION_OP_BOOL64);
 
-      op = PRED_OP(pred_op);
+      op = S_20_1_PRED_OP(pred_op);
 
       /* PREDICATION_DRAW_VISIBLE means that if the 32-bit value is zero, all
        * rendering commands are discarded. Otherwise, they are discarded if
@@ -15333,10 +15333,19 @@ radv_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer, uint32_t firstC
 
    assert(firstCounterBuffer + counterBufferCount <= MAX_SO_BUFFERS);
 
-   if (pdev->info.gfx_level >= GFX12)
+   if (pdev->info.gfx_level >= GFX12) {
       radv_init_streamout_state(cmd_buffer);
-   else if (!pdev->use_ngg_streamout)
+
+      /* Invalidate L2 in case the buffer filled size needs to be saved because COPY_DATA isn't
+       * coherent with L2.
+       */
+      if (pdev->info.cp_sdma_ge_use_system_memory_scope) {
+         cmd_buffer->state.flush_bits |= RADV_CMD_FLAG_INV_L2;
+         radv_emit_cache_flush(cmd_buffer);
+      }
+   } else if (!pdev->use_ngg_streamout) {
       radv_flush_vgt_streamout(cmd_buffer);
+   }
 
    ASSERTED unsigned cdw_max = radeon_check_space(device->ws, cs->b, MAX_SO_BUFFERS * 10);
 
@@ -15534,8 +15543,8 @@ radv_emit_strmout_buffer(struct radv_cmd_buffer *cmd_buffer, const struct radv_d
    radeon_end();
 
    if (gfx_level >= GFX10) {
-      /* Emitting a COPY_DATA packet should be enough because RADV doesn't support preemption
-       * (shadow memory) but for unknown reasons, it can lead to GPU hangs on GFX10+.
+      /* Make sure that PFP waits for ME to avoid a race condition because the data is written by
+       * STRMOUT_BUFFER_UPDATE in ME, but LOAD_CONTEXT_REG_INDEX is in PFP.
        */
       ac_emit_cp_pfp_sync_me(cs->b, false);
 
