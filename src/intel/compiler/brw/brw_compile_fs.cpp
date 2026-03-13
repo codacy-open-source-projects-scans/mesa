@@ -1226,7 +1226,7 @@ remap_attr_reg(brw_shader &s,
 }
 
 static void
-brw_assign_urb_setup(brw_shader &s)
+brw_assign_fs_urb_setup(brw_shader &s)
 {
    assert(s.stage == MESA_SHADER_FRAGMENT);
 
@@ -1297,7 +1297,7 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
 
    assert(s.stage == MESA_SHADER_FRAGMENT);
 
-   s.payload_ = new brw_fs_thread_payload(s, s.source_depth_to_render_target);
+   s.payload_ = new brw_fs_thread_payload(s);
 
    if (nir->info.ray_queries > 0)
       s.limit_dispatch_width(16, "SIMD32 not supported with ray queries.\n");
@@ -1359,7 +1359,7 @@ run_fs(brw_shader &s, bool allow_spilling, bool do_rep_send)
       if (devinfo->ver == 9)
          gfx9_ps_header_only_workaround(fs_prog_data);
 
-      brw_assign_urb_setup(s);
+      brw_assign_fs_urb_setup(s);
 
       brw_lower_3src_null_dest(s);
       brw_workaround_emit_dummy_mov_instruction(s);

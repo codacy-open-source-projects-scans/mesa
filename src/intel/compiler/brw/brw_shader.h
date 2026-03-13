@@ -182,8 +182,6 @@ public:
    DEFINE_PAYLOAD_ACCESSOR(brw_bs_thread_payload, bs_payload,
                            stage >= MESA_SHADER_RAYGEN && stage <= MESA_SHADER_CALLABLE);
 
-   bool source_depth_to_render_target;
-
    brw_reg uw_pixel_x;
    brw_reg uw_pixel_y;
    brw_reg pixel_z;
@@ -198,7 +196,6 @@ public:
    brw_reg delta_xy[INTEL_BARYCENTRIC_MODE_COUNT];
    brw_reg final_gs_vertex_count;
    brw_reg control_data_bits;
-   brw_reg invocation_id;
 
    struct {
       unsigned control_data_bits_per_vertex;
@@ -287,6 +284,8 @@ uint32_t brw_fb_write_msg_control(const brw_inst *inst,
                                   const struct brw_fs_prog_data *prog_data);
 
 void brw_compute_urb_setup_index(struct brw_fs_prog_data *fs_prog_data);
+
+void brw_assign_urb_setup(brw_shader &s);
 
 void brw_from_nir(brw_shader *s);
 

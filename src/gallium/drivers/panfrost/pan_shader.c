@@ -90,14 +90,6 @@ lower_sample_mask_writes(nir_builder *b, nir_intrinsic_instr *intrin,
    return true;
 }
 
-static bool
-panfrost_use_ld_var_buf(const nir_shader *ir)
-{
-   const uint64_t allowed = VARYING_BIT_POS | VARYING_BIT_PSIZ |
-      BITFIELD64_MASK(16) << VARYING_SLOT_VAR0;
-   return (ir->info.inputs_read & ~allowed) == 0;
-}
-
 static void
 panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
                         struct util_debug_callback *dbg,
@@ -128,14 +120,9 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
    };
 
    /* Lower this early so the backends don't have to worry about it */
-   if (s->info.stage == MESA_SHADER_FRAGMENT) {
-      inputs.fixed_varying_mask =
-         pan_get_fixed_varying_mask(s->info.inputs_read);
-   } else if (s->info.stage == MESA_SHADER_VERTEX) {
+   if (s->info.stage == MESA_SHADER_VERTEX) {
       /* No IDVS for internal XFB shaders */
       inputs.no_idvs = s->info.has_transform_feedback_varyings;
-      inputs.fixed_varying_mask =
-         pan_get_fixed_varying_mask(s->info.outputs_written);
 
       if (s->info.has_transform_feedback_varyings) {
          NIR_PASS(_, s, nir_opt_constant_folding);
@@ -161,8 +148,6 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
       if (key->fs.clip_plane_enable) {
          NIR_PASS(_, s, nir_lower_clip_fs, key->fs.clip_plane_enable,
                   false, true);
-         inputs.fixed_varying_mask =
-            pan_get_fixed_varying_mask(s->info.inputs_read);
       }
 
       if (key->fs.line_smooth) {
@@ -209,8 +194,22 @@ panfrost_shader_compile(struct panfrost_screen *screen, const nir_shader *ir,
    NIR_PASS(_, s, panfrost_nir_lower_res_indices, &inputs);
    pan_nir_lower_texture_late(s, inputs.gpu_id);
 
+   /* nir_opt_varyings is replacing all flat highp types with float32, we need
+    * to figure out the varying types ourselves */
+   inputs.trust_varying_flat_highp_types = false;
+   struct pan_varying_layout varyings_layout;
+   /* TODO: wire up VS layout in FS when linked together */
+   if (s->info.stage == MESA_SHADER_VERTEX) {
+      pan_varying_collect_formats(&varyings_layout, s,
+                                  inputs.gpu_id,
+                                  inputs.trust_varying_flat_highp_types, false);
+      pan_build_varying_layout_compact(&varyings_layout, s, inputs.gpu_id);
+      inputs.varying_layout = &varyings_layout;
+   }
+
    if (dev->arch >= 9) {
-      inputs.valhall.use_ld_var_buf = panfrost_use_ld_var_buf(s);
+      inputs.valhall.use_ld_var_buf = inputs.varying_layout &&
+         inputs.varying_layout->generic_size_B <= pan_ld_var_buf_off_size(dev->arch);
       /* Always enable this for GL, it avoids crashes when using unbound
        * resources. */
       inputs.robust_descriptors = true;
