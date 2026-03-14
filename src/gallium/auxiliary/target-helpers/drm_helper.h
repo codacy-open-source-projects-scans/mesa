@@ -421,7 +421,7 @@ static struct pipe_screen *
 pipe_zink_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
-   screen = zink_drm_create_screen(fd, config);
+   screen = zink_drm_create_screen(fd, config, NULL);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
 
@@ -508,6 +508,9 @@ const driOptionDescription kmsro_driconf[] = {
 #endif
 #ifdef GALLIUM_LIMA
       #include "lima/driinfo_lima.h"
+#endif
+#ifdef GALLIUM_ZINK
+      #include "zink/driinfo_zink.h"
 #endif
 };
 DRM_DRIVER_DESCRIPTOR(kmsro, kmsro_driconf, ARRAY_SIZE(kmsro_driconf))

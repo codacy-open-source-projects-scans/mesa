@@ -149,6 +149,11 @@ fd_screen_destroy(struct pipe_screen *pscreen)
    if (screen->tess_bo)
       fd_bo_del(screen->tess_bo);
 
+   for (int i = 0; i < ARRAY_SIZE(screen->pvtmem); i++) {
+      if (screen->pvtmem[i].bo)
+         fd_bo_del(screen->pvtmem[i].bo);
+   }
+
    if (screen->pipe)
       fd_pipe_del(screen->pipe);
 
@@ -1129,7 +1134,7 @@ fd_screen_aux_context_get(struct pipe_screen *pscreen)
    simple_mtx_lock(&screen->aux_ctx_lock);
 
    if (!screen->aux_ctx) {
-      screen->aux_ctx = pscreen->context_create(pscreen, NULL, 0);
+      screen->aux_ctx = pscreen->context_create(pscreen, NULL, FD_CONTEXT_FLAG_AUX);
    }
 
    return fd_context(screen->aux_ctx);

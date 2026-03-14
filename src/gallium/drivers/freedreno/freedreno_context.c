@@ -385,6 +385,9 @@ fd_context_destroy(struct pipe_context *pctx)
 
    DBG("");
 
+   if (!(ctx->flags & FD_CONTEXT_FLAG_AUX))
+      p_atomic_dec(&pctx->screen->num_contexts);
+
    for (unsigned i = 0; i < ARRAY_SIZE(ctx->f16_blit_fs); i++)
       if (ctx->f16_blit_fs[i])
          pctx->delete_fs_state(pctx, ctx->f16_blit_fs[i]);
@@ -397,11 +400,6 @@ fd_context_destroy(struct pipe_context *pctx)
 
    if (ctx->in_fence_fd != -1)
       close(ctx->in_fence_fd);
-
-   for (i = 0; i < ARRAY_SIZE(ctx->pvtmem); i++) {
-      if (ctx->pvtmem[i].bo)
-         fd_bo_del(ctx->pvtmem[i].bo);
-   }
 
    util_copy_framebuffer_state(&ctx->framebuffer, NULL);
    fd_batch_reference(&ctx->batch, NULL); /* unref current batch */
@@ -738,6 +736,9 @@ fd_context_init(struct fd_context *ctx, struct pipe_screen *pscreen,
                              fd_trace_delete_flush_data);
 
    fd_autotune_init(&ctx->autotune, screen->dev);
+
+   if (!(ctx->flags & FD_CONTEXT_FLAG_AUX))
+      p_atomic_inc(&pctx->screen->num_contexts);
 
    return pctx;
 

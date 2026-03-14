@@ -80,13 +80,19 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
       if (nir_alu_instr_is_comparison(alu))
          return options & nir_move_comparisons;
 
+      if (!(options & nir_move_alu))
+         return false;
+
+      /* Optimize assume packs will be coalesced, and sink them to let us sink
+       * their sources too. This optimizes lower_mem_access_bit_size patterns.
+       */
+      if (alu->op == nir_op_pack_64_2x32_split)
+         return true;
+
       /* Assuming that constants do not contribute to register pressure, it is
        * beneficial to sink ALU instructions where all non constant sources
        * are the same and the source bit size is not larger than the destination.
        */
-      if (!(options & nir_move_alu))
-         return false;
-
       unsigned inputs = nir_op_infos[alu->op].num_inputs;
       int non_const = -1;
 
@@ -161,6 +167,7 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
       if (intrin->intrinsic == nir_intrinsic_load_global ||
           intrin->intrinsic == nir_intrinsic_load_global_amd ||
           intrin->intrinsic == nir_intrinsic_load_ubo ||
+          intrin->intrinsic == nir_intrinsic_load_ubo_uniform_block_intel ||
           intrin->intrinsic == nir_intrinsic_load_ssbo) {
          if (intrin->def.divergent) {
             if (options & nir_move_only_convergent)
@@ -219,6 +226,7 @@ can_sink_instr(nir_instr *instr, nir_move_options options, bool *can_mov_out_of_
       case nir_intrinsic_ldc_nv:
       case nir_intrinsic_ldcx_nv:
       case nir_intrinsic_load_ubo:
+      case nir_intrinsic_load_ubo_uniform_block_intel:
       case nir_intrinsic_load_ubo_vec4:
       case nir_intrinsic_load_global_constant_offset:
       case nir_intrinsic_load_global_constant_bounded:
