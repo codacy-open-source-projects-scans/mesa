@@ -141,11 +141,12 @@ vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src)
    if (!src)
       return src;
 
-   struct vtn_ssa_value *srcmp = vtn_create_ssa_value(b, src->type);
-
    if (src->transposed) {
-      srcmp->transposed = vtn_mediump_downconvert_value(b, src->transposed);
+      struct vtn_ssa_value *transposed =
+         vtn_mediump_downconvert_value(b, src->transposed);
+      return vtn_ssa_transpose(b, transposed);
    } else {
+      struct vtn_ssa_value *srcmp = vtn_create_ssa_value(b, src->type);
       enum glsl_base_type base_type = glsl_get_base_type(src->type);
 
       if (glsl_type_is_vector_or_scalar(src->type)) {
@@ -155,9 +156,8 @@ vtn_mediump_downconvert_value(struct vtn_builder *b, struct vtn_ssa_value *src)
          for (int i = 0; i < glsl_get_matrix_columns(src->type); i++)
             srcmp->elems[i]->def = vtn_mediump_downconvert(b, base_type, src->elems[i]->def);
       }
+      return srcmp;
    }
-
-   return srcmp;
 }
 
 static struct vtn_ssa_value *
@@ -560,17 +560,26 @@ vtn_mediump_upconvert(struct vtn_builder *b, enum glsl_base_type base_type, nir_
    }
 }
 
-void
+struct vtn_ssa_value *
 vtn_mediump_upconvert_value(struct vtn_builder *b, struct vtn_ssa_value *value)
 {
    enum glsl_base_type base_type = glsl_get_base_type(value->type);
 
+   if (value->transposed) {
+      struct vtn_ssa_value *transposed =
+         vtn_mediump_upconvert_value(b, value->transposed);
+      return vtn_ssa_transpose(b, transposed);
+   }
+
+   struct vtn_ssa_value *value_full = vtn_create_ssa_value(b, value->type);
    if (glsl_type_is_vector_or_scalar(value->type)) {
-      value->def = vtn_mediump_upconvert(b, base_type, value->def);
+      value_full->def = vtn_mediump_upconvert(b, base_type, value->def);
    } else {
       for (int i = 0; i < glsl_get_matrix_columns(value->type); i++)
-         value->elems[i]->def = vtn_mediump_upconvert(b, base_type, value->elems[i]->def);
+         value_full->elems[i]->def = vtn_mediump_upconvert(b, base_type, value->elems[i]->def);
    }
+
+   return value_full;
 }
 
 static nir_def *
@@ -756,7 +765,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
       struct vtn_ssa_value *dest = vtn_handle_matrix_alu(b, opcode, vtn_src[0], vtn_src[1]);
 
       if (mediump_16bit)
-         vtn_mediump_upconvert_value(b, dest);
+         dest = vtn_mediump_upconvert_value(b, dest);
 
       vtn_push_ssa_value(b, w[2], dest);
       b->nb.fp_math_ctrl = nir_fp_fast_math;
@@ -1152,7 +1161,7 @@ vtn_handle_alu(struct vtn_builder *b, SpvOp opcode,
    }
 
    if (mediump_16bit)
-      vtn_mediump_upconvert_value(b, dest);
+      dest = vtn_mediump_upconvert_value(b, dest);
    vtn_push_ssa_value(b, w[2], dest);
 
    b->nb.fp_math_ctrl = nir_fp_fast_math;
