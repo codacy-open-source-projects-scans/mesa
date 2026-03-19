@@ -652,11 +652,18 @@ impl<'a> ShaderFromNir<'a> {
 
                     srcs_vec.push(Some(b.prmt4(prmt_srcs, prmt).into()));
                 }
-                32 => {
-                    assert!(comps == 1);
-                    let s = usize::from(alu_src.swizzle[0]);
-                    srcs_vec.push(Some(ssa[s].into()));
-                }
+                32 => match comps {
+                    1 => {
+                        let s = usize::from(alu_src.swizzle[0]);
+                        srcs_vec.push(Some(ssa[s].into()));
+                    }
+                    2 => {
+                        let s0 = usize::from(alu_src.swizzle[0]);
+                        let s1 = usize::from(alu_src.swizzle[1]);
+                        srcs_vec.push(Some([ssa[s0], ssa[s1]].into()));
+                    }
+                    _ => panic!("Invalid num_components: {comps}"),
+                },
                 64 => {
                     assert!(comps == 1);
                     let s = usize::from(alu_src.swizzle[0]);
@@ -787,6 +794,24 @@ impl<'a> ShaderFromNir<'a> {
                     _ => panic!("Unknown extract op: {}", alu.op),
                 }
                 .into()
+            }
+            nir_op_f2f16 | nir_op_f2f16_rtne | nir_op_f2f16_rtz
+                if alu.def.num_components == 2 =>
+            {
+                assert!(b.sm() >= 86);
+
+                let dst = b.alloc_ssa(RegFile::GPR);
+                let src = srcs(0).to_ssa();
+                b.push_op(OpF2FP {
+                    dst: dst.clone().into(),
+                    srcs: [src[1].into(), src[0].into()],
+                    rnd_mode: match alu.op {
+                        nir_op_f2f16_rtne => FRndMode::NearestEven,
+                        nir_op_f2f16_rtz => FRndMode::Zero,
+                        _ => self.float_ctl[FloatType::F16].rnd_mode,
+                    },
+                });
+                dst.into()
             }
             nir_op_f2f16 | nir_op_f2f16_rtne | nir_op_f2f16_rtz
             | nir_op_f2f32 | nir_op_f2f64 => {

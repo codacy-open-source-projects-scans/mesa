@@ -63,8 +63,11 @@ struct lima_fs_uncompiled_shader {
 struct lima_fs_key {
    unsigned char nir_sha1[SHA1_DIGEST_LENGTH];
    struct {
+      enum pipe_format format;
       uint8_t swizzle[4];
    } tex[PIPE_MAX_SAMPLERS];
+
+   enum pipe_format color_format;
 };
 
 #define LIMA_MAX_VARYING_NUM 13

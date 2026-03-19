@@ -237,6 +237,7 @@ lima_vec_to_regs_filter_cb(const nir_instr *instr, unsigned writemask,
 
 static void
 lima_program_optimize_fs_nir(struct nir_shader *s,
+                             struct lima_fs_key *key,
                              struct nir_lower_tex_options *tex_options)
 {
    bool progress;
@@ -246,6 +247,8 @@ lima_program_optimize_fs_nir(struct nir_shader *s,
 	      nir_var_shader_in | nir_var_shader_out, type_size, 0);
    NIR_PASS(_, s, nir_lower_tex, tex_options);
    NIR_PASS(_, s, lima_nir_lower_txp);
+
+   NIR_PASS(_, s, lima_nir_lower_framebuffer, key->color_format);
 
    do {
       progress = false;
@@ -330,9 +333,15 @@ lima_fs_compile_shader(struct lima_context *ctx,
    for (int i = 0; i < ARRAY_SIZE(key->tex); i++) {
       for (int j = 0; j < 4; j++)
          tex_options.swizzles[i][j] = key->tex[i].swizzle[j];
+
+      enum pipe_format format = key->tex[i].format;
+      if (!format)
+         continue;
+      if (util_format_is_srgb(format))
+         tex_options.lower_srgb |= (1 << i);
    }
 
-   lima_program_optimize_fs_nir(nir, &tex_options);
+   lima_program_optimize_fs_nir(nir, key, &tex_options);
 
    if (lima_debug & LIMA_DEBUG_PP)
       nir_print_shader(nir, stdout);
@@ -641,6 +650,9 @@ lima_update_fs_state(struct lima_context *ctx)
    memcpy(key->nir_sha1, ctx->uncomp_fs->nir_sha1,
           sizeof(ctx->uncomp_fs->nir_sha1));
 
+   if (ctx->framebuffer.base.cbufs[0].texture)
+      key->color_format = ctx->framebuffer.base.cbufs[0].format;
+
    uint8_t identity[4] = { PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
                            PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W };
    for (int i = 0; i < lima_tex->num_textures; i++) {
@@ -649,6 +661,9 @@ lima_update_fs_state(struct lima_context *ctx)
          memcpy(key->tex[i].swizzle, identity, 4);
          continue;
       }
+
+      key->tex[i].format = sampler->base.format;
+
       for (int j = 0; j < 4; j++)
          key->tex[i].swizzle[j] = sampler->swizzle[j];
    }

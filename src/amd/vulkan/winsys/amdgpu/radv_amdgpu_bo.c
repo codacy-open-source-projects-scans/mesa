@@ -583,7 +583,6 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
    struct radv_amdgpu_winsys *ws = radv_amdgpu_winsys(_ws);
    struct radv_amdgpu_winsys_bo *bo;
    struct amdgpu_bo_alloc_request request = {0};
-   struct radv_amdgpu_map_range *ranges = NULL;
    ac_drm_bo buf_handle;
    uint64_t va = 0;
    amdgpu_va_handle va_handle;
@@ -759,7 +758,7 @@ error_va_map:
    ac_drm_bo_free(ws->dev, buf_handle);
 
 error_bo_alloc:
-   free(ranges);
+   ac_drm_va_range_free(va_handle);
 
 error_va_alloc:
    FREE(bo);

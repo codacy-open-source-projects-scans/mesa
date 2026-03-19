@@ -1826,7 +1826,6 @@ resource_barrier_wait_stage(enum intel_engine_class engine_class,
 {
    enum GENX(RESOURCE_BARRIER_STAGE) hw_stage = RESOURCE_BARRIER_STAGE_NONE;
 
-   assert(vk_stages != 0);
    /* BSpec 56054, Wait Stage:
     *   "Hardware is only able to stall at the following stages:
     *       Top of the pipe (command parser)
@@ -1877,7 +1876,6 @@ resource_barrier_wait_stage(enum intel_engine_class engine_class,
                          VK_PIPELINE_STAGE_2_CLEAR_BIT_KHR))
       hw_stage = RESOURCE_BARRIER_STAGE_PIXEL;
 
-   assert(hw_stage != RESOURCE_BARRIER_STAGE_NONE);
    return hw_stage;
 }
 
@@ -7536,18 +7534,5 @@ genX(cmd_write_buffer_cp)(struct anv_cmd_buffer *cmd_buffer,
 {
    assert(size % 4 == 0);
    struct anv_address addr = anv_address_from_u64(dstAddr);
-
-   struct mi_builder b;
-   mi_builder_init(&b, cmd_buffer->device->info, &cmd_buffer->batch);
-
-   for (uint32_t i = 0; i < size; i += 8) {
-      mi_builder_set_write_check(&b, i >= size - 8);
-      if (size - i < 8) {
-         mi_store(&b, mi_mem32(anv_address_add(addr, i)),
-                      mi_imm(*((uint32_t *)((char*)data + i))));
-      } else {
-         mi_store(&b, mi_mem64(anv_address_add(addr, i)),
-                      mi_imm(*((uint64_t *)((char*)data + i))));
-      }
-   }
+   anv_cmd_buffer_update_addr(cmd_buffer, addr, size, data);
 }
