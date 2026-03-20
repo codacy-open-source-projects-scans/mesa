@@ -174,11 +174,6 @@ struct radv_device {
    struct radeon_winsys_bo *trace_bo;
    struct radv_trace_data *trace_data;
 
-   VkDeviceMemory va_validation_memory;
-   VkBuffer va_validation_buffer;
-   BITSET_WORD *valid_vas;
-   uint64_t valid_vas_addr;
-
    /* Whether to keep shader debug info, for debugging. */
    bool keep_shader_info;
 
@@ -316,7 +311,7 @@ struct radv_device {
    struct hash_table *rt_handles;
    simple_mtx_t rt_handles_mtx;
 
-   struct radv_printf_data printf;
+   struct radv_debug_nir debug_nir;
 
    struct radv_device_cache_key cache_key;
    blake3_hash cache_hash;

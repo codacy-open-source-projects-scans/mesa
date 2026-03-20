@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "ethosu_device.h"
 #include "ethosu_lower.h"
 #include "ethosu_coefs.h"
 #include "ethosu_sched.h"
@@ -125,8 +126,6 @@ ethosu_lower_convolution(struct ethosu_subgraph *subgraph,
    operation->type = ETHOSU_OPERATION_TYPE_CONVOLUTION;
 
    operation->conv.depthwise = is_depthwise(poperation);
-   // operation->padding_same = poperation->conv.padding_same;
-   // operation->stride = poperation->conv.stride_x;
 
    set_feature_maps(input_tensor, poperation->output_tensors[0], operation);
 
@@ -140,6 +139,24 @@ ethosu_lower_convolution(struct ethosu_subgraph *subgraph,
    operation->kernel.scale = poperation->conv.weight_tensor->scale;
    operation->kernel.zero_point = poperation->conv.weight_tensor->zero_point;
    operation->kernel.is_signed = poperation->conv.weight_tensor->is_signed;
+
+   /* Per-channel quantization support */
+   struct pipe_tensor *weight = poperation->conv.weight_tensor;
+   unsigned num_channels = poperation->output_tensors[0]->dims[3];
+
+   if (weight->scales != NULL) {
+      operation->kernel.scales = malloc(num_channels * sizeof(float));
+      memcpy(operation->kernel.scales, weight->scales, num_channels * sizeof(float));
+   } else {
+      operation->kernel.scales = NULL;
+   }
+
+   if (weight->zero_points != NULL) {
+      operation->kernel.zero_points = malloc(num_channels * sizeof(int));
+      memcpy(operation->kernel.zero_points, weight->zero_points, num_channels * sizeof(int));
+   } else {
+      operation->kernel.zero_points = NULL;
+   }
 
    operation->conv.part_kernel_first = ethosu_is_part_kernel_first(operation);
 
@@ -245,8 +262,6 @@ ethosu_lower_resize(struct ethosu_subgraph *subgraph,
    operation->pooling.avg = true;
 
    set_feature_maps(poperation->input_tensors[0], poperation->output_tensors[0], operation);
-   operation->ifm.zero_point = 0;
-   operation->ofm.zero_point = 0;
 
    operation->kernel.height = 1;
    operation->kernel.width = 1;
@@ -255,7 +270,7 @@ ethosu_lower_resize(struct ethosu_subgraph *subgraph,
    operation->kernel.dilation_y = 1;
    operation->kernel.dilation_x = 1;
 
-   operation->upscale = true;
+   operation->upscale = ETHOSU_UPSCALE_NEAREST;
 
    allocate_feature_maps(subgraph, operation);
    ethosu_sched_operation(subgraph, operation);
@@ -271,8 +286,6 @@ ethosu_lower_strided_slice(struct ethosu_subgraph *subgraph,
 
    set_feature_maps(poperation->input_tensors[0], poperation->output_tensors[0], operation);
    operation->ifm.shape = operation->ofm.shape;
-   operation->ifm.zero_point = 0;
-   operation->ofm.zero_point = 0;
 
    operation->kernel.height = 1;
    operation->kernel.width = 1;

@@ -1652,6 +1652,15 @@ intrinsic("prefetch_ubo_ir3", [1], flags=[CAN_REORDER])
 # src[] = { vertex_id, instance_id, offset }
 load("attribute_pan", [1, 1, 1], [BASE, COMPONENT, DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
 
+# src[] = { idx, bary }
+load("var_pan", [1, 2], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+# src[] = { idx }
+load("var_flat_pan", [1], [DEST_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+# src[] = { offset, bary }
+load("var_buf_pan", [1, 2], [SRC_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+# src[] = { offset }
+load("var_buf_flat_pan", [1], [SRC_TYPE, IO_SEMANTICS], [CAN_ELIMINATE, CAN_REORDER])
+
 # Panfrost-specific intrinsic to load the shader_output special-FAU value on 5th Gen.
 intrinsic("load_shader_output_pan", dest_comp=1, src_comp=[], bit_sizes=[32],
           indices=[], flags=[CAN_REORDER, CAN_ELIMINATE])
@@ -1718,11 +1727,30 @@ store("tile_pan", [1, 1, 1], indices=[ACCESS, SRC_TYPE, IO_SEMANTICS])
 
 # Load converted memory given an address and a conversion descriptor
 # src[] = { address, conversion }
-load("converted_mem_pan", [1, 1], indices=[DEST_TYPE, IO_SEMANTICS], flags=[CAN_ELIMINATE])
+load("global_cvt_pan", [1, 1], indices=[DEST_TYPE, ACCESS], flags=[CAN_ELIMINATE])
 
-# Store a value to memory with conversion given an address and a conversion descriptor
+# Store a value to memory with conversion given an address and a conversion
+# descriptor.  The hardware also supports AUTO32, meaning a global store without
+# any conversion for 32-bit values, this behaviour can be enabled by setting
+# SRC_TYPE = `32` (using nir_type_invalid instead of real types).
 # src[] = { value, address, conversion }
-store("converted_mem_pan", [1, 1], indices=[IO_SEMANTICS])
+store("global_cvt_pan", [1, 1], indices=[SRC_TYPE, ACCESS])
+
+# Same exact opcode as store_global, but used to tag a gl_PointSize write.
+# This is needed to later mask out the write in the backend.
+# src[] = { value, address }
+store("global_psiz_pan", [1], indices=[WRITE_MASK, ACCESS])
+
+# Base index of the output buffer passed into the IDVS on Valhall.
+system_value("idvs_output_buf_index_pan", 1, bit_sizes=[32])
+
+# src[] = { handle, vertex_id, instance_id }
+intrinsic("lea_attr_pan", [1, 1, 1], dest_comp=3, bit_sizes=[32],
+          indices=[SRC_TYPE], flags=[CAN_ELIMINATE, CAN_REORDER])
+
+# src[] = { handle, index }
+intrinsic("lea_buf_pan", [1, 1], dest_comp=2, bit_sizes=[32],
+          flags=[CAN_ELIMINATE, CAN_REORDER])
 
 # Load the address and potentially the conversion descriptor for a texel buffer index.
 # The 64 bit address is always in the first two channels, while the 32 bit

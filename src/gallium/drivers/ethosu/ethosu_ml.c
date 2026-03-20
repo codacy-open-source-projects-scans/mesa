@@ -137,16 +137,6 @@ ethosu_quantize_scale(double scale, uint32_t *shift)
    return quantized_scale;
 }
 
-static bool
-tensor_quantization_supported(struct pipe_tensor *tensor)
-{
-   /*
-    * Per-axis quantization not supported, for details see:
-    * https://ai.google.dev/edge/litert/models/quantization_spec#per-axis_vs_per-tensor
-    */
-   return tensor->scales == NULL && tensor->zero_points == NULL;
-}
-
 bool
 ethosu_ml_operation_supported(struct pipe_context *pcontext,
                               const struct pipe_ml_operation *operation)
@@ -155,17 +145,10 @@ ethosu_ml_operation_supported(struct pipe_context *pcontext,
 
    switch (operation->type) {
    case PIPE_ML_OPERATION_TYPE_CONVOLUTION: {
-      struct pipe_tensor *input_tensor = operation->input_tensors[0];
-      struct pipe_tensor *weight_tensor = operation->conv.weight_tensor;
-      struct pipe_tensor *bias_tensor = operation->conv.bias_tensor;
-      struct pipe_tensor *output_tensor = operation->output_tensors[0];
-
-      // Dilation and per-axis quantization not yet implemented
-      if (tensor_quantization_supported(input_tensor) &&
-          tensor_quantization_supported(weight_tensor) &&
-          tensor_quantization_supported(bias_tensor) &&
-          tensor_quantization_supported(output_tensor) &&
-          operation->conv.dilation_width_factor == 1 &&
+      /*
+       * Dilation is not yet implemented.
+       */
+      if (operation->conv.dilation_width_factor == 1 &&
           operation->conv.dilation_height_factor == 1)
          supported = true;
 
@@ -178,9 +161,17 @@ ethosu_ml_operation_supported(struct pipe_context *pcontext,
    case PIPE_ML_OPERATION_TYPE_POOLING:
    case PIPE_ML_OPERATION_TYPE_STRIDED_SLICE:
    case PIPE_ML_OPERATION_TYPE_PAD:
-   case PIPE_ML_OPERATION_TYPE_RESIZE:
       supported = true;
       break;
+   case PIPE_ML_OPERATION_TYPE_RESIZE: {
+      /* NPU only supports 2x nearest neighbor upscaling */
+      struct pipe_tensor *input = operation->input_tensors[0];
+      struct pipe_tensor *output = operation->output_tensors[0];
+      bool is_2x_height = (output->dims[1] == 2 * input->dims[1]);
+      bool is_2x_width = (output->dims[2] == 2 * input->dims[2]);
+      supported = is_2x_height && is_2x_width;
+      break;
+   }
    case PIPE_ML_OPERATION_TYPE_CONCATENATION:
       supported = operation->conc.axis == 3 ||
                   operation->conc.axis == -1;
@@ -356,7 +347,12 @@ ethosu_ml_subgraph_destroy(struct pipe_context *pcontext,
    ret = drmIoctl(screen->fd, DRM_IOCTL_GEM_CLOSE, &arg);
    assert(ret >= 0);
 
+   util_dynarray_foreach (&subgraph->operations, struct ethosu_operation, operation) {
+      free(operation->kernel.scales);
+      free(operation->kernel.zero_points);
+   }
    util_dynarray_fini(&subgraph->operations);
+
    util_dynarray_fini(&subgraph->tensors);
 
    free(subgraph);
