@@ -4652,7 +4652,7 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
                   for (unsigned i = 0;
                        i < binding->size / (4 * FDL6_TEX_CONST_DWORDS);
                        i++, dst_desc += FDL6_TEX_CONST_DWORDS) {
-                     uint64_t va = tu_desc_get_addr<CHIP>(dst_desc);
+                     uint64_t va = tu_desc_get_buffer_addr<CHIP>(dst_desc);
                      if (CHIP >= A8XX) {
                         /* gen8 buffer descriptors take a byte address, and
                          * the STARTOFFSETTEXELS field no longer exists.
@@ -4689,7 +4689,7 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
                            pkt_field_set(A6XX_TEX_MEMOBJ_2_STARTOFFSETTEXELS,
                                        dst_desc[2], new_offset);
                      }
-                     tu_desc_set_addr<CHIP>(dst_desc, va);
+                     tu_desc_set_buffer_addr<CHIP>(dst_desc, va);
                   }
                }
 
@@ -7866,7 +7866,7 @@ tu_emit_fdm_params(struct tu_cmd_buffer *cmd,
    STATIC_ASSERT(IR3_DP_FS(frag_invocation_count) == IR3_DP_FS_DYNAMIC);
    tu_cs_emit(cs, fs->fs.sample_shading ?
               cmd->vk.dynamic_graphics_state.ms.rasterization_samples : 1);
-   tu_cs_emit(cs, 0);
+   tu_cs_emit(cs, cmd->vk.dynamic_graphics_state.ms.alpha_to_coverage_enable);
    tu_cs_emit(cs, 0);
    tu_cs_emit(cs, 0);
 
@@ -8229,6 +8229,8 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
    bool dirty_fs_params = false;
    if (BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                    MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES) ||
+       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+                   MESA_VK_DYNAMIC_MS_ALPHA_TO_COVERAGE_ENABLE) ||
        (cmd->state.dirty & (TU_CMD_DIRTY_PROGRAM | TU_CMD_DIRTY_FDM))) {
       tu_emit_fs_params(cmd);
       dirty_fs_params = true;

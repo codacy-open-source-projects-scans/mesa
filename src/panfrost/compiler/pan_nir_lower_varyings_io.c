@@ -108,17 +108,6 @@ lower_vs_output_store(struct nir_builder *b,
    assert(ctx->arch < 9 ||
           src_bit_size == nir_alu_type_get_type_size(slot->alu_type));
 
-   /* Since v9 we cannot have separate attribute descriptors for VS-FS,
-    * There might be a mismatch on Gallium where the VS thinks it is storing
-    * an int, but the data is actually a float, and that's what FS expects.
-    * So, just for v9 onwards, just until we haven't fixed gallium, use auto32.
-    * We are still getting around the midgard quirk since we do this only
-    * from v9.
-    * TODO: fix all bugs with gallium and remove this patch
-    */
-   if (ctx->arch >= 9 && src_bit_size == 32)
-      src_type = 32;
-
    nir_def *data = store->src[0].ssa;
    assert(src_bit_size == data->bit_size);
 
@@ -169,7 +158,7 @@ pan_nir_lower_vs_outputs(nir_shader *shader, unsigned gpu_id,
 struct lower_fs_inputs_ctx {
    unsigned arch;
    const struct pan_varying_layout *varying_layout;
-   bool valhall_use_ld_var_buf;
+   struct pan_shader_info *info;
 };
 
 static bool
@@ -208,15 +197,17 @@ lower_fs_input_load(struct nir_builder *b,
    const unsigned component = nir_intrinsic_component(load);
    const unsigned load_comps = load->num_components + component;
 
-   nir_def *res;
-   if (ctx->valhall_use_ld_var_buf) {
-      assert(ctx->arch >= 9);
-
+   const struct pan_varying_slot *slot = NULL;
+   bool use_ld_var_buf = false;
+   if (ctx->varying_layout && ctx->arch >= 9) {
       pan_varying_layout_require_layout(ctx->varying_layout);
-      const struct pan_varying_slot *slot =
-         pan_varying_layout_find_slot(ctx->varying_layout,
-                                      sem.location);
+      slot = pan_varying_layout_find_slot(ctx->varying_layout, sem.location);
       assert(slot);
+      use_ld_var_buf = slot->offset < pan_ld_var_buf_off_size(ctx->arch);
+   }
+
+   nir_def *res;
+   if (use_ld_var_buf) {
       const nir_alu_type src_type = slot->alu_type;
       nir_def *offset_B = nir_imm_int(b, slot->offset);
 
@@ -232,6 +223,7 @@ lower_fs_input_load(struct nir_builder *b,
                                          .io_semantics = sem);
       }
    } else {
+      ctx->info->bifrost.uses_ld_var = true;
       const uint32_t base = nir_intrinsic_base(load);
       nir_def *idx = nir_imm_int(b, base);
 
@@ -262,12 +254,12 @@ lower_fs_input_load(struct nir_builder *b,
 bool
 pan_nir_lower_fs_inputs(nir_shader *shader, unsigned gpu_id,
                         const struct pan_varying_layout *varying_layout,
-                        bool valhall_use_ld_var_buf)
+                        struct pan_shader_info *info)
 {
    const struct lower_fs_inputs_ctx ctx = {
       .arch = pan_arch(gpu_id),
       .varying_layout = varying_layout,
-      .valhall_use_ld_var_buf = valhall_use_ld_var_buf,
+      .info = info,
    };
    return nir_shader_intrinsics_pass(shader, lower_fs_input_load,
                                      nir_metadata_control_flow,
