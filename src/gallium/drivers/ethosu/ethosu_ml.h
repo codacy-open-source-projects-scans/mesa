@@ -73,9 +73,11 @@ struct ethosu_feature_map {
    unsigned tensor_idx;
    struct ethosu_block shape;
    bool is_signed;
+   uint8_t precision;
    struct ethosu_tile_box tiles;
    unsigned zero_point;
    float scale;
+   uint16_t scalar;
 };
 
 struct ethosu_kernel {
@@ -150,7 +152,9 @@ struct ethosu_operation {
       } pooling;
 
       struct {
+         uint16_t activation_min;
          unsigned lut_bytes;
+         bool ifm_reversed;
       } eltwise;
 
       struct {
@@ -176,6 +180,7 @@ struct ethosu_tensor {
    unsigned index;
    unsigned offset;
    unsigned size;
+   uint8_t type_size;
    struct ethosu_block shape;
    enum ethosu_layout layout;
 };

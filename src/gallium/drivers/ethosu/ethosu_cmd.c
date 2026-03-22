@@ -133,6 +133,8 @@ emit_ifm_precision(struct ethosu_subgraph *subgraph,
    if (tensor->layout == ETHOSU_LAYOUT_NHCWB16)
       prec |= NPU_SET_IFM_PRECISION_FORMAT(1);
 
+   prec |= NPU_SET_IFM_PRECISION_PRECISION(feature_map->precision);
+
    if (feature_map->is_signed)
       prec |= NPU_SET_IFM_PRECISION_ACTIVATION(1); // signed activation
 
@@ -178,6 +180,8 @@ emit_ofm_precision(struct ethosu_subgraph *subgraph, struct ethosu_operation *op
 
    if (tensor->layout == ETHOSU_LAYOUT_NHCWB16)
       prec |= NPU_SET_OFM_PRECISION_FORMAT(1);
+
+   prec |= NPU_SET_OFM_PRECISION_PRECISION(operation->ofm.precision);
 
    if (operation->ofm.is_signed)
       prec |= NPU_SET_OFM_PRECISION_ACTIVATION(1);
@@ -226,13 +230,18 @@ emit_biases(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation
 static void
 emit_activation(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation)
 {
+   unsigned min = 0;
+
+   if (operation->type == ETHOSU_OPERATION_TYPE_ELTWISE)
+      min = operation->eltwise.activation_min;
+
    EMIT0(NPU_SET_ACTIVATION, 0x0);
 
    if (operation->ofm.is_signed) {
       EMIT0(NPU_SET_ACTIVATION_MIN, 0xff80);
       EMIT0(NPU_SET_ACTIVATION_MAX, 0x7f);
    } else {
-      EMIT0(NPU_SET_ACTIVATION_MIN, 0x00);
+      EMIT0(NPU_SET_ACTIVATION_MIN, min);
       EMIT0(NPU_SET_ACTIVATION_MAX, 0xff);
    }
 }
@@ -368,14 +377,29 @@ emit_ifm2(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation, 
       emit_addresses(subgraph, &operation->ifm2, NPU_SET_IFM2_BASE0, NPU_SET_IFM2_BASE1, NPU_SET_IFM2_BASE2, NPU_SET_IFM2_BASE3);
       emit_tiles(subgraph, &operation->ifm2, NPU_SET_IFM2_HEIGHT0_M1, NPU_SET_IFM2_HEIGHT1_M1, NPU_SET_IFM2_WIDTH0_M1);
       emit_strides(subgraph, &operation->ifm2, NPU_SET_IFM2_STRIDE_C, NPU_SET_IFM2_STRIDE_Y, NPU_SET_IFM2_STRIDE_X);
+   } else {
+      EMIT0(NPU_SET_IFM2_SCALAR, operation->ifm2.scalar);
    }
    EMIT0(NPU_SET_IFM2_ZERO_POINT, operation->ifm2.zero_point);
 }
 
 static void
-emit_ifm2_broadcast(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation)
+emit_ifm2_broadcast(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation, bool has_scalar)
 {
    unsigned ifm2_broadcast = 0;
+
+   ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_OPERAND_ORDER(operation->eltwise.ifm_reversed);
+
+   if (has_scalar) {
+      ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_SCALAR(1);
+   } else {
+      if (operation->ifm.shape.height != operation->ifm2.shape.height)
+         ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_HEIGHT__MASK;
+      if (operation->ifm.shape.width != operation->ifm2.shape.width)
+         ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_WIDTH__MASK;
+      if (operation->ifm.shape.depth != operation->ifm2.shape.depth)
+         ifm2_broadcast |= NPU_SET_IFM2_BROADCAST_BROADCAST_DEPTH__MASK;
+   }
 
    EMIT0(NPU_SET_IFM2_BROADCAST, ifm2_broadcast);
 }
@@ -429,7 +453,7 @@ advanced_elementwise_add_sub_scale(
 static void
 emit_eltwise(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation)
 {
-   bool has_scalar = false;
+   bool has_scalar = operation->ifm2.scalar != 0;
    enum ethosu_op_to_scale op_to_scale;
 
    op_to_scale = advanced_elementwise_add_sub_scale(
@@ -438,11 +462,18 @@ emit_eltwise(struct ethosu_subgraph *subgraph, struct ethosu_operation *operatio
       operation->ifm2.scale,
       operation->ofm.scale);
 
+   if (operation->eltwise.ifm_reversed) {
+      if (op_to_scale == OP_A)
+         op_to_scale = OP_B;
+      else
+         op_to_scale = OP_A;
+   }
+
    emit_common(subgraph, operation, op_to_scale);
 
    emit_ifm2(subgraph, operation, has_scalar);
    emit_ifm_precision(subgraph, &operation->ifm2, OP_NONE, NPU_SET_IFM2_PRECISION);
-   emit_ifm2_broadcast(subgraph, operation);
+   emit_ifm2_broadcast(subgraph, operation, has_scalar);
 }
 
 static void

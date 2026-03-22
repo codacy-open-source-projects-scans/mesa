@@ -1044,6 +1044,7 @@ struct pipe_tensor {
     * Whether the tensor contains data in INT8 or UINT8 format.
     */
    bool is_signed;
+   uint8_t type_size;
 };
 
 /**
@@ -1218,6 +1219,13 @@ struct pipe_ml_operation
           */
          bool relu;
       } fcon;
+
+      struct {
+         /**
+          * Whether a ReLU activation should be applied to the output.
+          */
+         bool relu;
+      } add;
 
       struct {
          /**

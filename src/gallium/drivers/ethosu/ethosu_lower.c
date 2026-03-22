@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/u_inlines.h"
+
 #include "ethosu_device.h"
 #include "ethosu_lower.h"
 #include "ethosu_coefs.h"
@@ -62,6 +64,7 @@ set_feature_maps(struct pipe_tensor *input_tensor,
    operation->ifm.zero_point = input_tensor->zero_point;
    operation->ifm.scale = input_tensor->scale;
    operation->ifm.is_signed = input_tensor->is_signed;
+   operation->ifm.precision = log2(input_tensor->type_size);
 
    operation->ofm.tensor_idx = output_tensor->index;
    operation->ofm.shape.height = output_tensor->dims[1];
@@ -70,6 +73,7 @@ set_feature_maps(struct pipe_tensor *input_tensor,
    operation->ofm.zero_point = output_tensor->zero_point;
    operation->ofm.scale = output_tensor->scale;
    operation->ofm.is_signed = output_tensor->is_signed;
+   operation->ofm.precision = log2(output_tensor->type_size);
 }
 
 static const struct pipe_ml_operation *
@@ -296,9 +300,8 @@ ethosu_lower_strided_slice(struct ethosu_subgraph *subgraph,
 
    allocate_feature_maps(subgraph, operation);
 
-   unsigned augmented_coord[5];
-   augmented_coord[0] = 0;
-   for (int i = 0; i < 4; ++i) {
+   unsigned augmented_coord[5] = {};
+   for (int i = 0; i < poperation->input_tensors[1]->dims[3]; ++i) {
       augmented_coord[i + 1] = poperation->slice.begin[i];
    }
 
@@ -318,22 +321,55 @@ ethosu_lower_strided_slice(struct ethosu_subgraph *subgraph,
    ethosu_sched_operation(subgraph, operation);
 }
 
+static bool
+is_sub_shape(struct pipe_tensor *sub, struct pipe_tensor *super)
+{
+   for (int i = 1; i < 4; i++) {
+      if (sub->dims[i] > super->dims[i])
+         return false;
+   }
+   return true;
+}
+
 static void
 ethosu_lower_add(struct ethosu_subgraph *subgraph,
                  const struct pipe_ml_operation *poperation,
                  struct ethosu_operation *operation)
 {
    operation->type = ETHOSU_OPERATION_TYPE_ELTWISE;
+   int ifm_idx = 0;
+   int ifm2_idx = 1;
 
-   set_feature_maps(poperation->input_tensors[0], poperation->output_tensors[0], operation);
+   if (!is_sub_shape(poperation->input_tensors[1], poperation->input_tensors[0])) {
+      ifm_idx = 1;
+      ifm2_idx = 0;
+      operation->eltwise.ifm_reversed = true;
+   }
 
-   operation->ifm2.tensor_idx = poperation->input_tensors[1]->index;
-   operation->ifm2.shape.height = poperation->input_tensors[1]->dims[1];
-   operation->ifm2.shape.width = poperation->input_tensors[1]->dims[2];
-   operation->ifm2.shape.depth = poperation->input_tensors[1]->dims[3];
-   operation->ifm2.zero_point = poperation->input_tensors[1]->zero_point;
-   operation->ifm2.scale = poperation->input_tensors[1]->scale;
-   operation->ifm2.is_signed = poperation->input_tensors[1]->is_signed;
+   set_feature_maps(poperation->input_tensors[ifm_idx], poperation->output_tensors[0], operation);
+
+   operation->ifm2.tensor_idx = poperation->input_tensors[ifm2_idx]->index;
+   operation->ifm2.shape.height = poperation->input_tensors[ifm2_idx]->dims[1];
+   operation->ifm2.shape.width = poperation->input_tensors[ifm2_idx]->dims[2];
+   operation->ifm2.shape.depth = poperation->input_tensors[ifm2_idx]->dims[3];
+   operation->ifm2.zero_point = poperation->input_tensors[ifm2_idx]->zero_point;
+   operation->ifm2.scale = poperation->input_tensors[ifm2_idx]->scale;
+   operation->ifm2.is_signed = poperation->input_tensors[ifm2_idx]->is_signed;
+   operation->ifm2.precision = log2(poperation->input_tensors[ifm2_idx]->type_size);
+   if (poperation->input_tensors[ifm2_idx]->resource &&
+       operation->ifm2.shape.width == 1 &&
+       operation->ifm2.shape.height == 1 &&
+       operation->ifm2.shape.depth == 1) {
+      struct pipe_transfer *transfer_in;
+      uint8_t *scalar = pipe_buffer_map(subgraph->base.context, poperation->input_tensors[ifm2_idx]->resource,
+                                        PIPE_MAP_READ, &transfer_in);
+
+      operation->ifm2.scalar = *scalar;
+
+      pipe_buffer_unmap(subgraph->base.context, transfer_in);
+   }
+   if (poperation->add.relu)
+      operation->eltwise.activation_min = operation->ofm.zero_point;
 
    operation->kernel.height = 1;
    operation->kernel.width = 1;
