@@ -1067,7 +1067,6 @@ ac_query_gpu_info(int fd, void *dev_p, struct radeon_info *info,
    info->has_out_of_order_rast =
       info->gfx_level >= GFX8 && info->gfx_level <= GFX9 && info->max_se >= 2;
 
-   /* TODO: Figure out how to use LOAD_CONTEXT_REG on GFX6-GFX7. */
    info->has_load_ctx_reg_pkt =
       info->gfx_level >= GFX9 || (info->gfx_level >= GFX8 && info->me_fw_feature >= 41);
 
@@ -1722,8 +1721,8 @@ void ac_compute_device_uuid(const struct radeon_info *info, char *uuid, size_t s
    assert(size >= sizeof(uint32_t) * 4);
 
    /**
-    * Use the device info directly instead of using a sha1. GL/VK UUIDs
-    * are 16 byte vs 20 byte for sha1, and the truncation that would be
+    * Use the device info directly instead of using a hash. GL/VK UUIDs
+    * are 16 byte vs N bytes for a hash, and the truncation that would be
     * required would get rid of part of the little entropy we have.
     * */
    memset(uuid, 0, size);

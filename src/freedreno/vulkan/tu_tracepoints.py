@@ -26,7 +26,7 @@ from u_trace import utrace_generate_perfetto_utils
 
 Header('vk_enum_to_str.h', scope=HeaderScope.SOURCE|HeaderScope.PERFETTO)
 Header('vk_format.h')
-Header('util/sha1/sha1.h')
+Header('util/mesa-blake3.h')
 Header('tu_cmd_buffer.h', scope=HeaderScope.SOURCE)
 Header('tu_device.h', scope=HeaderScope.SOURCE)
 Header('common/freedreno_lrz.h')
@@ -38,7 +38,7 @@ ForwardDecl('struct tu_cmd_buffer')
 ForwardDecl('struct tu_device')
 ForwardDecl('struct tu_framebuffer')
 ForwardDecl('struct tu_tiling_config')
-ForwardDecl('typedef char tu_sha1_str[SHA1_DIGEST_STRING_LENGTH]')
+ForwardDecl('typedef char tu_sha1_str[BLAKE3_HEX_LEN]')
 
 # List of the default tracepoints enabled. By default tracepoints are enabled,
 # set tp_default_enabled=False to disable them by default.

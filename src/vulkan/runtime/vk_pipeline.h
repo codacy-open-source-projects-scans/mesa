@@ -83,7 +83,7 @@ PRAGMA_DIAGNOSTIC_POP
 /** Hash VkPipelineShaderStageCreateInfo info
  *
  * Returns the hash of a VkPipelineShaderStageCreateInfo:
- *    SHA1(info->module->sha1,
+ *    BLAKE3(info->module->blake3,
  *         info->pName,
  *         vk_stage_to_mesa_stage(info->stage),
  *         info->pSpecializationInfo)
@@ -95,7 +95,7 @@ void
 vk_pipeline_hash_shader_stage(VkPipelineCreateFlags2KHR pipeline_flags,
                               const VkPipelineShaderStageCreateInfo *info,
                               const struct vk_pipeline_robustness_state *rstate,
-                              unsigned char *stage_sha1);
+                              unsigned char *stage_blake3);
 
 void
 vk_pipeline_robustness_state_fill(const struct vk_device *device,

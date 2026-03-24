@@ -43,7 +43,7 @@
 
 #include "shader_enums.h"
 
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 
 struct vk_pipeline_binary {
    struct vk_object_base base;
@@ -308,12 +308,12 @@ void
 vk_pipeline_hash_shader_stage(VkPipelineCreateFlags2KHR pipeline_flags,
                               const VkPipelineShaderStageCreateInfo *info,
                               const struct vk_pipeline_robustness_state *rstate,
-                              unsigned char *stage_sha1)
+                              unsigned char *stage_blake3)
 {
    blake3_hash blake_hash;
 
    vk_pipeline_hash_shader_stage_blake3(pipeline_flags, info, rstate, blake_hash);
-   _mesa_sha1_compute(blake_hash, sizeof(blake_hash), stage_sha1);
+   _mesa_blake3_compute(blake_hash, sizeof(blake_hash), stage_blake3);
 }
 
 static VkPipelineRobustnessBufferBehaviorEXT

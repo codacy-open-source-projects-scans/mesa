@@ -15,7 +15,7 @@
 #include "nir/radv_nir.h"
 #include "spirv/nir_spirv.h"
 #include "util/disk_cache.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "util/u_atomic.h"
 #include "radv_cs.h"
@@ -161,15 +161,15 @@ radv_compute_pipeline_hash(const struct radv_device *device, const VkComputePipe
    VkPipelineCreateFlags2 create_flags = vk_compute_pipeline_create_flags(pCreateInfo);
    VK_FROM_HANDLE(radv_pipeline_layout, pipeline_layout, pCreateInfo->layout);
    const VkPipelineShaderStageCreateInfo *sinfo = &pCreateInfo->stage;
-   struct mesa_sha1 ctx;
+   blake3_hasher ctx;
 
    struct radv_shader_stage_key stage_key =
       radv_pipeline_get_shader_key(device, sinfo, create_flags, pCreateInfo->pNext);
 
-   _mesa_sha1_init(&ctx);
+   _mesa_blake3_init(&ctx);
    radv_pipeline_hash(device, pipeline_layout, &ctx);
    radv_pipeline_hash_shader_stage(create_flags, sinfo, &stage_key, &ctx);
-   _mesa_sha1_final(&ctx, hash);
+   _mesa_blake3_final(&ctx, hash);
 }
 
 static VkResult
@@ -190,9 +190,9 @@ radv_compute_pipeline_compile(const VkComputePipelineCreateInfo *pCreateInfo, st
 
    int64_t pipeline_start = os_time_get_nano();
 
-   radv_compute_pipeline_hash(device, pCreateInfo, pipeline->base.sha1);
+   radv_compute_pipeline_hash(device, pCreateInfo, pipeline->base.blake3);
 
-   pipeline->base.pipeline_hash = *(uint64_t *)pipeline->base.sha1;
+   pipeline->base.pipeline_hash = *(uint64_t *)pipeline->base.blake3;
 
    bool found_in_application_cache = true;
    if (!skip_shaders_cache &&

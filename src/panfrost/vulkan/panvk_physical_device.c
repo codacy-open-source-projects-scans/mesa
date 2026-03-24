@@ -144,20 +144,20 @@ static void
 init_shader_caches(struct panvk_physical_device *device,
                    const struct panvk_instance *instance)
 {
-   struct mesa_sha1 sha_ctx;
-   _mesa_sha1_init(&sha_ctx);
+   blake3_hasher blake3_ctx;
+   _mesa_blake3_init(&blake3_ctx);
 
-   _mesa_sha1_update(&sha_ctx, instance->driver_build_sha,
+   _mesa_blake3_update(&blake3_ctx, instance->driver_build_sha,
                      sizeof(instance->driver_build_sha));
 
-   _mesa_sha1_update(&sha_ctx, &device->kmod.dev->props.gpu_id,
+   _mesa_blake3_update(&blake3_ctx, &device->kmod.dev->props.gpu_id,
                      sizeof(device->kmod.dev->props.gpu_id));
 
-   unsigned char sha[SHA1_DIGEST_LENGTH];
-   _mesa_sha1_final(&sha_ctx, sha);
+   unsigned char blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&blake3_ctx, blake3);
 
-   STATIC_ASSERT(VK_UUID_SIZE <= SHA1_DIGEST_LENGTH);
-   memcpy(device->cache_uuid, sha, VK_UUID_SIZE);
+   STATIC_ASSERT(VK_UUID_SIZE <= BLAKE3_KEY_LEN);
+   memcpy(device->cache_uuid, blake3, VK_UUID_SIZE);
 
 #ifdef ENABLE_SHADER_CACHE
    char renderer[17];
@@ -165,8 +165,8 @@ init_shader_caches(struct panvk_physical_device *device,
                                device->kmod.dev->props.gpu_id);
    assert(len == sizeof(renderer) - 1);
 
-   char timestamp[SHA1_DIGEST_STRING_LENGTH];
-   _mesa_sha1_format(timestamp, instance->driver_build_sha);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, instance->driver_build_sha);
 
    const uint64_t driver_flags = 0;
    device->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);

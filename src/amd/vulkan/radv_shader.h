@@ -12,7 +12,6 @@
 #define RADV_SHADER_H
 
 #include "util/mesa-blake3.h"
-#include "util/sha1/sha1.h"
 #include "util/shader_stats.h"
 #include "util/u_math.h"
 #include "vulkan/vulkan.h"
@@ -278,7 +277,7 @@ struct radv_shader_stage {
    const char *entrypoint;
    const VkSpecializationInfo *spec_info;
 
-   unsigned char shader_sha1[SHA1_DIGEST_LENGTH];
+   unsigned char shader_blake3[BLAKE3_KEY_LEN];
 
    nir_shader *nir;
    nir_shader *gs_copy_shader;

@@ -20,6 +20,7 @@ static const struct debug_named_value ethosu_debug_options[] = {
    {"zero_bos", ETHOSU_DBG_ZERO, "Zero buffers for debugging"},
    {"disable_nhcwb16", ETHOSU_DBG_DISABLE_NHCWB16, "Disable NHCWB16"},
    {"disable_sram", ETHOSU_DBG_DISABLE_SRAM, "Disable SRAM"},
+   {"force_u85", ETHOSU_DBG_FORCE_U85, "Force U85 behavior even on U65 hardware"},
    DEBUG_NAMED_VALUE_END};
 
 DEBUG_GET_ONCE_FLAGS_OPTION(ethosu_debug, "ETHOSU_DEBUG", ethosu_debug_options, 0)
@@ -50,7 +51,6 @@ ethosu_buffer_map(struct pipe_context *pctx,
    struct ethosu_screen *screen = ethosu_screen(pctx->screen);
    struct ethosu_resource *rsc = ethosu_resource(prsc);
    struct drm_ethosu_bo_wait bo_wait = {0};
-   struct drm_ethosu_bo_mmap_offset bo_mmap_offset = {0};
    int ret;
 
    assert(level == 0);
@@ -74,20 +74,9 @@ ethosu_buffer_map(struct pipe_context *pctx,
    if (ret == -1)
       goto free_transfer;
 
-   bo_mmap_offset.handle = rsc->handle;
-   ret = drmIoctl(screen->fd, DRM_IOCTL_ETHOSU_BO_MMAP_OFFSET, &bo_mmap_offset);
-   if (ret == -1)
-      goto free_transfer;
-
-   uint8_t *map = os_mmap(NULL, prsc->width0, PROT_READ | PROT_WRITE, MAP_SHARED,
-                          screen->fd, bo_mmap_offset.offset);
-   assert(map != MAP_FAILED);
-   if (map == MAP_FAILED)
-      goto free_transfer;
-
    *out_transfer = transfer;
 
-   return map + box->x;
+   return (uint8_t *)rsc->map + box->x;
 
 free_transfer:
    pipe_resource_reference(&transfer->resource, NULL);
@@ -166,8 +155,23 @@ ethosu_resource_create(struct pipe_screen *pscreen,
 
    rsc->handle = arg.handle;
 
+   struct drm_ethosu_bo_mmap_offset bo_mmap_offset = {0};
+   bo_mmap_offset.handle = rsc->handle;
+   ret = drmIoctl(screen->fd, DRM_IOCTL_ETHOSU_BO_MMAP_OFFSET, &bo_mmap_offset);
+   if (ret < 0)
+      goto close_bo;
+
+   rsc->map = os_mmap(NULL, rsc->bo_size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                      screen->fd, bo_mmap_offset.offset);
+   if (rsc->map == MAP_FAILED)
+      goto close_bo;
+
    return &rsc->base;
 
+close_bo: {
+   struct drm_gem_close close_arg = { .handle = rsc->handle };
+   drmIoctl(screen->fd, DRM_IOCTL_GEM_CLOSE, &close_arg);
+}
 free_rsc:
    ralloc_free(rsc);
    return NULL;
@@ -181,6 +185,8 @@ ethosu_resource_destroy(struct pipe_screen *pscreen,
    struct ethosu_screen *screen = ethosu_screen(pscreen);
    struct drm_gem_close arg = {0};
    int ret;
+
+   os_munmap(rsc->map, rsc->bo_size);
 
    arg.handle = rsc->handle;
 
@@ -232,6 +238,28 @@ ethosu_screen_create(int fd,
 
    if (DBG_ENABLED(ETHOSU_DBG_DISABLE_SRAM))
       ethosu_screen->info.sram_size = 0;
+
+   if (ethosu_is_u65(ethosu_screen)) {
+      ethosu_screen->ifm_ublock.width = 2;
+      ethosu_screen->ifm_ublock.height = 2;
+      ethosu_screen->ifm_ublock.depth = 8;
+
+      ethosu_screen->ofm_ublock.width = 2;
+      ethosu_screen->ofm_ublock.height = 2;
+      ethosu_screen->ofm_ublock.depth = 8;
+
+      ethosu_screen->max_concurrent_blocks = 3;
+   } else {
+      ethosu_screen->ifm_ublock.width = 4;
+      ethosu_screen->ifm_ublock.height = 4;
+      ethosu_screen->ifm_ublock.depth = 16;
+
+      ethosu_screen->ofm_ublock.width = 4;
+      ethosu_screen->ofm_ublock.height = 1;
+      ethosu_screen->ofm_ublock.depth = 8;
+
+      ethosu_screen->max_concurrent_blocks = 7;
+   }
 
    screen->get_screen_fd = ethosu_screen_get_fd;
    screen->destroy = ethosu_destroy_screen;

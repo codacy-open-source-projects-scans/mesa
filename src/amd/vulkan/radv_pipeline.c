@@ -218,7 +218,7 @@ radv_pipeline_stage_init(VkPipelineCreateFlags2 pipeline_flags, const VkPipeline
 
    radv_shader_layout_init(pipeline_layout, out_stage->stage, &out_stage->layout);
 
-   vk_pipeline_hash_shader_stage(pipeline_flags, sinfo, NULL, out_stage->shader_sha1);
+   vk_pipeline_hash_shader_stage(pipeline_flags, sinfo, NULL, out_stage->shader_blake3);
 }
 
 void
@@ -506,6 +506,7 @@ radv_postprocess_nir(struct radv_device *device, const struct radv_graphics_stat
       NIR_PASS(_, stage->nir, nir_opt_copy_prop);
       NIR_PASS(_, stage->nir, nir_opt_constant_folding);
       NIR_PASS(_, stage->nir, nir_opt_cse);
+      NIR_PASS(_, stage->nir, nir_opt_if, nir_opt_if_optimize_phi_true_false);
       NIR_PASS(_, stage->nir, nir_opt_shrink_vectors, true);
 
       NIR_PASS(_, stage->nir, ac_nir_flag_smem_for_loads, gfx_level, use_llvm);
@@ -1137,23 +1138,23 @@ radv_copy_shader_stage_create_info(struct radv_device *device, uint32_t stageCou
 
 void
 radv_pipeline_hash(const struct radv_device *device, const struct radv_pipeline_layout *pipeline_layout,
-                   struct mesa_sha1 *ctx)
+                   blake3_hasher *ctx)
 {
-   _mesa_sha1_update(ctx, device->cache_hash, sizeof(device->cache_hash));
+   _mesa_blake3_update(ctx, device->cache_hash, sizeof(device->cache_hash));
    if (pipeline_layout)
-      _mesa_sha1_update(ctx, pipeline_layout->hash, sizeof(pipeline_layout->hash));
+      _mesa_blake3_update(ctx, pipeline_layout->hash, sizeof(pipeline_layout->hash));
 }
 
 void
 radv_pipeline_hash_shader_stage(VkPipelineCreateFlags2 pipeline_flags, const VkPipelineShaderStageCreateInfo *sinfo,
-                                const struct radv_shader_stage_key *stage_key, struct mesa_sha1 *ctx)
+                                const struct radv_shader_stage_key *stage_key, blake3_hasher *ctx)
 {
-   unsigned char shader_sha1[SHA1_DIGEST_LENGTH];
+   unsigned char shader_blake3[BLAKE3_KEY_LEN];
 
-   vk_pipeline_hash_shader_stage(pipeline_flags, sinfo, NULL, shader_sha1);
+   vk_pipeline_hash_shader_stage(pipeline_flags, sinfo, NULL, shader_blake3);
 
-   _mesa_sha1_update(ctx, shader_sha1, sizeof(shader_sha1));
-   _mesa_sha1_update(ctx, stage_key, sizeof(*stage_key));
+   _mesa_blake3_update(ctx, shader_blake3, sizeof(shader_blake3));
+   _mesa_blake3_update(ctx, stage_key, sizeof(*stage_key));
 }
 
 static void

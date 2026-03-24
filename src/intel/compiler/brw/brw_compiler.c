@@ -280,14 +280,14 @@ brw_get_compiler_config_value(const struct brw_compiler *compiler)
 }
 
 void
-brw_device_sha1(char *hex,
+brw_device_blake3(char *hex,
                 const struct intel_device_info *devinfo) {
-   struct mesa_sha1 ctx;
-   _mesa_sha1_init(&ctx);
-   brw_device_sha1_update(&ctx, devinfo);
-   unsigned char result[SHA1_DIGEST_LENGTH];
-   _mesa_sha1_final(&ctx, result);
-   _mesa_sha1_format(hex, result);
+   blake3_hasher ctx;
+   _mesa_blake3_init(&ctx);
+   brw_device_blake3_update(&ctx, devinfo);
+   unsigned char result[BLAKE3_KEY_LEN];
+   _mesa_blake3_final(&ctx, result);
+   _mesa_blake3_format(hex, result);
 }
 
 unsigned

@@ -55,8 +55,8 @@ uint64_t os_page_size = 4096;
 static int
 tu_device_get_cache_uuid(struct tu_physical_device *device, void *uuid)
 {
-   struct mesa_sha1 ctx;
-   unsigned char sha1[SHA1_DIGEST_LENGTH];
+   blake3_hasher ctx;
+   unsigned char blake3[BLAKE3_KEY_LEN];
    /* Note: IR3_SHADER_DEBUG also affects compilation, but it's not
     * initialized until after compiler creation so we have to add it to the
     * shader hash instead, since the compiler is only created with the logical
@@ -66,17 +66,17 @@ tu_device_get_cache_uuid(struct tu_physical_device *device, void *uuid)
    uint16_t family = fd_dev_gpu_id(&device->dev_id);
 
    memset(uuid, 0, VK_UUID_SIZE);
-   _mesa_sha1_init(&ctx);
+   _mesa_blake3_init(&ctx);
 
    if (!disk_cache_get_function_identifier((void *)tu_device_get_cache_uuid, &ctx))
       return -1;
 
-   _mesa_sha1_update(&ctx, &family, sizeof(family));
-   _mesa_sha1_update(&ctx, &driver_flags, sizeof(driver_flags));
-   _mesa_sha1_update(&ctx, &device->uche_trap_base, sizeof(device->uche_trap_base));
-   _mesa_sha1_final(&ctx, sha1);
+   _mesa_blake3_update(&ctx, &family, sizeof(family));
+   _mesa_blake3_update(&ctx, &driver_flags, sizeof(driver_flags));
+   _mesa_blake3_update(&ctx, &device->uche_trap_base, sizeof(device->uche_trap_base));
+   _mesa_blake3_final(&ctx, blake3);
 
-   memcpy(uuid, sha1, VK_UUID_SIZE);
+   memcpy(uuid, blake3, VK_UUID_SIZE);
    return 0;
 }
 
@@ -1496,26 +1496,26 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->identicalMemoryTypeRequirements = true;
 
    {
-      struct mesa_sha1 sha1_ctx;
-      uint8_t sha1[SHA1_DIGEST_LENGTH];
+      blake3_hasher blake3_ctx;
+      uint8_t blake3[BLAKE3_KEY_LEN];
 
-      _mesa_sha1_init(&sha1_ctx);
+      _mesa_blake3_init(&blake3_ctx);
 
       /* Make sure we don't match with other vendors */
       const char *driver = "turnip-v1";
-      _mesa_sha1_update(&sha1_ctx, driver, strlen(driver));
+      _mesa_blake3_update(&blake3_ctx, driver, strlen(driver));
 
       /* Hash in UBWC configuration */
-      _mesa_sha1_update(&sha1_ctx, &pdevice->ubwc_config.highest_bank_bit,
+      _mesa_blake3_update(&blake3_ctx, &pdevice->ubwc_config.highest_bank_bit,
                         sizeof(pdevice->ubwc_config.highest_bank_bit));
-      _mesa_sha1_update(&sha1_ctx, &pdevice->ubwc_config.bank_swizzle_levels,
+      _mesa_blake3_update(&blake3_ctx, &pdevice->ubwc_config.bank_swizzle_levels,
                         sizeof(pdevice->ubwc_config.bank_swizzle_levels));
-      _mesa_sha1_update(&sha1_ctx, &pdevice->ubwc_config.macrotile_mode,
+      _mesa_blake3_update(&blake3_ctx, &pdevice->ubwc_config.macrotile_mode,
                         sizeof(pdevice->ubwc_config.macrotile_mode));
 
-      _mesa_sha1_final(&sha1_ctx, sha1);
+      _mesa_blake3_final(&blake3_ctx, blake3);
 
-      memcpy(props->optimalTilingLayoutUUID, sha1, VK_UUID_SIZE);
+      memcpy(props->optimalTilingLayoutUUID, blake3, VK_UUID_SIZE);
    }
 
    /* VK_KHR_acceleration_structure */

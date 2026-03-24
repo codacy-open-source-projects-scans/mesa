@@ -8,6 +8,7 @@
 #include "ethosu_device.h"
 #include "ethosu_lower.h"
 #include "ethosu_coefs.h"
+#include "ethosu_ml.h"
 #include "ethosu_sched.h"
 
 static bool
@@ -27,29 +28,6 @@ needed_total_padding(int input_size, int stride, int filter_size)
       return MAX2(filter_size - stride, 0);
 
    return MAX2(filter_size - (input_size % stride), 0);
-}
-
-static bool
-ethosu_is_part_kernel_first(struct ethosu_operation *operation)
-{
-   // Determine which block traversal strategy has better DPU utilization
-   unsigned kernel_size = operation->kernel.height * operation->kernel.width;
-   unsigned depth = operation->ifm.shape.depth;
-   float depth_utilization = (float)depth / ethosu_round_up_to_multiple(depth, 32);
-   float part_kernel_utilization = ((float)depth / ethosu_round_up_to_multiple(depth, 8));
-   part_kernel_utilization *= (float)kernel_size / ethosu_round_up_to_multiple(kernel_size, 4);
-
-   if (operation->type != ETHOSU_OPERATION_TYPE_CONVOLUTION)
-      return false;
-
-   if (operation->kernel.depthwise)
-      return false;
-
-   // Part-kernel first is always better for ifm depths <= 8
-   if (part_kernel_utilization >= depth_utilization || depth <= 8)
-      return true;
-
-   return false;
 }
 
 static void
@@ -94,15 +72,15 @@ ethosu_find_first_consumer(const struct pipe_ml_operation *poperations,
 static void
 allocate_feature_maps(struct ethosu_subgraph *subgraph, struct ethosu_operation *operation)
 {
-   ethosu_allocate_feature_map(subgraph, &operation->ifm);
-   operation->ifm.tiles.height_0 = operation->ifm.shape.height;
-   operation->ifm.tiles.height_1 = operation->ifm.shape.height;
-   operation->ifm.tiles.width_0 = operation->ifm.shape.width;
-
-   ethosu_allocate_feature_map(subgraph, &operation->ofm);
+   operation->ofm.tiles.addresses[0] = ethosu_allocate_feature_map(subgraph, operation->ofm.tensor_idx);
    operation->ofm.tiles.height_0 = operation->ofm.shape.height;
    operation->ofm.tiles.height_1 = operation->ofm.shape.height;
    operation->ofm.tiles.width_0 = operation->ofm.shape.width;
+
+   operation->ifm.tiles.addresses[0] = ethosu_allocate_feature_map(subgraph, operation->ifm.tensor_idx);
+   operation->ifm.tiles.height_0 = operation->ifm.shape.height;
+   operation->ifm.tiles.height_1 = operation->ifm.shape.height;
+   operation->ifm.tiles.width_0 = operation->ifm.shape.width;
 }
 
 static const struct pipe_ml_operation *
@@ -162,8 +140,6 @@ ethosu_lower_convolution(struct ethosu_subgraph *subgraph,
       operation->kernel.zero_points = NULL;
    }
 
-   operation->conv.part_kernel_first = ethosu_is_part_kernel_first(operation);
-
    if (poperation->conv.padding_same) {
       unsigned vert = needed_total_padding(input_tensor->dims[1], poperation->conv.stride_y, poperation->conv.weight_tensor->dims[1]);
       unsigned horiz = needed_total_padding(input_tensor->dims[2], poperation->conv.stride_x, poperation->conv.weight_tensor->dims[2]);
@@ -191,7 +167,17 @@ ethosu_lower_pooling(struct ethosu_subgraph *subgraph,
                      struct ethosu_operation *operation)
 {
    operation->type = ETHOSU_OPERATION_TYPE_POOLING;
-   operation->pooling.avg = poperation->pooling.type == PIPE_ML_POOLING_TYPE_AVG;
+
+   switch (poperation->pooling.type) {
+   case PIPE_ML_POOLING_TYPE_MAX:
+      operation->pooling.type = ETHOSU_POOLING_TYPE_MAX;
+      break;
+   case PIPE_ML_POOLING_TYPE_AVG:
+      operation->pooling.type = ETHOSU_POOLING_TYPE_AVG;
+      break;
+   default:
+      assert(0 && "Unsupported pooling type");
+   }
 
    set_feature_maps(poperation->input_tensors[0], poperation->output_tensors[0], operation);
 
@@ -228,12 +214,15 @@ ethosu_lower_concatenation(struct ethosu_subgraph *subgraph,
                            struct ethosu_operation *operation)
 {
    operation->type = ETHOSU_OPERATION_TYPE_POOLING;
-   operation->pooling.avg = true;
+
+   if (ethosu_is_u65(ethosu_screen(subgraph->base.context->screen))) {
+      operation->pooling.type = ETHOSU_POOLING_TYPE_AVG;
+      operation->round_mode = ETHOSU_ROUNDING_NATURAL;
+   } else
+      operation->pooling.type = ETHOSU_POOLING_TYPE_SUM;
 
    set_feature_maps(poperation->input_tensors[input_idx], poperation->output_tensors[0], operation);
    operation->ofm.shape.depth = operation->ifm.shape.depth;
-
-   operation->round_mode = ETHOSU_ROUNDING_NATURAL;
 
    operation->kernel.height = 1;
    operation->kernel.width = 1;
@@ -263,7 +252,7 @@ ethosu_lower_resize(struct ethosu_subgraph *subgraph,
                     struct ethosu_operation *operation)
 {
    operation->type = ETHOSU_OPERATION_TYPE_POOLING;
-   operation->pooling.avg = true;
+   operation->pooling.type = ETHOSU_POOLING_TYPE_AVG;
 
    set_feature_maps(poperation->input_tensors[0], poperation->output_tensors[0], operation);
 
@@ -286,7 +275,7 @@ ethosu_lower_strided_slice(struct ethosu_subgraph *subgraph,
                            struct ethosu_operation *operation)
 {
    operation->type = ETHOSU_OPERATION_TYPE_POOLING;
-   operation->pooling.avg = true;
+   operation->pooling.type = ETHOSU_POOLING_TYPE_AVG;
 
    set_feature_maps(poperation->input_tensors[0], poperation->output_tensors[0], operation);
    operation->ifm.shape = operation->ofm.shape;
@@ -380,7 +369,7 @@ ethosu_lower_add(struct ethosu_subgraph *subgraph,
 
    allocate_feature_maps(subgraph, operation);
 
-   ethosu_allocate_feature_map(subgraph, &operation->ifm2);
+   operation->ifm2.tiles.addresses[0] = ethosu_allocate_feature_map(subgraph, operation->ifm2.tensor_idx);
    operation->ifm2.tiles.height_0 = operation->ifm2.shape.height;
    operation->ifm2.tiles.height_1 = operation->ifm2.shape.height;
    operation->ifm2.tiles.width_0 = operation->ifm2.shape.width;
@@ -493,7 +482,7 @@ ethosu_lower_graph(struct ethosu_subgraph *subgraph,
       }
 
       case PIPE_ML_OPERATION_TYPE_CONCATENATION: {
-         for (int j = 0; j < poperations[i].input_count; j++) {
+         for (int j = poperations[i].input_count - 1; j >= 0; j--) {
             ethosu_lower_concatenation(subgraph, &poperations[i], j, &operation);
             util_dynarray_append(&subgraph->operations, operation);
          }

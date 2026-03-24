@@ -396,8 +396,8 @@ struct panfrost_uncompiled_shader {
     */
    const nir_shader *nir;
 
-   /* A SHA1 of the serialized NIR for the disk cache. */
-   unsigned char nir_sha1[SHA1_DIGEST_LENGTH];
+   /* A BLAKE3 of the serialized NIR for the disk cache. */
+   unsigned char nir_blake3[BLAKE3_KEY_LEN];
 
    /* Stream output information */
    struct pipe_stream_output_info stream_output;

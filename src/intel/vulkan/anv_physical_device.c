@@ -18,7 +18,7 @@
 
 #include "util/disk_cache.h"
 #include "util/os_misc.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/os_misc.h"
 
 #include <xf86drm.h>
@@ -1795,23 +1795,23 @@ get_properties(const struct anv_physical_device *pdevice,
        * different tilings sometimes (see isl_gfx7.c).
        */
       {
-         struct mesa_sha1 sha1_ctx;
-         uint8_t sha1[SHA1_DIGEST_LENGTH];
+         blake3_hasher blake3_ctx;
+         uint8_t blake3[BLAKE3_KEY_LEN];
 
-         _mesa_sha1_init(&sha1_ctx);
-         _mesa_sha1_update(&sha1_ctx, pdevice->driver_build_sha1,
+         _mesa_blake3_init(&blake3_ctx);
+         _mesa_blake3_update(&blake3_ctx, pdevice->driver_build_sha1,
                            sizeof(pdevice->driver_build_sha1));
-         _mesa_sha1_update(&sha1_ctx, &pdevice->info.platform,
+         _mesa_blake3_update(&blake3_ctx, &pdevice->info.platform,
                            sizeof(pdevice->info.platform));
          if (pdevice->info.platform == INTEL_PLATFORM_SKL &&
              pdevice->info.gt == 4) {
-            _mesa_sha1_update(&sha1_ctx, &pdevice->info.gt,
+            _mesa_blake3_update(&blake3_ctx, &pdevice->info.gt,
                               sizeof(pdevice->info.gt));
          }
-         _mesa_sha1_final(&sha1_ctx, sha1);
+         _mesa_blake3_final(&blake3_ctx, blake3);
 
-         assert(ARRAY_SIZE(sha1) >= VK_UUID_SIZE);
-         memcpy(props->optimalTilingLayoutUUID, sha1, VK_UUID_SIZE);
+         assert(ARRAY_SIZE(blake3) >= VK_UUID_SIZE);
+         memcpy(props->optimalTilingLayoutUUID, blake3, VK_UUID_SIZE);
       }
 
       /* System without ReBAR cannot map all memory types on the host and that
@@ -2374,21 +2374,21 @@ anv_physical_device_init_uuids(struct anv_physical_device *device)
 
    copy_build_id_to_sha1(device->driver_build_sha1, note);
 
-   struct mesa_sha1 sha1_ctx;
-   uint8_t sha1[SHA1_DIGEST_LENGTH];
-   STATIC_ASSERT(VK_UUID_SIZE <= sizeof(sha1));
+   blake3_hasher blake3_ctx;
+   uint8_t blake3[BLAKE3_KEY_LEN];
+   STATIC_ASSERT(VK_UUID_SIZE <= sizeof(blake3));
 
    /* The pipeline cache UUID is used for determining when a pipeline cache is
     * invalid.  It needs both a driver build and the PCI ID of the device.
     */
-   _mesa_sha1_init(&sha1_ctx);
-   _mesa_sha1_update(&sha1_ctx, build_id_data(note), build_id_len);
-   brw_device_sha1_update(&sha1_ctx, &device->info);
+   _mesa_blake3_init(&blake3_ctx);
+   _mesa_blake3_update(&blake3_ctx, build_id_data(note), build_id_len);
+   brw_device_blake3_update(&blake3_ctx, &device->info);
    bool always_use_bindless = !!(device->instance->debug & ANV_DEBUG_BINDLESS);
-   _mesa_sha1_update(&sha1_ctx, &always_use_bindless,
+   _mesa_blake3_update(&blake3_ctx, &always_use_bindless,
                      sizeof(always_use_bindless));
-   _mesa_sha1_final(&sha1_ctx, sha1);
-   memcpy(device->pipeline_cache_uuid, sha1, VK_UUID_SIZE);
+   _mesa_blake3_final(&blake3_ctx, blake3);
+   memcpy(device->pipeline_cache_uuid, blake3, VK_UUID_SIZE);
 
    intel_uuid_compute_driver_id(device->driver_uuid, &device->info, VK_UUID_SIZE);
    intel_uuid_compute_device_id(device->device_uuid, &device->info, VK_UUID_SIZE);
@@ -2405,8 +2405,8 @@ anv_physical_device_init_disk_cache(struct anv_physical_device *device)
                                device->info.pci_device_id);
    assert(len == sizeof(renderer) - 2);
 
-   char timestamp[SHA1_DIGEST_STRING_LENGTH];
-   _mesa_sha1_format(timestamp, device->driver_build_sha1);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, device->driver_build_sha1);
 
    const uint64_t driver_flags =
       brw_get_compiler_config_value(device->compiler);

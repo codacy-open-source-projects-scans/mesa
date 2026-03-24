@@ -16,7 +16,7 @@
 #include <sys/stat.h>
 
 #include "spirv/nir_spirv.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "ac_debug.h"
 #include "ac_descriptors.h"
@@ -544,12 +544,12 @@ radv_dump_annotated_shader(const struct radv_shader *shader, mesa_shader_stage s
 }
 
 static void
-radv_dump_spirv(const struct radv_shader *shader, const char *sha1, const char *dump_dir)
+radv_dump_spirv(const struct radv_shader *shader, const char *blake3, const char *dump_dir)
 {
    char dump_path[512];
    FILE *f;
 
-   snprintf(dump_path, sizeof(dump_path), "%s/%s.spv", dump_dir, sha1);
+   snprintf(dump_path, sizeof(dump_path), "%s/%s.spv", dump_dir, blake3);
 
    f = fopen(dump_path, "w+");
    if (f) {
@@ -570,17 +570,17 @@ radv_dump_shader(struct radv_device *device, struct radv_pipeline *pipeline, str
    fprintf(f, "%s:\n\n", radv_get_shader_name(&shader->info, stage));
 
    if (shader->spirv) {
-      unsigned char sha1[SHA1_DIGEST_LENGTH + 1];
-      char sha1buf[SHA1_DIGEST_STRING_LENGTH];
+      unsigned char blake3[BLAKE3_KEY_LEN + 1];
+      char blake3buf[BLAKE3_HEX_LEN];
 
-      _mesa_sha1_compute(shader->spirv, shader->spirv_size, sha1);
-      _mesa_sha1_format(sha1buf, sha1);
+      _mesa_blake3_compute(shader->spirv, shader->spirv_size, blake3);
+      _mesa_blake3_format(blake3buf, blake3);
 
       if (device->vk.enabled_features.deviceFaultVendorBinary) {
          spirv_print_asm(f, (const uint32_t *)shader->spirv, shader->spirv_size / 4);
       } else {
-         fprintf(f, "SPIRV (see %s.spv)\n\n", sha1buf);
-         radv_dump_spirv(shader, sha1buf, dump_dir);
+         fprintf(f, "SPIRV (see %s.spv)\n\n", blake3buf);
+         radv_dump_spirv(shader, blake3buf, dump_dir);
       }
    }
 

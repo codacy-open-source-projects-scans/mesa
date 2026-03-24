@@ -119,6 +119,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .KHR_present_wait2 = true,
       .KHR_swapchain = true,
       .KHR_swapchain_mutable_format = true,
+      .KHR_swapchain_maintenance1 = true,
 #endif
       .KHR_synchronization2 = true,
       .KHR_timeline_semaphore = true,
@@ -187,13 +188,16 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_sampler_filter_minmax = PAN_ARCH >= 10,
       .EXT_scalar_block_layout = true,
       .EXT_separate_stencil_usage = true,
-      .EXT_shader_module_identifier = true,
       .EXT_shader_demote_to_helper_invocation = true,
+      .EXT_shader_module_identifier = true,
       .EXT_shader_replicated_composites = true,
       .EXT_shader_stencil_export = true,
       .EXT_shader_subgroup_ballot = true,
       .EXT_shader_subgroup_vote = true,
       .EXT_subgroup_size_control = has_vk1_1,
+#ifdef PANVK_USE_WSI_PLATFORM
+      .EXT_swapchain_maintenance1 = true,
+#endif
       .EXT_texel_buffer_alignment = true,
       .EXT_astc_decode_mode = PAN_ARCH >= 9,
       .EXT_texture_compression_astc_hdr = true,
@@ -615,6 +619,9 @@ panvk_per_arch(get_physical_device_features)(
 
       /* VK_ARM_scheduling_controls */
       .schedulingControls = PAN_ARCH >= 10,
+
+      /* KHR_swapchain_maintenance1 */
+      .swapchainMaintenance1 = true,
 
       /* VK_EXT_multisampled_render_to_single_sampled */
       .multisampledRenderToSingleSampled = true,

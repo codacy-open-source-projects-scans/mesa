@@ -817,18 +817,18 @@ init_uuids(struct v3dv_physical_device *device)
    uint32_t vendor_id = v3dv_physical_device_vendor_id(device);
    uint32_t device_id = v3dv_physical_device_device_id(device);
 
-   struct mesa_sha1 sha1_ctx;
-   uint8_t sha1[SHA1_DIGEST_LENGTH];
-   STATIC_ASSERT(VK_UUID_SIZE <= sizeof(sha1));
+   blake3_hasher blake3_ctx;
+   uint8_t blake3[BLAKE3_KEY_LEN];
+   STATIC_ASSERT(VK_UUID_SIZE <= sizeof(blake3));
 
    /* The pipeline cache UUID is used for determining when a pipeline cache is
     * invalid.  It needs both a driver build and the PCI ID of the device.
     */
-   _mesa_sha1_init(&sha1_ctx);
-   _mesa_sha1_update(&sha1_ctx, build_id_data(note), build_id_len);
-   _mesa_sha1_update(&sha1_ctx, &device_id, sizeof(device_id));
-   _mesa_sha1_final(&sha1_ctx, sha1);
-   memcpy(device->pipeline_cache_uuid, sha1, VK_UUID_SIZE);
+   _mesa_blake3_init(&blake3_ctx);
+   _mesa_blake3_update(&blake3_ctx, build_id_data(note), build_id_len);
+   _mesa_blake3_update(&blake3_ctx, &device_id, sizeof(device_id));
+   _mesa_blake3_final(&blake3_ctx, blake3);
+   memcpy(device->pipeline_cache_uuid, blake3, VK_UUID_SIZE);
 
    /* The driver UUID is used for determining sharability of images and memory
     * between two Vulkan instances in separate processes.  People who want to
@@ -841,11 +841,11 @@ init_uuids(struct v3dv_physical_device *device)
     * Since we never have more than one device, this doesn't need to be a real
     * UUID.
     */
-   _mesa_sha1_init(&sha1_ctx);
-   _mesa_sha1_update(&sha1_ctx, &vendor_id, sizeof(vendor_id));
-   _mesa_sha1_update(&sha1_ctx, &device_id, sizeof(device_id));
-   _mesa_sha1_final(&sha1_ctx, sha1);
-   memcpy(device->device_uuid, sha1, VK_UUID_SIZE);
+   _mesa_blake3_init(&blake3_ctx);
+   _mesa_blake3_update(&blake3_ctx, &vendor_id, sizeof(vendor_id));
+   _mesa_blake3_update(&blake3_ctx, &device_id, sizeof(device_id));
+   _mesa_blake3_final(&blake3_ctx, blake3);
+   memcpy(device->device_uuid, blake3, VK_UUID_SIZE);
 
    return VK_SUCCESS;
 }
@@ -854,8 +854,8 @@ static void
 v3dv_physical_device_init_disk_cache(struct v3dv_physical_device *device)
 {
 #ifdef ENABLE_SHADER_CACHE
-   char timestamp[SHA1_DIGEST_STRING_LENGTH];
-   _mesa_sha1_format(timestamp, device->driver_build_sha1);
+   char timestamp[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(timestamp, device->driver_build_sha1);
 
    assert(device->name);
    device->disk_cache = disk_cache_create(device->name, timestamp, v3d_mesa_debug);

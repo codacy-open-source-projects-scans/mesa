@@ -16,7 +16,7 @@
 #include "nir/radv_nir.h"
 #include "spirv/nir_spirv.h"
 #include "util/disk_cache.h"
-#include "util/mesa-sha1.h"
+#include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "util/u_atomic.h"
 #include "radv_cs.h"
@@ -2376,7 +2376,7 @@ radv_create_gs_copy_shader(struct radv_device *device, struct vk_pipeline_cache 
 
    struct radv_shader_stage gs_copy_stage = {
       .stage = MESA_SHADER_VERTEX,
-      .shader_sha1 = {0},
+      .shader_blake3 = {0},
       .key =
          {
             .optimisations_disabled = gs_stage->key.optimisations_disabled,
@@ -2539,7 +2539,7 @@ radv_pipeline_retain_shaders(struct radv_retained_shaders *retained_shaders, str
       blob_finish_get_buffer(&blob, &retained_shaders->stages[s].serialized_nir,
                              &retained_shaders->stages[s].serialized_nir_size);
 
-      memcpy(retained_shaders->stages[s].shader_sha1, stages[s].shader_sha1, sizeof(stages[s].shader_sha1));
+      memcpy(retained_shaders->stages[s].shader_blake3, stages[s].shader_blake3, sizeof(stages[s].shader_blake3));
       memcpy(&retained_shaders->stages[s].key, &stages[s].key, sizeof(stages[s].key));
 
       stages[s].feedback.duration += os_time_get_nano() - stage_start;
@@ -2577,7 +2577,7 @@ radv_pipeline_import_retained_shaders(const struct radv_device *device, struct r
       stages[s].stage = s;
       stages[s].nir = nir_deserialize(NULL, options, &blob_reader);
       stages[s].entrypoint = nir_shader_get_entrypoint(stages[s].nir)->function->name;
-      memcpy(stages[s].shader_sha1, retained_shaders->stages[s].shader_sha1, sizeof(stages[s].shader_sha1));
+      memcpy(stages[s].shader_blake3, retained_shaders->stages[s].shader_blake3, sizeof(stages[s].shader_blake3));
       memcpy(&stages[s].key, &retained_shaders->stages[s].key, sizeof(stages[s].key));
 
       radv_shader_layout_init(&lib->layout, s, &stages[s].layout);
@@ -3085,12 +3085,12 @@ void
 radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_graphics_pipeline_state *gfx_state,
                             unsigned char *hash)
 {
-   struct mesa_sha1 ctx;
+   blake3_hasher ctx;
 
-   _mesa_sha1_init(&ctx);
+   _mesa_blake3_init(&ctx);
    radv_pipeline_hash(device, &gfx_state->layout, &ctx);
 
-   _mesa_sha1_update(&ctx, &gfx_state->key.gfx_state, sizeof(gfx_state->key.gfx_state));
+   _mesa_blake3_update(&ctx, &gfx_state->key.gfx_state, sizeof(gfx_state->key.gfx_state));
 
    if (gfx_state->stages) {
       for (unsigned s = 0; s < MESA_VULKAN_SHADER_STAGES; s++) {
@@ -3099,12 +3099,12 @@ radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_
          if (stage->stage == MESA_SHADER_NONE)
             continue;
 
-         _mesa_sha1_update(&ctx, stage->shader_sha1, sizeof(stage->shader_sha1));
-         _mesa_sha1_update(&ctx, &stage->key, sizeof(stage->key));
+         _mesa_blake3_update(&ctx, stage->shader_blake3, sizeof(stage->shader_blake3));
+         _mesa_blake3_update(&ctx, &stage->key, sizeof(stage->key));
       }
    }
 
-   _mesa_sha1_final(&ctx, hash);
+   _mesa_blake3_final(&ctx, hash);
 }
 
 static VkResult
@@ -3131,9 +3131,9 @@ radv_graphics_pipeline_compile(struct radv_graphics_pipeline *pipeline, const Vk
    int64_t pipeline_start = os_time_get_nano();
 
    if (radv_should_compute_pipeline_hash(device, pipeline->base.type, fast_linking_enabled)) {
-      radv_graphics_pipeline_hash(device, gfx_state, pipeline->base.sha1);
+      radv_graphics_pipeline_hash(device, gfx_state, pipeline->base.blake3);
 
-      pipeline->base.pipeline_hash = *(uint64_t *)pipeline->base.sha1;
+      pipeline->base.pipeline_hash = *(uint64_t *)pipeline->base.blake3;
    }
 
    /* Skip the shaders cache when any of the below are true:
