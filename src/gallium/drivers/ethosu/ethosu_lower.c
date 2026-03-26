@@ -140,25 +140,21 @@ ethosu_lower_convolution(struct ethosu_subgraph *subgraph,
       operation->kernel.zero_points = NULL;
    }
 
-   if (poperation->conv.padding_same) {
-      unsigned vert = needed_total_padding(input_tensor->dims[1], poperation->conv.stride_y, poperation->conv.weight_tensor->dims[1]);
-      unsigned horiz = needed_total_padding(input_tensor->dims[2], poperation->conv.stride_x, poperation->conv.weight_tensor->dims[2]);
-
-      operation->pad.top = vert / 2;
-      operation->pad.left = horiz / 2;
-      operation->pad.bottom = (vert + 1) / 2;
-      operation->pad.right = (horiz + 1) / 2;
-   } else {
-      operation->pad.top = 0;
-      operation->pad.left = 0;
-      operation->pad.bottom = 0;
-      operation->pad.right = 0;
-   }
+   operation->pad.top = poperation->conv.padding_top;
+   operation->pad.bottom = poperation->conv.padding_bottom;
+   operation->pad.left = poperation->conv.padding_left;
+   operation->pad.right = poperation->conv.padding_right;
 
    allocate_feature_maps(subgraph, operation);
 
    ethosu_sched_operation(subgraph, operation);
-   fill_coefs(subgraph, operation, poperation->conv.bias_tensor->resource, poperation->conv.weight_tensor->resource);
+   fill_coefs(subgraph, operation,
+              (int32_t *)poperation->conv.bias_tensor->data,
+              poperation->conv.weight_tensor->data,
+              poperation->conv.weight_tensor->dims[0] *
+              poperation->conv.weight_tensor->dims[1] *
+              poperation->conv.weight_tensor->dims[2] *
+              poperation->conv.weight_tensor->dims[3]);
 }
 
 static void
@@ -188,20 +184,10 @@ ethosu_lower_pooling(struct ethosu_subgraph *subgraph,
    operation->kernel.dilation_y = 1;
    operation->kernel.dilation_x = 1;
 
-   if (poperation->pooling.padding_same) {
-      unsigned vert = needed_total_padding(operation->ifm.shape.height, poperation->pooling.stride_y, poperation->pooling.filter_height);
-      unsigned horiz = needed_total_padding(operation->ifm.shape.width, poperation->pooling.stride_x, poperation->pooling.filter_width);
-
-      operation->pad.top = vert / 2;
-      operation->pad.left = horiz / 2;
-      operation->pad.bottom = (vert + 1) / 2;
-      operation->pad.right = (horiz + 1) / 2;
-   } else {
-      operation->pad.top = 0;
-      operation->pad.left = 0;
-      operation->pad.bottom = 0;
-      operation->pad.right = 0;
-   }
+   operation->pad.top = poperation->pooling.padding_top;
+   operation->pad.bottom = poperation->pooling.padding_bottom;
+   operation->pad.left = poperation->pooling.padding_left;
+   operation->pad.right = poperation->pooling.padding_right;
 
    allocate_feature_maps(subgraph, operation);
    ethosu_sched_operation(subgraph, operation);
@@ -215,7 +201,7 @@ ethosu_lower_concatenation(struct ethosu_subgraph *subgraph,
 {
    operation->type = ETHOSU_OPERATION_TYPE_POOLING;
 
-   if (ethosu_is_u65(ethosu_screen(subgraph->base.context->screen))) {
+   if (ethosu_is_u65(ethosu_device_screen(subgraph->base.device))) {
       operation->pooling.type = ETHOSU_POOLING_TYPE_AVG;
       operation->round_mode = ETHOSU_ROUNDING_NATURAL;
    } else
@@ -345,17 +331,11 @@ ethosu_lower_add(struct ethosu_subgraph *subgraph,
    operation->ifm2.scale = poperation->input_tensors[ifm2_idx]->scale;
    operation->ifm2.is_signed = poperation->input_tensors[ifm2_idx]->is_signed;
    operation->ifm2.precision = log2(poperation->input_tensors[ifm2_idx]->type_size);
-   if (poperation->input_tensors[ifm2_idx]->resource &&
+   if (poperation->input_tensors[ifm2_idx]->data &&
        operation->ifm2.shape.width == 1 &&
        operation->ifm2.shape.height == 1 &&
        operation->ifm2.shape.depth == 1) {
-      struct pipe_transfer *transfer_in;
-      uint8_t *scalar = pipe_buffer_map(subgraph->base.context, poperation->input_tensors[ifm2_idx]->resource,
-                                        PIPE_MAP_READ, &transfer_in);
-
-      operation->ifm2.scalar = *scalar;
-
-      pipe_buffer_unmap(subgraph->base.context, transfer_in);
+      operation->ifm2.scalar = *poperation->input_tensors[ifm2_idx]->data;
    }
    if (poperation->add.relu)
       operation->eltwise.activation_min = operation->ofm.zero_point;
@@ -452,7 +432,7 @@ ethosu_lower_graph(struct ethosu_subgraph *subgraph,
          }
 
          if (operation.conv.scales.size + operation.conv.weights.size <=
-             ethosu_screen(subgraph->base.context->screen)->info.sram_size) {
+             ethosu_device_screen(subgraph->base.device)->info.sram_size) {
             struct ethosu_operation dma_operation = {0};
             ethosu_lower_dma(subgraph, &poperations[i], &operation, &dma_operation);
 

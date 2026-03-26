@@ -43,7 +43,8 @@ teflon_debug(const char *format, ...)
 struct teflon_delegate {
    TfLiteDelegate base;
    struct pipe_loader_device *dev;
-   struct pipe_context *context;
+   struct pipe_screen *screen;
+   struct pipe_ml_device *ml_dev;
    struct pipe_tensor *tensors;
    unsigned tensor_count;
 };
@@ -58,41 +59,16 @@ struct teflon_subgraph {
    unsigned output_count;
 };
 
-static struct pipe_resource *
-create_resource(struct pipe_context *context, TfLiteTensor tensor)
+static void
+calc_same_padding(unsigned input_size, unsigned filter_size, unsigned stride,
+                  unsigned dilation, unsigned *pad_before, unsigned *pad_after)
 {
-   unsigned bytes;
-   unsigned size = 1;
-
-   for (int i = 0; i < tensor.dims->size; i++)
-      size *= tensor.dims->data[i];
-
-   switch (tensor.type) {
-   case kTfLiteInt8:
-   case kTfLiteUInt8:
-      bytes = 1;
-      break;
-   case kTfLiteInt16:
-   case kTfLiteUInt16:
-   case kTfLiteFloat16:
-      bytes = 2;
-      break;
-   case kTfLiteInt32:
-   case kTfLiteUInt32:
-   case kTfLiteFloat32:
-      bytes = 4;
-      break;
-   case kTfLiteInt64:
-   case kTfLiteUInt64:
-   case kTfLiteFloat64:
-   case kTfLiteComplex64:
-      bytes = 8;
-      break;
-   default:
-      UNREACHABLE("Unsupported TF type");
-   }
-
-   return pipe_buffer_create_with_data(context, 0, PIPE_USAGE_DEFAULT, size * bytes, tensor.data.data);
+   unsigned effective_filter = (filter_size - 1) * dilation + 1;
+   unsigned output_size = (input_size + stride - 1) / stride;
+   unsigned total = (output_size - 1) * stride + effective_filter;
+   unsigned padding = total > input_size ? total - input_size : 0;
+   *pad_before = padding / 2;
+   *pad_after = padding - *pad_before;
 }
 
 static bool
@@ -131,7 +107,16 @@ fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLi
          }
          operation->conv.stride_x = params->stride_width;
          operation->conv.stride_y = params->stride_height;
-         operation->conv.padding_same = params->padding == kTfLitePaddingSame;
+         if (params->padding == kTfLitePaddingSame) {
+            struct pipe_tensor *in = operation->input_tensors[0];
+            struct pipe_tensor *wt = &tensors[node->inputs->data[1]];
+            calc_same_padding(in->dims[1], wt->dims[1], params->stride_height,
+                              operation->conv.dilation_height_factor,
+                              &operation->conv.padding_top, &operation->conv.padding_bottom);
+            calc_same_padding(in->dims[2], wt->dims[2], params->stride_width,
+                              operation->conv.dilation_width_factor,
+                              &operation->conv.padding_left, &operation->conv.padding_right);
+         }
          operation->conv.depthwise = false;
          operation->conv.relu = params->activation == kTfLiteActRelu ||
                                 params->activation == kTfLiteActRelu6;
@@ -154,7 +139,16 @@ fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLi
          }
          operation->conv.stride_x = params->stride_width;
          operation->conv.stride_y = params->stride_height;
-         operation->conv.padding_same = params->padding == kTfLitePaddingSame;
+         if (params->padding == kTfLitePaddingSame) {
+            struct pipe_tensor *in = operation->input_tensors[0];
+            struct pipe_tensor *wt = &tensors[node->inputs->data[1]];
+            calc_same_padding(in->dims[1], wt->dims[1], params->stride_height,
+                              operation->conv.dilation_height_factor,
+                              &operation->conv.padding_top, &operation->conv.padding_bottom);
+            calc_same_padding(in->dims[2], wt->dims[2], params->stride_width,
+                              operation->conv.dilation_width_factor,
+                              &operation->conv.padding_left, &operation->conv.padding_right);
+         }
          operation->conv.depthwise = true;
          operation->conv.relu = params->activation == kTfLiteActRelu ||
                                 params->activation == kTfLiteActRelu6;
@@ -179,7 +173,13 @@ fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLi
       operation->pooling.filter_width = params->filter_width;
       operation->pooling.stride_x = params->stride_width;
       operation->pooling.stride_y = params->stride_height;
-      operation->pooling.padding_same = params->padding == kTfLitePaddingSame;
+      if (params->padding == kTfLitePaddingSame) {
+         struct pipe_tensor *in = operation->input_tensors[0];
+         calc_same_padding(in->dims[1], params->filter_height, params->stride_height,
+                           1, &operation->pooling.padding_top, &operation->pooling.padding_bottom);
+         calc_same_padding(in->dims[2], params->filter_width, params->stride_width,
+                           1, &operation->pooling.padding_left, &operation->pooling.padding_right);
+      }
       break;
    }
    case kTfLiteBuiltinAdd: {
@@ -342,17 +342,30 @@ tf_format_to_size(TfLiteType type)
    }
 }
 
+static unsigned
+tensor_data_size(TfLiteTensor tensor)
+{
+   unsigned size = 1;
+
+   for (int i = 0; i < tensor.dims->size; i++)
+      size *= tensor.dims->data[i];
+
+   return size * tf_format_to_size(tensor.type);
+}
+
 static void
 fill_tensor(struct teflon_delegate *delegate, TfLiteContext *tf_context, struct pipe_tensor *tensor, unsigned index)
 {
-   struct pipe_context *context = delegate->context;
    TfLiteTensor tf_tensor = tf_context->tensors[index];
 
    if (tf_tensor.type == kTfLiteNoType)
       return; /* Placeholder tensor */
 
-   if (tf_tensor.data.data)
-      tensor->resource = create_resource(context, tf_tensor);
+   if (tf_tensor.data.data) {
+      unsigned size = tensor_data_size(tf_tensor);
+      tensor->data = malloc(size);
+      memcpy(tensor->data, tf_tensor.data.data, size);
+   }
 
    tensor->type_size = tf_format_to_size(tf_tensor.type);
    tensor->index = index;
@@ -420,7 +433,7 @@ dump_graph(struct pipe_tensor *tensors, unsigned tensor_count, struct pipe_ml_op
                    tensors[i].index,
                    tensors[i].scale,
                    tensors[i].zero_point,
-                   tensors[i].resource == NULL ? "no" : "yes",
+                   tensors[i].data == NULL ? "no" : "yes",
                    tensors[i].dims[0], tensors[i].dims[1], tensors[i].dims[2], tensors[i].dims[3]);
    }
 
@@ -514,7 +527,6 @@ partition_init(TfLiteContext *tf_context, const char *buffer, size_t length)
 {
    const TfLiteDelegateParams *params = (const TfLiteDelegateParams *)buffer;
    struct teflon_delegate *delegate = (struct teflon_delegate *)params->delegate;
-   struct pipe_context *context = delegate->context;
    struct pipe_ml_operation operations[params->nodes_to_replace->size];
    long start = 0, end = 0;
 
@@ -541,9 +553,9 @@ partition_init(TfLiteContext *tf_context, const char *buffer, size_t length)
       dump_graph(delegate->tensors, tf_context->tensors_size, operations, params->nodes_to_replace->size);
 
    struct pipe_ml_subgraph *subgraph;
-   subgraph = context->ml_subgraph_create(context,
-                                          operations,
-                                          params->nodes_to_replace->size);
+   subgraph = delegate->ml_dev->ml_subgraph_create(delegate->ml_dev,
+                                                   operations,
+                                                   params->nodes_to_replace->size);
 
    struct teflon_subgraph *tsubgraph = calloc(1, sizeof(*tsubgraph));
    tsubgraph->base = subgraph;
@@ -591,9 +603,8 @@ partition_free(TfLiteContext *tf_context, void *buffer)
 {
    struct teflon_subgraph *tsubgraph = (struct teflon_subgraph *)buffer;
    struct pipe_ml_subgraph *subgraph = tsubgraph->base;
-   struct pipe_context *context = subgraph->context;
 
-   context->ml_subgraph_destroy(context, subgraph);
+   subgraph->device->ml_subgraph_destroy(subgraph->device, subgraph);
    free(tsubgraph->input_tensors);
    free(tsubgraph->output_tensors);
    free(tsubgraph);
@@ -605,7 +616,7 @@ partition_invoke(TfLiteContext *tf_context, TfLiteNode *node)
    struct teflon_delegate *delegate = (struct teflon_delegate *)node->delegate;
    struct teflon_subgraph *tsubgraph = (struct teflon_subgraph *)node->user_data;
    struct pipe_ml_subgraph *subgraph = tsubgraph->base;
-   struct pipe_context *context = delegate->context;
+   struct pipe_context *context = delegate->screen->context_create(delegate->screen, NULL, PIPE_CONTEXT_COMPUTE_ONLY);
    long start = 0, end = 0;
 
    if (unlikely(debug_get_option_debug_teflon() & TEFLON_DEBUG_VERBOSE)) {
@@ -650,6 +661,9 @@ partition_invoke(TfLiteContext *tf_context, TfLiteNode *node)
       end = (long)time.tv_sec * 1000 + (long)time.tv_nsec / 1000000;
       teflon_debug("teflon: invoked graph, took %ld ms\n", (end - start));
    }
+
+   context->destroy(context);
+   context = NULL;
 
    return kTfLiteOk;
 }
@@ -782,14 +796,13 @@ static bool
 check_op_support(TfLiteDelegate *tf_delegate, TfLiteContext *tf_context, TfLiteNode *node, TfLiteRegistration *registration)
 {
    struct teflon_delegate *delegate = (struct teflon_delegate *)tf_delegate;
-   struct pipe_context *context = delegate->context;
    struct pipe_ml_operation operation = {0};
    bool supported = false;
 
    if (!fill_operation(delegate, tf_context, node, registration, &operation))
       return false;
 
-   supported = context->ml_operation_supported(context, &operation);
+   supported = delegate->ml_dev->ml_operation_supported(delegate->ml_dev, &operation);
 
    free_operation(&operation);
 
@@ -964,7 +977,6 @@ tflite_plugin_create_delegate(char **options_keys,
                               void (*report_error)(const char *))
 {
    struct teflon_delegate *delegate = (struct teflon_delegate *)calloc(1, sizeof(*delegate));
-   struct pipe_screen *screen;
    struct pipe_loader_device **devs;
 
    delegate->base.flags = kTfLiteDelegateFlagsAllowDynamicTensors | kTfLiteDelegateFlagsRequirePropagatedShapes;
@@ -987,8 +999,8 @@ tflite_plugin_create_delegate(char **options_keys,
 
    teflon_debug("Teflon delegate: loaded %s driver\n", delegate->dev->driver_name);
 
-   screen = pipe_loader_create_screen(delegate->dev, false);
-   delegate->context = screen->context_create(screen, NULL, PIPE_CONTEXT_COMPUTE_ONLY);
+   delegate->screen = pipe_loader_create_screen(delegate->dev, false);
+   delegate->ml_dev = delegate->screen->get_ml_device(delegate->screen);
 
    return &delegate->base;
 }
@@ -997,7 +1009,6 @@ __attribute__((visibility("default"))) void
 tflite_plugin_destroy_delegate(TfLiteDelegate *tf_delegate)
 {
    struct teflon_delegate *delegate = (struct teflon_delegate *)tf_delegate;
-   struct pipe_screen *screen;
 
    if (tf_delegate == NULL) {
       fprintf(stderr, "tflite_plugin_destroy_delegate: NULL delegate!\n");
@@ -1011,14 +1022,12 @@ tflite_plugin_destroy_delegate(TfLiteDelegate *tf_delegate)
       if (delegate->tensors[i].zero_points)
          free(delegate->tensors[i].zero_points);
 
-      if (delegate->tensors[i].resource)
-         pipe_resource_reference(&delegate->tensors[i].resource, NULL);
+      if (delegate->tensors[i].data)
+         free(delegate->tensors[i].data);
    }
    free(delegate->tensors);
 
-   screen = delegate->context->screen;
-   delegate->context->destroy(delegate->context);
-   screen->destroy(screen);
+   delegate->screen->destroy(delegate->screen);
    pipe_loader_release(&delegate->dev, 1);
    free(delegate);
 }

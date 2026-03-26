@@ -23,9 +23,15 @@
 
 #include "vk_util.h"
 
-#include "v3dv_private.h"
+#include "v3dv_device.h"
+#include "v3dv_cmd_buffer.h"
+#include "v3dv_image.h"
+#include "v3dv_entrypoints.h"
+#include "v3dv_version_dispatch.h"
+#include "vk_shader_module.h"
+#include "vk_ycbcr_conversion.h"
+#include "compiler/spirv/nir_spirv.h"
 
-#include "common/v3d_debug.h"
 #include "qpu/qpu_disasm.h"
 
 #include "compiler/nir/nir_builder.h"
@@ -34,13 +40,11 @@
 
 #include "util/format/u_format.h"
 #include "util/shader_stats.h"
-#include "util/u_atomic.h"
 #include "util/os_time.h"
 #include "util/perf/cpu_trace.h"
 
 #include "vk_format.h"
 #include "vk_nir_convert_ycbcr.h"
-#include "vk_pipeline.h"
 #include "vk_blend.h"
 
 static VkResult
@@ -294,6 +298,7 @@ preprocess_nir(nir_shader *nir)
       .frag_coord = true,
       .point_coord = true,
       .layer_id = true,
+      .primitive_id = nir->info.stage == MESA_SHADER_FRAGMENT,
    };
    NIR_PASS(_, nir, nir_lower_sysvals_to_varyings, &sysvals_to_varyings);
 
