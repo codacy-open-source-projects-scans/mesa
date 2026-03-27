@@ -881,14 +881,23 @@ bi_instr *
 bi_make_vec_to(bi_builder *b, bi_index dst, bi_index *src, unsigned *channel,
                unsigned count, unsigned bitsize)
 {
-   assert(bitsize == 8 || bitsize == 16 || bitsize == 32);
-   unsigned shift = (bitsize == 32) ? 0 : (bitsize == 16) ? 1 : 2;
-   unsigned chan_per_word = 1 << shift;
-
    assert(DIV_ROUND_UP(count * bitsize, 32) <= BI_MAX_SRCS &&
           "unnecessarily large vector should have been lowered");
 
    bi_index srcs[BI_MAX_VEC];
+
+   if (bitsize == 64) {
+      for (unsigned i = 0; i < count; i++) {
+         const unsigned c = channel ? channel[i] : 0;
+         srcs[i * 2 + 0] = bi_extract(b, src[i], c * 2 + 0);
+         srcs[i * 2 + 1] = bi_extract(b, src[i], c * 2 + 1);
+      }
+      return bi_emit_collect_to(b, dst, srcs, count * 2);
+   }
+
+   assert(bitsize == 8 || bitsize == 16 || bitsize == 32);
+   unsigned shift = (bitsize == 32) ? 0 : (bitsize == 16) ? 1 : 2;
+   unsigned chan_per_word = 1 << shift;
 
    for (unsigned i = 0; i < count; i += chan_per_word) {
       unsigned rem = MIN2(count - i, chan_per_word);
@@ -1006,49 +1015,6 @@ bi_is_zs(unsigned location)
    return location == FRAG_RESULT_DEPTH || location == FRAG_RESULT_STENCIL;
 }
 
-static enum va_shader_output
-va_shader_output_from_semantics(const nir_io_semantics *sem)
-{
-   switch (sem->location) {
-   case VARYING_SLOT_POS:
-      return VA_SHADER_OUTPUT_POSITION;
-   case VARYING_SLOT_PSIZ:
-   case VARYING_SLOT_LAYER:
-   case VARYING_SLOT_PRIMITIVE_ID:
-      return VA_SHADER_OUTPUT_ATTRIB;
-   default:
-      return VA_SHADER_OUTPUT_VARY;
-   }
-}
-
-static bool
-bifrost_nir_lower_shader_output_impl(struct nir_builder *b,
-                                     nir_intrinsic_instr *intr, void *data)
-{
-   if (intr->intrinsic != nir_intrinsic_store_output &&
-       intr->intrinsic != nir_intrinsic_store_per_view_output)
-      return false;
-
-   nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
-   unsigned mask = va_shader_output_from_semantics(&sem);
-
-   b->cursor = nir_instr_remove(&intr->instr);
-   nir_def *shader_output = nir_load_shader_output_pan(b);
-
-   nir_push_if(b, nir_i2b(b, nir_iand_imm(b, shader_output, mask)));
-   nir_builder_instr_insert(b, &intr->instr);
-   nir_pop_if(b, NULL);
-   return true;
-}
-
-static bool
-bifrost_nir_lower_shader_output(nir_shader *shader)
-{
-   return nir_shader_intrinsics_pass(shader,
-                                     bifrost_nir_lower_shader_output_impl,
-                                     nir_metadata_none, NULL);
-}
-
 /* Atomics and memory write on the vertex stage have implementation-defined
  * behaviors on how many invocations will happen. However for some reasons,
  * atomic counters on GL/GLES specs are quite ambigous here and even have tests
@@ -1080,18 +1046,19 @@ bifrost_nir_lower_vs_atomics_impl(nir_builder *b, nir_intrinsic_instr *intr,
          continue;
 
       nir_io_semantics sem = nir_intrinsic_io_semantics(parent_intr);
-      output_mask |= va_shader_output_from_semantics(&sem);
+      output_mask |= BITFIELD_BIT(va_shader_output_from_loc(sem.location));
    }
 
    /* In case they are not written to any outputs, we default to only output in
     * the position stage */
    if (output_mask == 0)
-      output_mask |= VA_SHADER_OUTPUT_POSITION;
+      output_mask |= VA_SHADER_OUTPUT_POSITION_BIT;
 
    /* In case they are not written to both IDVS stages, we just do not try
     * lowering it */
-   if (((output_mask & VA_SHADER_OUTPUT_VARY) &&
-        (output_mask & (VA_SHADER_OUTPUT_POSITION | VA_SHADER_OUTPUT_ATTRIB))))
+   if (((output_mask & VA_SHADER_OUTPUT_VARY_BIT) &&
+        (output_mask & (VA_SHADER_OUTPUT_POSITION_BIT |
+                        VA_SHADER_OUTPUT_ATTRIB_BIT))))
       return false;
 
    /* In case we know we have only outputs to a certain type, we can make the
@@ -2536,11 +2503,9 @@ bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
 
    unsigned offset = 0;
 
-   assert(bitsize == 8 || bitsize == 16 || bitsize == 32);
-   unsigned subword_shift = (bitsize == 32) ? 0 : (bitsize == 16) ? 1 : 2;
-
+   assert(bitsize == 8 || bitsize == 16 || bitsize == 32 || bitsize == 64);
    for (unsigned i = 0; i < comps; ++i) {
-      unsigned new_offset = (src.swizzle[i] >> subword_shift);
+      unsigned new_offset = (src.swizzle[i] * bitsize) / 32;
 
       if (i > 0)
          assert(offset == new_offset && "wrong vectorization");
@@ -2560,6 +2525,18 @@ bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
    } else if (bitsize == 8 && comps == 1) {
       idx.swizzle = BI_SWIZZLE_B0000 + (src.swizzle[0] & 3);
    } else if (bitsize == 8) {
+      if (comps == 2 || comps == 4) {
+         unsigned c[4] = {0};
+         for (unsigned i = 0; i < comps; ++i)
+            c[i] = src.swizzle[i] & 3;
+
+         enum bi_swizzle swizzle;
+         if (bi_byte_swizzle_from_nir_swizzle(c, comps, &swizzle)) {
+            idx.swizzle = swizzle;
+            return idx;
+         }
+      }
+
       /* XXX: Use optimized swizzle when posisble */
       bi_index unoffset_srcs[NIR_MAX_VEC_COMPONENTS] = {bi_null()};
       unsigned channels[NIR_MAX_VEC_COMPONENTS] = {0};
@@ -2567,15 +2544,6 @@ bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
       for (unsigned i = 0; i < comps; ++i) {
          unoffset_srcs[i] = bi_src_index(&src.src);
          channels[i] = src.swizzle[i];
-      }
-
-      if (comps == 2 || comps == 4) {
-         enum bi_swizzle swizzle;
-         if (bi_byte_swizzle_from_nir_swizzle(channels, comps, &swizzle)) {
-            bi_index ret = bi_src_index(&src.src);
-            ret.swizzle = swizzle;
-            return ret;
-         }
       }
 
       bi_index temp = bi_temp(b->shader);
@@ -2884,33 +2852,68 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
     * are the exceptions that need to handle swizzles specially. */
 
    switch (instr->op) {
+   case nir_op_mov: {
+      bi_index idx = bi_src_index(&instr->src[0].src);
+      bi_index unoffset_srcs[4] = {idx, idx, idx, idx};
+
+      unsigned channels[4] = {
+         comps > 0 ? instr->src[0].swizzle[0] : 0,
+         comps > 1 ? instr->src[0].swizzle[1] : 0,
+         comps > 2 ? instr->src[0].swizzle[2] : 0,
+         comps > 3 ? instr->src[0].swizzle[3] : 0,
+      };
+
+      bi_make_vec_to(b, dst, unoffset_srcs, channels, comps, src_sz);
+      return;
+   }
+
    case nir_op_vec2:
    case nir_op_vec3:
    case nir_op_vec4:
    case nir_op_vec8:
-   case nir_op_vec16: {
+   case nir_op_vec16:
+   case nir_op_pack_32_2x16_split:
+   case nir_op_pack_32_4x8_split:
+   case nir_op_pack_64_2x32_split: {
       bi_index unoffset_srcs[16] = {bi_null()};
       unsigned channels[16] = {0};
 
       for (unsigned i = 0; i < srcs; ++i) {
+         assert(nir_src_bit_size(instr->src[i].src) == src_sz);
          unoffset_srcs[i] = bi_src_index(&instr->src[i].src);
          channels[i] = instr->src[i].swizzle[0];
       }
 
-      bi_make_vec_to(b, dst, unoffset_srcs, channels, srcs, sz);
+      bi_make_vec_to(b, dst, unoffset_srcs, channels, srcs, src_sz);
       return;
    }
 
+   case nir_op_pack_32_2x16:
+   case nir_op_pack_32_4x8:
+   case nir_op_pack_64_2x32:
+   case nir_op_pack_64_4x16: {
+      bi_index idx = bi_src_index(&instr->src[0].src);
+      bi_index unoffset_srcs[4] = { idx, idx, idx, idx };
+
+      unsigned src_comps = nir_op_infos[instr->op].input_sizes[0];
+      assert(src_sz * src_comps == sz);
+
+      unsigned channels[4] = { 0 };
+      for (uint32_t i = 0; i < src_comps; i++)
+         channels[i] = instr->src[0].swizzle[i];
+
+      bi_make_vec_to(b, dst, unoffset_srcs, channels, src_comps, src_sz);
+      return;
+   }
+
+   case nir_op_unpack_32_2x16:
    case nir_op_unpack_32_4x8:
-   case nir_op_unpack_32_2x16: {
-      /* Should have been scalarized */
-      assert(sz == 8 || sz == 16);
-      assert(comps * sz == 32);
-
-      bi_index vec = bi_src_index(&instr->src[0].src);
+   case nir_op_unpack_64_2x32:
+   case nir_op_unpack_64_4x16: {
+      assert(comps * sz == src_sz);
+      bi_index idx = bi_src_index(&instr->src[0].src);
       unsigned chan = instr->src[0].swizzle[0];
-
-      bi_mov_i32_to(b, dst, bi_extract(b, vec, chan));
+      bi_make_vec_to(b, dst, &idx, &chan, 1, src_sz);
       return;
    }
 
@@ -2931,43 +2934,16 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       return;
    }
 
-   case nir_op_unpack_64_2x32: {
-      unsigned chan = (instr->src[0].swizzle[0] * 2) + 0;
-      bi_index idx = bi_src_index(&instr->src[0].src);
-      bi_collect_v2i32_to(b, dst, bi_extract(b, idx, chan + 0),
-                                  bi_extract(b, idx, chan + 1));
-      return;
-   }
-
-   case nir_op_unpack_64_2x32_split_x: {
-      unsigned chan = (instr->src[0].swizzle[0] * 2) + 0;
-      bi_mov_i32_to(b, dst,
-                    bi_extract(b, bi_src_index(&instr->src[0].src), chan));
-      return;
-   }
-
+   case nir_op_unpack_64_2x32_split_x:
    case nir_op_unpack_64_2x32_split_y: {
-      unsigned chan = (instr->src[0].swizzle[0] * 2) + 1;
-      bi_mov_i32_to(b, dst,
-                    bi_extract(b, bi_src_index(&instr->src[0].src), chan));
+      bi_index idx = bi_src_index(&instr->src[0].src);
+
+      unsigned offset = instr->op == nir_op_unpack_64_2x32_split_x ? 0 : 1;
+      unsigned chan = instr->src[0].swizzle[0] * 2 + offset;
+
+      bi_mov_i32_to(b, dst, bi_extract(b, idx, chan));
       return;
    }
-
-   case nir_op_pack_64_2x32_split:
-      bi_collect_v2i32_to(b, dst,
-                          bi_extract(b, bi_src_index(&instr->src[0].src),
-                                     instr->src[0].swizzle[0]),
-                          bi_extract(b, bi_src_index(&instr->src[1].src),
-                                     instr->src[1].swizzle[0]));
-      return;
-
-   case nir_op_pack_64_2x32:
-      bi_collect_v2i32_to(b, dst,
-                          bi_extract(b, bi_src_index(&instr->src[0].src),
-                                     instr->src[0].swizzle[0]),
-                          bi_extract(b, bi_src_index(&instr->src[0].src),
-                                     instr->src[0].swizzle[1]));
-      return;
 
    case nir_op_pack_uvec2_to_uint: {
       bi_index src = bi_src_index(&instr->src[0].src);
@@ -2991,76 +2967,6 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
          bi_extract(b, src, instr->src[0].swizzle[3]),
       };
       unsigned channels[4] = {0};
-      bi_make_vec_to(b, dst, srcs, channels, 4, 8);
-      return;
-   }
-
-   case nir_op_mov: {
-      bi_index idx = bi_src_index(&instr->src[0].src);
-      bi_index unoffset_srcs[4] = {idx, idx, idx, idx};
-
-      unsigned channels[4] = {
-         comps > 0 ? instr->src[0].swizzle[0] : 0,
-         comps > 1 ? instr->src[0].swizzle[1] : 0,
-         comps > 2 ? instr->src[0].swizzle[2] : 0,
-         comps > 3 ? instr->src[0].swizzle[3] : 0,
-      };
-
-      bi_make_vec_to(b, dst, unoffset_srcs, channels, comps, src_sz);
-      return;
-   }
-
-   case nir_op_pack_32_2x16: {
-      assert(comps == 1);
-
-      bi_index idx = bi_src_index(&instr->src[0].src);
-      bi_index unoffset_srcs[4] = {idx, idx, idx, idx};
-
-      unsigned channels[2] = {instr->src[0].swizzle[0],
-                              instr->src[0].swizzle[1]};
-
-      bi_make_vec_to(b, dst, unoffset_srcs, channels, 2, 16);
-      return;
-   }
-
-   case nir_op_pack_32_2x16_split: {
-      assert(comps == 1);
-
-      bi_index srcs[2] = {bi_src_index(&instr->src[0].src),
-                          bi_src_index(&instr->src[1].src)};
-      unsigned channels[2] = {instr->src[0].swizzle[0],
-                              instr->src[1].swizzle[0]};
-
-      bi_make_vec_to(b, dst, srcs, channels, 2, 16);
-      return;
-   }
-
-   case nir_op_pack_32_4x8: {
-      assert(comps == 1);
-
-      bi_index idx = bi_src_index(&instr->src[0].src);
-      bi_index srcs[4] = {idx, idx, idx, idx};
-      unsigned channels[4] = {instr->src[0].swizzle[0],
-                              instr->src[0].swizzle[1],
-                              instr->src[0].swizzle[2],
-                              instr->src[0].swizzle[3]};
-
-      bi_make_vec_to(b, dst, srcs, channels, 4, 8);
-      return;
-   }
-
-   case nir_op_pack_32_4x8_split: {
-      assert(comps == 1);
-
-      bi_index srcs[4] = {bi_src_index(&instr->src[0].src),
-                          bi_src_index(&instr->src[1].src),
-                          bi_src_index(&instr->src[2].src),
-                          bi_src_index(&instr->src[3].src)};
-      unsigned channels[4] = {instr->src[0].swizzle[0],
-                              instr->src[1].swizzle[0],
-                              instr->src[2].swizzle[0],
-                              instr->src[3].swizzle[0]};
-
       bi_make_vec_to(b, dst, srcs, channels, 4, 8);
       return;
    }
@@ -5628,18 +5534,15 @@ mem_vectorize_cb(unsigned align_mul, unsigned align_offset, unsigned bit_size,
    if (hole_size > 0)
       return false;
 
-   /* Must be aligned to the size of the load */
-   unsigned align = nir_combined_align(align_mul, align_offset);
-   if ((bit_size / 8) > align)
-      return false;
-
+   /* We have a hard limit of at most 4 components */
    if (num_components > 4)
       return false;
 
-   if (bit_size > 32)
-      return false;
+   const unsigned bytes = num_components * (bit_size / 8);
+   const unsigned max_bytes = 128u / 8u; /* LOAD.i128 */
 
-   return true;
+   const unsigned combined_align = nir_combined_align(align_mul, align_offset);
+   return bytes <= combined_align && bytes <= max_bytes;
 }
 
 static void
@@ -5726,7 +5629,7 @@ bifrost_optimize_nir(nir_shader *nir, unsigned gpu_id)
 }
 
 static void
-bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_modes)
+bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust_modes)
 {
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
    bi_optimize_loop_nir(nir, gpu_id, false);
@@ -5736,14 +5639,15 @@ bi_optimize_nir(nir_shader *nir, unsigned gpu_id, nir_variable_mode robust2_mode
    nir_load_store_vectorize_options vectorize_opts = {
       .modes = nir_var_mem_global |
                nir_var_mem_shared |
+               nir_var_mem_ubo |
                nir_var_shader_temp,
       .callback = mem_vectorize_cb,
-      .robust_modes = robust2_modes,
+      .robust_modes = robust_modes,
    };
 
-   /* Only allow vectorization of UBOs when no robustness2 is configured */
-   if (!(robust2_modes & nir_var_mem_ubo))
-      vectorize_opts.modes |= nir_var_mem_ubo;
+   /* Only allow vectorization of SSBOs when no robustness2 is configured */
+   if (!(robust_modes & nir_var_mem_ssbo))
+      vectorize_opts.modes |= nir_var_mem_ssbo;
 
    NIR_PASS(_, nir, nir_opt_load_store_vectorize, &vectorize_opts);
 
@@ -6201,13 +6105,6 @@ bifrost_postprocess_nir(nir_shader *nir, unsigned gpu_id)
       NIR_PASS(_, nir, nir_lower_viewport_transform);
       NIR_PASS(_, nir, nir_lower_point_size, 1.0, 0.0);
       NIR_PASS(_, nir, pan_nir_lower_noperspective_vs);
-
-      /* nir_lower[_explicit]_io is lazy and emits mul+add chains even
-       * for offsets it could figure out are constant.  Do some
-       * constant folding before pan_nir_lower_store_component below.
-       */
-      NIR_PASS(_, nir, nir_opt_constant_folding);
-      NIR_PASS(_, nir, pan_nir_lower_store_component);
    }
 
    nir_lower_mem_access_bit_sizes_options mem_size_options = {
@@ -6489,10 +6386,11 @@ bi_compile_variant_nir(nir_shader *nir,
       if (offset == 0)
          ctx->nir = nir = nir_shader_clone(ctx, nir);
 
-      uint64_t position = VA_SHADER_OUTPUT_POSITION | VA_SHADER_OUTPUT_ATTRIB;
+      uint64_t position = VA_SHADER_OUTPUT_POSITION_BIT |
+                          VA_SHADER_OUTPUT_ATTRIB_BIT;
 
       NIR_PASS(_, nir, nir_inline_sysval, nir_intrinsic_load_shader_output_pan,
-               (idvs == BI_IDVS_POSITION) ? position : VA_SHADER_OUTPUT_VARY);
+               (idvs == BI_IDVS_POSITION) ? position : VA_SHADER_OUTPUT_VARY_BIT);
 
       /* After specializing, clean up the mess */
       bool progress = true;
@@ -6920,37 +6818,9 @@ bifrost_compile_shader_nir(nir_shader *nir,
       if (info->vs.idvs && nir->info.writes_memory)
          NIR_PASS(_, nir, bifrost_nir_lower_vs_atomics);
 
-      if (info->vs.idvs) {
-         bool shader_output_pass = false;
-         NIR_PASS(shader_output_pass, nir, bifrost_nir_lower_shader_output);
-
-         /* If shader output lower made progress, ensure to merge adjacent if that were added */
-         if (shader_output_pass) {
-            /* First we clean up and deduplicate added condition logic */
-            NIR_PASS(_, nir, nir_opt_copy_prop);
-            NIR_PASS(_, nir, nir_opt_dce);
-            NIR_PASS(_, nir, nir_opt_cse);
-
-            /* We then move vec closer to their I/O stores to ensure nothing is between ifs */
-            NIR_PASS(_, nir, nir_opt_sink, nir_move_copies);
-            NIR_PASS(_, nir, nir_opt_move, nir_move_copies);
-
-            /* Finally run if optimization to ensure trivial if blocks are merged together */
-            NIR_PASS(_, nir, nir_opt_if, 0);
-         }
-      }
-
-      bool has_extended_fifo = false;
-      if (pan_arch(inputs->gpu_id) >= 9) {
-         const uint64_t outputs = nir->info.outputs_written;
-         has_extended_fifo = valhal_writes_extended_fifo(outputs, false, true);
-         /* Must be the same with and without no_psiz */
-         assert(valhal_writes_extended_fifo(outputs, true, true) ==
-                has_extended_fifo);
-      }
-
       NIR_PASS(_, nir, pan_nir_lower_vs_outputs, inputs->gpu_id,
-               inputs->varying_layout, info->vs.idvs, has_extended_fifo);
+               inputs->varying_layout, info->vs.idvs,
+               &info->vs.needs_extended_fifo);
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -6967,7 +6837,7 @@ bifrost_compile_shader_nir(nir_shader *nir,
       NIR_PASS(_, nir, pan_nir_lower_fs_outputs, skip_atest);
    }
 
-   bi_optimize_nir(nir, inputs->gpu_id, inputs->robust2_modes);
+   bi_optimize_nir(nir, inputs->gpu_id, inputs->robust_modes);
 
    {
       bool scalar_phis_pass = false;

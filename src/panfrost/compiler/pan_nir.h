@@ -47,8 +47,6 @@ pan_nir_tile_default_coverage(nir_builder *b)
 
 bool pan_nir_lower_bool_to_bitsize(nir_shader *shader);
 
-bool pan_nir_lower_store_component(nir_shader *shader);
-
 bool pan_nir_lower_vertex_id(nir_shader *shader);
 
 bool pan_nir_lower_image_ms(nir_shader *shader);
@@ -59,7 +57,7 @@ bool pan_nir_lower_noperspective_fs(nir_shader *shader);
 
 bool pan_nir_lower_vs_outputs(nir_shader *shader, unsigned gpu_id,
                               const struct pan_varying_layout *varying_layout,
-                              bool has_idvs, bool has_extended_fifo);
+                              bool has_idvs, bool *needs_extended_fifo);
 
 bool pan_nir_lower_fs_inputs(nir_shader *shader, unsigned gpu_id,
                              const struct pan_varying_layout *varying_layout,

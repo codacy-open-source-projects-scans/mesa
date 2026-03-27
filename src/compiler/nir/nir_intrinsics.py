@@ -388,6 +388,9 @@ index("unsigned", "num_matrices")
 # Register class for load/store_preamble
 index("nir_preamble_class", "preamble_class")
 
+# Like nir_alu_instr::fp_math_ctrl, but for intrinsics
+index("unsigned", "fp_math_ctrl")
+
 intrinsic("nop", flags=[CAN_ELIMINATE])
 
 # Uses a value and cannot be eliminated.
@@ -396,7 +399,7 @@ intrinsic("nop", flags=[CAN_ELIMINATE])
 intrinsic("use", src_comp=[0], flags=[])
 
 intrinsic("convert_alu_types", dest_comp=0, src_comp=[0],
-          indices=[SRC_TYPE, DEST_TYPE, ROUNDING_MODE, SATURATE],
+          indices=[SRC_TYPE, DEST_TYPE, ROUNDING_MODE, SATURATE, FP_MATH_CTRL],
           flags=[CAN_ELIMINATE, CAN_REORDER])
 
 intrinsic("load_param", dest_comp=0, indices=[PARAM_IDX], flags=[CAN_ELIMINATE])
@@ -499,7 +502,7 @@ intrinsic("is_sparse_resident_zink", dest_comp=1, src_comp=[0], bit_sizes=[1],
 for suffix in ["", "_fine", "_coarse"]:
     for axis in ["x", "y"]:
         intrinsic(f"dd{axis}{suffix}", dest_comp=0, src_comp=[0],
-                  bit_sizes=[16, 32], flags=[CAN_ELIMINATE, QUADGROUP])
+                  bit_sizes=[16, 32], indices=[FP_MATH_CTRL], flags=[CAN_ELIMINATE, QUADGROUP])
 
 # a barrier is an intrinsic with no inputs/outputs but which can't be moved
 # around/optimized in general
@@ -1436,15 +1439,15 @@ intrinsic("cmat_load", src_comp=[-1, -1, 1], indices=[MATRIX_LAYOUT])
 intrinsic("cmat_store", src_comp=[-1, -1, 1], indices=[MATRIX_LAYOUT])
 intrinsic("cmat_length", src_comp=[], dest_comp=1, indices=[CMAT_DESC], bit_sizes=[32])
 intrinsic("cmat_muladd", src_comp=[-1, -1, -1, -1], indices=[SATURATE, CMAT_SIGNED_MASK])
-intrinsic("cmat_convert", src_comp=[-1, -1], indices=[SATURATE, CMAT_SIGNED_MASK])
-intrinsic("cmat_unary_op", src_comp=[-1, -1], indices=[ALU_OP])
-intrinsic("cmat_binary_op", src_comp=[-1, -1, -1], indices=[ALU_OP])
-intrinsic("cmat_scalar_op", src_comp=[-1, -1, -1], indices=[ALU_OP])
+intrinsic("cmat_convert", src_comp=[-1, -1], indices=[SATURATE, CMAT_SIGNED_MASK, FP_MATH_CTRL])
+intrinsic("cmat_unary_op", src_comp=[-1, -1], indices=[ALU_OP, FP_MATH_CTRL])
+intrinsic("cmat_binary_op", src_comp=[-1, -1, -1], indices=[ALU_OP, FP_MATH_CTRL])
+intrinsic("cmat_scalar_op", src_comp=[-1, -1, -1], indices=[ALU_OP, FP_MATH_CTRL])
 intrinsic("cmat_bitcast", src_comp=[-1, -1])
 intrinsic("cmat_extract", src_comp=[-1, 1], dest_comp=1)
 intrinsic("cmat_insert", src_comp=[-1, 1, -1, 1])
 intrinsic("cmat_copy", src_comp=[-1, -1])
-intrinsic("cmat_transpose", src_comp=[-1, -1])
+intrinsic("cmat_transpose", src_comp=[-1, -1], indices=[FP_MATH_CTRL])
 
 # Select an output vertex in a poly GS. Takes the stream-local vertex ID.
 intrinsic("select_vertex_poly", src_comp=[1], indices=[STREAM_ID])
