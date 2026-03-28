@@ -115,6 +115,7 @@ ethosu_create_context(struct pipe_screen *screen,
    pctx->buffer_subdata = u_default_buffer_subdata;
    pctx->clear_buffer = u_default_clear_buffer;
 
+   pctx->ml_subgraph_deserialize = ethosu_ml_subgraph_deserialize;
    pctx->ml_subgraph_invoke = ethosu_ml_subgraph_invoke;
    pctx->ml_subgraph_read_output = ethosu_ml_subgraph_read_outputs;
 
@@ -249,12 +250,19 @@ set_device_arch(struct ethosu_ml_device *device, bool is_u65)
 }
 
 static void
+ethosu_ml_device_destroy(struct pipe_ml_device *pdev)
+{
+   ralloc_free(pdev);
+}
+
+static void
 set_device_callbacks(struct ethosu_ml_device *device)
 {
    device->base.ml_operation_supported = ethosu_ml_operation_supported;
    device->base.ml_subgraph_create = ethosu_ml_subgraph_create;
    device->base.ml_subgraph_serialize = ethosu_ml_subgraph_serialize;
    device->base.ml_subgraph_destroy = ethosu_ml_subgraph_destroy;
+   device->base.ml_device_destroy = ethosu_ml_device_destroy;
 }
 
 struct pipe_screen *
@@ -293,7 +301,9 @@ ethosu_screen_create(int fd,
    screen->resource_destroy = ethosu_resource_destroy;
    screen->get_ml_device = ethosu_ml_device_create_accel;
 
-   ethosu_screen->ml_device.base.id = "ethosu-65-256";
+   ethosu_screen->ml_device.base.id =
+      ralloc_asprintf(ethosu_screen, "ethosu-%u-256-%u",
+                      is_u65 ? 65 : 85, ethosu_screen->info.sram_size);
    set_device_callbacks(&ethosu_screen->ml_device);
 
    return screen;
