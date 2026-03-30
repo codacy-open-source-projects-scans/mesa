@@ -1383,9 +1383,8 @@ enum si_blitter_op /* bitmask */
 {
    SI_SAVE_TEXTURES = 1,
    SI_SAVE_FRAMEBUFFER = 2,
-   SI_SAVE_FRAGMENT_STATE = 4,
-   SI_SAVE_FRAGMENT_CONSTANT = 8,
-   SI_DISABLE_RENDER_COND = 16,
+   SI_SAVE_FRAGMENT_CONSTANT = 4,
+   SI_DISABLE_RENDER_COND = 8,
 };
 
 void si_blitter_begin(struct si_context *sctx, enum si_blitter_op op);
@@ -1849,6 +1848,9 @@ static inline struct si_shader_ctx_state *si_get_vs(struct si_context *sctx)
 
 static inline bool si_get_streamout_enable_state(struct si_context *sctx)
 {
+   if (sctx->blitter_running)
+      return false;
+
    /* For GFX11, return whether NGG streamout queries are enabled. For older gens, return whether
     * streamout hw is enabled.
     *
