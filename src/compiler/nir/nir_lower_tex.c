@@ -328,6 +328,7 @@ sample_plane(nir_builder *b, nir_tex_instr *tex, int plane,
    plane_tex->dest_type = nir_type_float | tex->def.bit_size;
    plane_tex->coord_components = 2;
 
+   plane_tex->embedded_sampler = tex->embedded_sampler;
    plane_tex->texture_index = tex->texture_index;
    plane_tex->sampler_index = tex->sampler_index;
    plane_tex->can_speculate = tex->can_speculate;
@@ -891,6 +892,7 @@ lower_tex_to_txd(nir_builder *b, nir_tex_instr *tex)
    txd->sampler_dim = tex->sampler_dim;
    txd->dest_type = tex->dest_type;
    txd->coord_components = tex->coord_components;
+   txd->embedded_sampler = tex->embedded_sampler;
    txd->texture_index = tex->texture_index;
    txd->sampler_index = tex->sampler_index;
    txd->is_array = tex->is_array;
@@ -934,6 +936,7 @@ lower_txb_to_txl(nir_builder *b, nir_tex_instr *tex)
    txl->sampler_dim = tex->sampler_dim;
    txl->dest_type = tex->dest_type;
    txl->coord_components = tex->coord_components;
+   txl->embedded_sampler = tex->embedded_sampler;
    txl->texture_index = tex->texture_index;
    txl->sampler_index = tex->sampler_index;
    txl->is_array = tex->is_array;
@@ -1191,6 +1194,7 @@ lower_tg4_offsets(nir_builder *b, nir_tex_instr *tex)
       tex_copy->is_gather_implicit_lod = tex->is_gather_implicit_lod;
       tex_copy->component = tex->component;
       tex_copy->dest_type = tex->dest_type;
+      tex_copy->embedded_sampler = tex->embedded_sampler;
       tex_copy->texture_index = tex->texture_index;
       tex_copy->sampler_index = tex->sampler_index;
       tex_copy->backend_flags = tex->backend_flags;
@@ -1207,7 +1211,7 @@ lower_tg4_offsets(nir_builder *b, nir_tex_instr *tex)
       tex_copy->src[tex_copy->num_srcs - 1] = src;
 
       nir_def_init(&tex_copy->instr, &tex_copy->def,
-                   nir_tex_instr_dest_size(tex), 32);
+                   nir_tex_instr_dest_size(tex), tex->def.bit_size);
 
       nir_builder_instr_insert(b, &tex_copy->instr);
 
@@ -1467,6 +1471,18 @@ lower_index_to_offset(nir_builder *b, nir_tex_instr *tex)
    }
 
    return progress;
+}
+
+static void
+lower_tg4_shadow_to_16bit(nir_builder *b, nir_tex_instr *tex)
+{
+   tex->def.bit_size = 16;
+   tex->dest_type = nir_type_float16;
+
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *cvt = nir_f2f32(b, &tex->def);
+
+   nir_def_rewrite_uses_after(&tex->def, cvt);
 }
 
 unsigned
@@ -1749,6 +1765,12 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
       if (options->optimize_txd && tex->op == nir_texop_txd && !sat_mask &&
           nir_shader_supports_implicit_lod(b->shader)) {
          progress |= optimize_txd(b->shader, tex, *prev_terminate_return);
+      }
+
+      if (options->lower_tg4_shadow_to_16bit && tex->op == nir_texop_tg4 &&
+          tex->is_shadow && tex->def.bit_size == 32 && !tex->is_sparse) {
+         lower_tg4_shadow_to_16bit(b, tex);
+         progress = true;
       }
 
       if (tex->op == nir_texop_txd &&

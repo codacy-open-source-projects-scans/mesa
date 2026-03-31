@@ -182,6 +182,21 @@ typedef struct nir_state_slot {
 } nir_state_slot;
 
 /**
+ * Resource types according to VkSpirvResourceTypeFlagsKHR.
+ */
+typedef enum {
+   nir_resource_type_sampler = 1u << 0,
+   nir_resource_type_sampled_image = 1u << 1,
+   nir_resource_type_read_only_image = 1u << 2,
+   nir_resource_type_read_write_image = 1u << 3,
+   nir_resource_type_combined_sampled_image = 1u << 4,
+   nir_resource_type_uniform_buffer = 1u << 5,
+   nir_resource_type_read_only_storage_buffer = 1u << 6,
+   nir_resource_type_read_write_storage_buffer = 1u << 7,
+   nir_resource_type_acceleration_structure = 1u << 8,
+} nir_resource_type;
+
+/**
  * Rounding modes.
  */
 typedef enum {
@@ -712,10 +727,13 @@ typedef struct nir_variable {
        */
       unsigned access : 9;
 
+      /* NIR resource type bit index that this variable would have. */
+      nir_resource_type resource_type;
+
       /**
        * Descriptor set binding for sampler or UBO.
        */
-      unsigned descriptor_set : 5;
+      unsigned descriptor_set;
 
 #define NIR_VARIABLE_NO_INDEX ~0
 
@@ -1834,19 +1852,6 @@ nir_deref_instr_parent(const nir_deref_instr *instr)
       return nir_src_as_deref(instr->parent);
 }
 
-static inline nir_variable *
-nir_deref_instr_get_variable(const nir_deref_instr *instr)
-{
-   while (instr->deref_type != nir_deref_type_var) {
-      if (instr->deref_type == nir_deref_type_cast)
-         return NULL;
-
-      instr = nir_deref_instr_parent(instr);
-   }
-
-   return instr->var;
-}
-
 bool nir_deref_instr_has_indirect(nir_deref_instr *instr);
 bool nir_deref_instr_is_known_out_of_bounds(nir_deref_instr *instr);
 
@@ -1973,12 +1978,6 @@ typedef struct nir_intrinsic_instr {
 
    nir_src src[];
 } nir_intrinsic_instr;
-
-static inline nir_variable *
-nir_intrinsic_get_var(const nir_intrinsic_instr *intrin, unsigned i)
-{
-   return nir_deref_instr_get_variable(nir_src_as_deref(intrin->src[i]));
-}
 
 typedef enum {
    /* Memory ordering. */
@@ -2368,6 +2367,12 @@ typedef enum nir_tex_src_type {
     */
    nir_tex_src_sampler_handle,
 
+   /** Texture descriptor heap offset (in bytes) */
+   nir_tex_src_texture_heap_offset,
+
+   /** Sampler descriptor heap offset (in bytes) */
+   nir_tex_src_sampler_heap_offset,
+
    /** Tex src intrinsic
     *
     * This is an intrinsic used before function inlining i.e. before we know
@@ -2600,6 +2605,12 @@ typedef struct nir_tex_instr {
     * expression, or texture lookup will result in undefined values.").
     */
    bool sampler_non_uniform;
+
+   /** True if this texture instruction uses an embedded sampler.
+    *
+    * In this case, sampler_index is the index in embedded sampler table.
+    */
+   bool embedded_sampler;
 
    /** True if the offset is not dynamically uniform */
    bool offset_non_uniform;
@@ -3172,6 +3183,7 @@ typedef struct nir_binding {
    nir_variable *var;
    unsigned desc_set;
    unsigned binding;
+   unsigned resource_type;
    unsigned num_indices;
    nir_src indices[4];
    bool read_first_invocation;
@@ -4106,6 +4118,26 @@ nir_shader_get_function_for_name(const nir_shader *shader, const char *name)
    }
 
    return NULL;
+}
+
+static inline nir_variable *
+nir_deref_instr_get_variable(const nir_deref_instr *instr)
+{
+   while (instr->deref_type != nir_deref_type_var) {
+      if (instr->deref_type == nir_deref_type_cast &&
+          !nir_def_is_deref(instr->parent.ssa))
+         return NULL;
+
+      instr = nir_deref_instr_parent(instr);
+   }
+
+   return instr->var;
+}
+
+static inline nir_variable *
+nir_intrinsic_get_var(const nir_intrinsic_instr *intrin, unsigned i)
+{
+   return nir_deref_instr_get_variable(nir_src_as_deref(intrin->src[i]));
 }
 
 /*
@@ -6100,6 +6132,9 @@ typedef struct nir_lower_tex_options {
 
    /* Optimize txd(coord, ddxy_coarse(coord)) to tex(coord). */
    bool optimize_txd;
+
+   /* If true, lower tg4 shadow compare operations to 16bit. */
+   bool lower_tg4_shadow_to_16bit;
 
    /**
     * Payload data to be sent to callback / filter functions.

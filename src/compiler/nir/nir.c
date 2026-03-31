@@ -2572,6 +2572,10 @@ nir_intrinsic_from_system_value(gl_system_value val)
       return nir_intrinsic_load_warp_id_arm;
    case SYSTEM_VALUE_WARP_MAX_ID_ARM:
       return nir_intrinsic_load_warp_max_id_arm;
+   case SYSTEM_VALUE_SAMPLER_HEAP_PTR:
+      return nir_intrinsic_load_sampler_heap_ptr;
+   case SYSTEM_VALUE_RESOURCE_HEAP_PTR:
+      return nir_intrinsic_load_resource_heap_ptr;
    default:
       return nir_num_intrinsics;
    }
@@ -2758,6 +2762,10 @@ nir_system_value_from_intrinsic(nir_intrinsic_op intrin)
       return SYSTEM_VALUE_WARP_ID_ARM;
    case nir_intrinsic_load_warp_max_id_arm:
       return SYSTEM_VALUE_WARP_MAX_ID_ARM;
+   case nir_intrinsic_load_sampler_heap_ptr:
+      return SYSTEM_VALUE_SAMPLER_HEAP_PTR;
+   case nir_intrinsic_load_resource_heap_ptr:
+      return SYSTEM_VALUE_RESOURCE_HEAP_PTR;
    default:
       UNREACHABLE("intrinsic doesn't produce a system value");
    }
@@ -2953,6 +2961,7 @@ nir_chase_binding(nir_src rsrc)
             res.var = deref->var;
             res.desc_set = deref->var->data.descriptor_set;
             res.binding = deref->var->data.binding;
+            res.resource_type = deref->var->data.resource_type;
             return res;
          } else if (deref->deref_type == nir_deref_type_array && is_image) {
             if (res.num_indices == ARRAY_SIZE(res.indices))
@@ -3043,6 +3052,7 @@ nir_chase_binding(nir_src rsrc)
    res.success = true;
    res.desc_set = nir_intrinsic_desc_set(intrin);
    res.binding = nir_intrinsic_binding(intrin);
+   res.resource_type = nir_intrinsic_resource_type(intrin);
    res.num_indices = 1;
    res.indices[0] = intrin->src[0];
    return res;
@@ -3585,6 +3595,8 @@ nir_tex_instr_src_type(const nir_tex_instr *instr, unsigned src)
    case nir_tex_src_texture_2_handle:
    case nir_tex_src_sampler_2_handle:
    case nir_tex_src_block_size:
+   case nir_tex_src_texture_heap_offset:
+   case nir_tex_src_sampler_heap_offset:
       return nir_type_uint;
 
    case nir_num_tex_src_types:

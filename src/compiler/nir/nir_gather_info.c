@@ -920,7 +920,10 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
           instr->intrinsic == nir_intrinsic_bindless_image_size ||
           instr->intrinsic == nir_intrinsic_bindless_image_samples ||
           instr->intrinsic == nir_intrinsic_get_ubo_size ||
-          instr->intrinsic == nir_intrinsic_get_ssbo_size)
+          instr->intrinsic == nir_intrinsic_get_ssbo_size ||
+          instr->intrinsic == nir_intrinsic_image_heap_levels ||
+          instr->intrinsic == nir_intrinsic_image_heap_size ||
+          instr->intrinsic == nir_intrinsic_image_heap_samples)
          shader->info.uses_resource_info_query = true;
       break;
    }
@@ -940,6 +943,9 @@ gather_tex_info(nir_tex_instr *instr, nir_shader *shader)
    if (nir_tex_instr_src_index(instr, nir_tex_src_texture_handle) != -1 ||
        nir_tex_instr_src_index(instr, nir_tex_src_sampler_handle) != -1)
       shader->info.uses_bindless = true;
+
+   if (instr->embedded_sampler)
+      shader->info.uses_embedded_samplers = true;
 
    if (!nir_tex_instr_is_query(instr) &&
        (instr->sampler_dim == GLSL_SAMPLER_DIM_SUBPASS ||
@@ -1023,6 +1029,7 @@ nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint)
    shader->info.bit_sizes_float = 0;
    shader->info.bit_sizes_int = 0;
    shader->info.uses_bindless = false;
+   shader->info.uses_embedded_samplers = false;
 
    nir_foreach_variable_with_modes(var, shader, nir_var_image | nir_var_uniform) {
       if (var->data.bindless)
