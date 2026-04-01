@@ -250,7 +250,7 @@ if with_gallium_swrast
 endif
 
 with_gallium = gallium_drivers.length() != 0
-with_gallium_kmsro = system_has_kms_drm and [
+with_gallium_drm = system_has_kms_drm and [
   with_gallium_asahi,
   with_gallium_etnaviv,
   with_gallium_freedreno,
@@ -258,7 +258,6 @@ with_gallium_kmsro = system_has_kms_drm and [
   with_gallium_panfrost,
   with_gallium_v3d,
   with_gallium_vc4,
-  with_gallium_zink,
 ].contains(true)
 
 _vulkan_drivers = get_option('vulkan-drivers')
@@ -322,8 +321,8 @@ freedreno_kmds = get_option('freedreno-kmds')
 if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedreno_vk
   if freedreno_kmds.contains('msm')
       warning('Turnip with the DRM KMD will require libdrm to always be present at runtime which may not always be the case on platforms such as Android.')
-  elif with_gallium_kmsro
-      warning('As a side-effect, Turnip is forced to link with libdrm when built alongside Gallium DRM drivers which platforms such as Android may not have available at runtime.')
+  elif with_gallium_drm
+      warning('Turnip is forced to link with libdrm when built alongside Gallium DRM drivers which platforms such as Android may not have available at runtime.')
   elif _vulkan_drivers != [ 'freedreno' ]
       warning('Turnip is forced to link with libdrm when built alongside other Vulkan drivers which platforms such as Android may not have available at runtime.')
   else
@@ -332,6 +331,9 @@ if freedreno_kmds.length() != 0 and freedreno_kmds != [ 'msm' ] and with_freedre
     system_has_kms_drm = false
   endif
 endif
+
+# This has to be below the freedreno_kmds check since that can change system_has_kms_drm
+with_gallium_kmsro = with_gallium_drm or (system_has_kms_drm and with_gallium_zink)
 
 pre_args += ['-DMESA_SYSTEM_HAS_KMS_DRM=@0@'.format(system_has_kms_drm.to_int())]
 if host_machine.cpu_family() == 'x86' and with_glx_read_only_text
@@ -352,7 +354,7 @@ with_vdrm = [
 ].contains(true)
 
 with_dri = false
-if with_gallium and system_has_kms_drm
+if with_gallium and (system_has_kms_drm or (freedreno_kmds.contains('kgsl') and with_gallium_zink))
   _glx = get_option('glx')
   _egl = get_option('egl')
   if _glx == 'dri' or _egl.enabled() or (_glx == 'disabled' and _egl.allowed())
@@ -413,8 +415,8 @@ elif ['windows', 'cygwin'].contains(host_machine.system())
   with_dri_platform = 'windows'
 elif system_has_kms_drm
   with_dri_platform = 'drm'
-elif host_machine.system() == 'gnu'
-  with_dri_platform = 'hurd'
+elif host_machine.system() == 'gnu' or (freedreno_kmds.contains('kgsl') and with_gallium_zink)
+  with_dri_platform = 'pseudo-drm'
 else
   # FIXME: haiku doesn't use dri, and xlib doesn't use dri, probably should
   # assert here that one of those cases has been met.
@@ -538,7 +540,7 @@ with_gbm = get_option('gbm') \
   .allowed()
 
 with_xlib_lease = get_option('xlib-lease') \
-  .require(with_platform_x11 and (system_has_kms_drm or with_dri_platform == 'apple' or with_dri_platform == 'hurd'), error_message : 'xlib-lease requires X11 and KMS/DRM support') \
+  .require(with_platform_x11 and (system_has_kms_drm or with_dri_platform == 'apple' or with_dri_platform == 'pseudo-drm'), error_message : 'xlib-lease requires X11 and KMS/DRM support') \
   .allowed()
 
 with_egl = get_option('egl') \
@@ -657,7 +659,7 @@ if with_vulkan_icd_dir == ''
   with_vulkan_icd_dir = join_paths(get_option('datadir'), 'vulkan/icd.d')
 endif
 
-with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple' or  with_dri_platform == 'hurd')
+with_dri2 = (with_dri or with_any_vk) and (with_dri_platform == 'drm' or with_dri_platform == 'apple' or  with_dri_platform == 'pseudo-drm')
 
 if with_dri
   if with_glx == 'disabled' and not with_egl and not with_gbm
@@ -2226,7 +2228,7 @@ if with_platform_x11
       error('libdrm required for gallium video statetrackers when using x11')
     endif
   endif
-  if with_dri_platform == 'drm' or with_dri_platform == 'hurd'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     dep_xcb_dri3 = dependency('xcb-dri3', version : dep_xcb_dri3_version)
     dep_xcb_present = dependency('xcb-present', version : dep_xcb_present_version)
     if (dep_xcb_dri3.version().version_compare('>= 1.17') and
@@ -2242,7 +2244,7 @@ if with_platform_x11
     dep_glproto = dependency('glproto', version : dep_glproto_version)
   endif
   if with_glx == 'dri'
-    if with_dri_platform == 'drm' or with_dri_platform == 'hurd'
+    if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
       if with_glx_direct
         dep_xxf86vm = dependency('xxf86vm')
       endif
@@ -2352,7 +2354,7 @@ elif with_glx == 'dri'
   gl_priv_reqs += [
     'x11', 'xext', 'xfixes', 'x11-xcb', 'xcb',
     'xcb-glx >= 1.8.1']
-  if with_dri_platform == 'drm' or with_dri_platform == 'hurd'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     gl_priv_reqs += 'xcb-dri2 >= 1.8'
     if with_glx_direct
       gl_priv_reqs += 'xxf86vm'
@@ -2486,7 +2488,7 @@ if with_egl
   if with_dri
     egl_drivers += 'builtin:egl_dri2'
   endif
-  if with_dri_platform == 'drm' or with_dri_platform == 'hurd'
+  if with_dri_platform == 'drm' or with_dri_platform == 'pseudo-drm'
     egl_drivers += 'builtin:egl_dri3'
   endif
   if with_platform_windows

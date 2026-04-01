@@ -2512,10 +2512,10 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
       }
       break;
    }
-   case nir_op_fsin_amd:
-   case nir_op_fcos_amd: {
+   case nir_op_fsin_normalized_2_pi:
+   case nir_op_fcos_normalized_2_pi: {
       if (instr->def.bit_size == 16 || instr->def.bit_size == 32) {
-         bool is_sin = instr->op == nir_op_fsin_amd;
+         bool is_sin = instr->op == nir_op_fsin_normalized_2_pi;
          aco_opcode opcode, fract;
          RegClass rc;
          if (instr->def.bit_size == 16) {
@@ -3572,7 +3572,9 @@ visit_alu_instr(isel_context* ctx, nir_alu_instr* instr)
          Temp offset = get_alu_src(ctx, instr->src[1]);
          Temp bits = get_alu_src(ctx, instr->src[2]);
 
-         if (ctx->program->gfx_level >= GFX9) {
+         if (instr->op == nir_op_ubfe && const_bits && (const_bits->u32 & 0x1f) == 1) {
+            bld.sopc(aco_opcode::s_bitcmp1_b32, Definition(dst, scc), base, offset);
+         } else if (ctx->program->gfx_level >= GFX9) {
             Operand bits_op = const_bits ? Operand::c32(const_bits->u32 & 0x1f)
                                          : bld.sop2(aco_opcode::s_and_b32, bld.def(s1),
                                                     bld.def(s1, scc), bits, Operand::c32(0x1fu));

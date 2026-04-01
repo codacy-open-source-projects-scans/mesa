@@ -8,8 +8,8 @@ VK_EXT_blend_operation_advanced on lavapipe
 VK_KHR_get_surface_capabilities2 on panvk
 VK_KHR_get_display_properties2 on panvk
 VK_EXT_acquire_drm_display on panvk
-VK_KHR_present_id on panvk
-VK_KHR_present_wait on panvk
+VK_KHR_present_id on panvk, v3dv
+VK_KHR_present_wait on panvk, v3dv
 VK_KHR_pipeline_executable_properties on pvr
 VK_EXT_zero_initialize_device_memory on panvk
 GL_EXT_shader_image_load_store on panfrost
@@ -17,6 +17,7 @@ VK_KHR_swapchain_mutable_format on panvk
 VK_EXT_astc_decode_mode on panvk
 VK_KHR_copy_memory_indirect on nvk, RADV/GFX8+
 VK_EXT_color_write_enable on panvk
+VK_EXT_hdr_metadata on v3dv
 VK_EXT_image_view_min_lod on panvk
 VK_EXT_depth_clamp_control on panvk
 VK_VALVE_shader_mixed_float_dot_product on RADV (Vega20, Navi14, RDNA2+)
@@ -39,3 +40,5 @@ VK_{KHR,EXT}_{surface,swapchain}_maintenance1 on panvk
 VK_EXT_shader_atomic_float on panvk
 VK_KHR_device_address_commands on RADV
 VK_EXT_non_seamless_cube_map on pvr
+fragmentStoresAndAtomics on panvk/v6-7
+VK_KHR_shader_untyped_pointers on panvk
