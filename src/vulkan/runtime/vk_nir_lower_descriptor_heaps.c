@@ -430,10 +430,9 @@ vk_build_descriptor_heap_offset(nir_builder *b,
    }
 }
 
-nir_def *
+static nir_def *
 vk_build_descriptor_heap_address(nir_builder *b,
-                                 const VkDescriptorSetAndBindingMappingEXT *mapping,
-                                 uint32_t binding, nir_def *index)
+                                 const VkDescriptorSetAndBindingMappingEXT *mapping)
 {
    switch (mapping->source) {
    case VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT:
@@ -460,6 +459,14 @@ vk_build_descriptor_heap_address(nir_builder *b,
    }
 }
 
+static bool
+var_is_heap_ptr(nir_variable *var)
+{
+   return (var->data.mode == nir_var_uniform || var->data.mode == nir_var_image) &&
+          (var->data.location == SYSTEM_VALUE_SAMPLER_HEAP_PTR ||
+           var->data.location == SYSTEM_VALUE_RESOURCE_HEAP_PTR);
+}
+
 static nir_deref_instr *
 deref_get_root_cast(nir_deref_instr *deref)
 {
@@ -469,6 +476,9 @@ deref_get_root_cast(nir_deref_instr *deref)
 
       nir_deref_instr *parent = nir_src_as_deref(deref->parent);
       if (!parent)
+         break;
+
+      if (parent->deref_type == nir_deref_type_var && var_is_heap_ptr(parent->var))
          break;
 
       deref = parent;
@@ -483,8 +493,13 @@ deref_cast_is_heap_ptr(nir_deref_instr *deref)
 {
    assert(deref->deref_type == nir_deref_type_cast);
    nir_intrinsic_instr *intrin = nir_src_as_intrinsic(deref->parent);
-   if (intrin == NULL)
+   if (intrin == NULL) {
+      nir_deref_instr *parent_deref = nir_src_as_deref(deref->parent);
+      if (parent_deref != NULL && parent_deref->deref_type == nir_deref_type_var)
+         return var_is_heap_ptr(parent_deref->var);
+
       return false;
+   }
 
    switch (intrin->intrinsic) {
    case nir_intrinsic_load_deref: {
@@ -843,9 +858,8 @@ try_lower_heaps_deref_access(nir_builder *b, nir_intrinsic_instr *intrin,
    case VK_DESCRIPTOR_MAPPING_SOURCE_SHADER_RECORD_ADDRESS_EXT: {
       b->cursor = nir_before_instr(&desc_load->instr);
 
-      nir_def *index = build_buffer_resource_index(b, desc_load);
       nir_def *addr =
-         vk_build_descriptor_heap_address(b, mapping, binding, index);
+         vk_build_descriptor_heap_address(b, mapping);
 
       /* This moves the cursor */
       addr = build_buffer_addr_for_deref(b, addr, deref,
@@ -934,7 +948,7 @@ lower_heaps_load_descriptor(nir_builder *b, nir_intrinsic_instr *desc_load,
     * load the address and ask the driver to convert the address to a
     * descriptor.
     */
-   nir_def *addr = vk_build_descriptor_heap_address(b, mapping, binding, index);
+   nir_def *addr = vk_build_descriptor_heap_address(b, mapping);
    if (addr != NULL) {
       nir_def *desc =
          nir_global_addr_to_descriptor(b, desc_load->def.num_components,

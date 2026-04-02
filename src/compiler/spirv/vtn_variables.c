@@ -1791,19 +1791,16 @@ vtn_storage_class_to_mode(struct vtn_builder *b,
       } else if (b->shader->info.stage == MESA_SHADER_KERNEL) {
          mode = vtn_variable_mode_constant;
          nir_mode = nir_var_mem_constant;
+      } else if (interface_type &&
+                 interface_type->base_type == vtn_base_type_accel_struct) {
+         mode = vtn_variable_mode_accel_struct;
+         nir_mode = nir_var_uniform;
       } else {
-         /* interface_type is only NULL when OpTypeForwardPointer is used and
-          * OpTypeForwardPointer cannot be used with the UniformConstant
-          * storage class.
+         /* OpTypeUntypedPointerKHR with UniformConstant is allowed with
+          * descriptor heap.
           */
-         assert(interface_type != NULL);
-         if (interface_type->base_type == vtn_base_type_accel_struct) {
-            mode = vtn_variable_mode_accel_struct;
-            nir_mode = nir_var_uniform;
-         } else {
-            mode = vtn_variable_mode_uniform;
-            nir_mode = nir_var_uniform;
-         }
+         mode = vtn_variable_mode_uniform;
+         nir_mode = nir_var_uniform;
       }
       break;
    case SpvStorageClassPushConstant:
@@ -2769,7 +2766,13 @@ vtn_handle_variables(struct vtn_builder *b, SpvOp opcode,
       const bool untyped = opcode == SpvOpUntypedVariableKHR;
 
       struct vtn_type *ptr_type = vtn_get_type(b, w[1]);
-      struct vtn_type *data_type = untyped ? vtn_get_type(b, w[4]) : ptr_type->pointed;
+      struct vtn_type *data_type =
+         untyped && count > 4 ? vtn_get_type(b, w[4]) : ptr_type->pointed;
+      if (data_type == NULL) {
+         data_type = vtn_zalloc(b, struct vtn_type);
+         data_type->base_type = vtn_base_type_void;
+         data_type->type = glsl_void_type();
+      }
 
       SpvStorageClass storage_class = w[3];
 
