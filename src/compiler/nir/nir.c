@@ -2767,8 +2767,29 @@ nir_system_value_from_intrinsic(nir_intrinsic_op intrin)
    case nir_intrinsic_load_resource_heap_ptr:
       return SYSTEM_VALUE_RESOURCE_HEAP_PTR;
    default:
-      UNREACHABLE("intrinsic doesn't produce a system value");
+      return SYSTEM_VALUE_MAX;
    }
+}
+
+gl_system_value
+nir_system_value_from_instr(nir_instr *instr)
+{
+   if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      gl_system_value sysval = nir_system_value_from_intrinsic(intr->intrinsic);
+
+      if (sysval != SYSTEM_VALUE_MAX)
+         return sysval;
+
+      if (intr->intrinsic == nir_intrinsic_load_deref) {
+         nir_variable *var = nir_intrinsic_get_var(intr, 0);
+
+         if (var->data.mode == nir_var_system_value)
+            return var->data.location;
+      }
+   }
+
+   return SYSTEM_VALUE_MAX;
 }
 
 void

@@ -890,7 +890,7 @@ impl SrcMod {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SrcSwizzle {
     None,
     Xx,
@@ -976,6 +976,7 @@ impl Src {
         self
     }
 
+    #[allow(dead_code)]
     pub fn swizzle(mut self, src_swizzle: SrcSwizzle) -> Src {
         // Since we only have xx, yy, and xy, for any composition of swizzles,
         // the inner-most non-xy swizzle wins.
@@ -1012,7 +1013,10 @@ impl Src {
 
         Some(match src_type {
             SrcType::F16 => {
-                let low = u & 0xFFFF;
+                let low = match self.src_swizzle {
+                    SrcSwizzle::None | SrcSwizzle::Xx => u & 0xffff,
+                    SrcSwizzle::Yy => u >> 16,
+                };
 
                 match self.src_mod {
                     SrcMod::None => low,
@@ -3134,20 +3138,42 @@ impl fmt::Display for MuFuOp {
 }
 
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(DstsAsSlice)]
 pub struct OpMuFu {
     #[dst_type(F32)]
     pub dst: Dst,
 
     pub op: MuFuOp,
 
-    #[src_type(F32)]
     pub src: Src,
+
+    pub op_type: FloatType,
+}
+
+impl AsSlice<Src> for OpMuFu {
+    type Attr = SrcType;
+
+    fn as_slice(&self) -> &[Src] {
+        std::slice::from_ref(&self.src)
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [Src] {
+        std::slice::from_mut(&mut self.src)
+    }
+
+    fn attrs(&self) -> SrcTypeList {
+        let src_type = match self.op_type {
+            FloatType::F16 => SrcType::F16,
+            FloatType::F32 => SrcType::F32,
+            FloatType::F64 => unreachable!("MuFu does not support F64"),
+        };
+        SrcTypeList::Uniform(src_type)
+    }
 }
 
 impl DisplayOp for OpMuFu {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "mufu.{} {}", self.op, self.src)
+        write!(f, "mufu.{}{} {}", self.op, self.op_type, self.src)
     }
 }
 impl_display_for_op!(OpMuFu);
@@ -4635,30 +4661,10 @@ pub struct OpF2F {
     pub dst_type: FloatType,
     pub rnd_mode: FRndMode,
     pub ftz: bool,
-    /// For 16-bit down-conversions, place the result into the upper 16 bits of
-    /// the destination register
-    pub dst_high: bool,
     /// Round to the nearest integer rather than nearest float
     ///
     /// Not available on SM70+
     pub integer_rnd: bool,
-}
-
-impl OpF2F {
-    pub fn is_high(&self) -> bool {
-        if matches!(self.src_type, FloatType::F16) {
-            // OpF2F with the same source and destination types is only allowed
-            // pre-Volta and only with F32.
-            assert!(!matches!(self.dst_type, FloatType::F16));
-
-            matches!(self.src.src_swizzle, SrcSwizzle::Yy)
-        } else if matches!(self.dst_type, FloatType::F16) {
-            self.dst_high
-        } else {
-            assert!(!self.dst_high);
-            false
-        }
-    }
 }
 
 impl AsSlice<Src> for OpF2F {
@@ -4674,7 +4680,7 @@ impl AsSlice<Src> for OpF2F {
 
     fn attrs(&self) -> SrcTypeList {
         let src_type = match self.src_type {
-            FloatType::F16 => SrcType::F16v2,
+            FloatType::F16 => SrcType::F16,
             FloatType::F32 => SrcType::F32,
             FloatType::F64 => SrcType::F64,
         };
@@ -4711,9 +4717,6 @@ impl DisplayOp for OpF2F {
         }
         if self.integer_rnd {
             write!(f, ".int")?;
-        }
-        if self.dst_high {
-            write!(f, ".high")?;
         }
         write!(
             f,
