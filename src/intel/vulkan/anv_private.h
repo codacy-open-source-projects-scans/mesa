@@ -194,7 +194,7 @@ get_max_vbs(const struct intel_device_info *devinfo) {
 
 #define MAX_XFB_BUFFERS  4
 #define MAX_XFB_STREAMS  4
-#define MAX_SETS         8
+#define MAX_SETS        32
 #define MAX_RTS          8
 #define MAX_VIEWPORTS   16
 #define MAX_SCISSORS    16
@@ -1314,6 +1314,12 @@ struct anv_shader_group_rt_replay {
 struct anv_shader {
    struct vk_shader vk;
 
+   /**
+    * Code of the shader on the host
+    *
+    * This is before relocations are applied so that can always return the
+    * same blob of data for serialization.
+    */
    void *code;
 
    struct anv_shader_alloc kernel;
@@ -1848,6 +1854,7 @@ struct anv_instance {
      * Performance workarounds
      */
     bool                                        disable_lto;
+    enum brw_divergent_atomics_flags            enable_opt_divergent_atomics;
 
     /**
      * Ray tracing configuration.

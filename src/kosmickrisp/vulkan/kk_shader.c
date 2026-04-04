@@ -569,10 +569,10 @@ kk_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
       mtl_release(shader->pipeline.cs);
    } else if (shader->info.stage == MESA_SHADER_VERTEX) {
       mtl_release(shader->pipeline.gfx.handle);
-      if (shader->pipeline.gfx.mtl_depth_stencil_state_handle)
-         mtl_release(shader->pipeline.gfx.mtl_depth_stencil_state_handle);
+      if (shader->pipeline.gfx.ds_handle)
+         mtl_release(shader->pipeline.gfx.ds_handle);
       shader->pipeline.gfx.handle = NULL;
-      shader->pipeline.gfx.mtl_depth_stencil_state_handle = NULL;
+      shader->pipeline.gfx.ds_handle = NULL;
 
       ralloc_free((void *)shader->info.vs.frag_msl_code);
       ralloc_free((void *)shader->info.vs.frag_entrypoint_name);
@@ -751,7 +751,7 @@ kk_compile_nir_shader(struct kk_device *dev, nir_shader *nir,
 }
 
 static void
-nir_opts(nir_shader *nir)
+nir_opts(nir_shader *nir, void *data)
 {
    bool progress;
 
@@ -1061,8 +1061,7 @@ kk_compile_graphics_pipeline(struct kk_device *device, const char *vs,
          pipeline_descriptor, info->vs.s_format);
 
    if (info->vs.has_ds) {
-      pipeline->gfx.mtl_depth_stencil_state_handle =
-         kk_compile_ds_state(device, info);
+      pipeline->gfx.ds_handle = kk_compile_ds_state(device, info);
    }
 
    if (info->vs.view_mask) {
@@ -1134,12 +1133,12 @@ kk_compile_shaders(struct vk_device *device, uint32_t shader_count,
 
    uint32_t total_shaders = null_fs ? shader_count + 1 : shader_count;
    nir_opt_varyings_bulk(shaders, total_shaders, true, UINT32_MAX, UINT32_MAX,
-                         nir_opts);
+                         nir_opts, NULL);
    /* Second pass is required because some dEQP-VK.glsl.matrix.sub.dynamic.*
     * would fail otherwise due to vertex outputting vec4 while fragments reading
     * vec3 when in reality only vec3 is needed. */
    nir_opt_varyings_bulk(shaders, total_shaders, true, UINT32_MAX, UINT32_MAX,
-                         nir_opts);
+                         nir_opts, NULL);
 
    for (uint32_t i = 0; i < shader_count; i++) {
       result =
@@ -1324,12 +1323,10 @@ kk_deserialize_shader(struct vk_device *vk_dev, struct blob_reader *blob,
    return VK_SUCCESS;
 }
 
-static void
+void
 kk_cmd_bind_compute_shader(struct kk_cmd_buffer *cmd, struct kk_shader *shader)
 {
-   cmd->state.cs.pipeline_state = shader->pipeline.cs;
-   cmd->state.cs.dirty |= KK_DIRTY_PIPELINE;
-   cmd->state.cs.local_size = shader->info.cs.local_size;
+   cmd->state.shaders[MESA_SHADER_COMPUTE] = shader;
 }
 
 static void
@@ -1337,15 +1334,14 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
                             const mesa_shader_stage stage,
                             struct kk_shader *shader)
 {
+   cmd->state.shaders[stage] = shader;
+   cmd->state.dirty_shaders |= BITFIELD_BIT(stage);
+
    /* Relevant pipeline data is only stored in vertex shaders */
    if (stage != MESA_SHADER_VERTEX)
       return;
 
-   cmd->state.gfx.pipeline_state = shader->pipeline.gfx.handle;
-   cmd->state.gfx.vb.attribs_read = shader->info.vs.attribs_read;
-
-   bool requires_dynamic_depth_stencil =
-      shader->pipeline.gfx.mtl_depth_stencil_state_handle == NULL;
+   bool requires_dynamic_depth_stencil = shader->pipeline.gfx.ds_handle == NULL;
    if (cmd->state.gfx.is_depth_stencil_dynamic) {
       /* If we are switching from dynamic to static, we need to clean up
        * temporary state. Otherwise, leave the existing dynamic state
@@ -1353,14 +1349,11 @@ kk_cmd_bind_graphics_shader(struct kk_cmd_buffer *cmd,
        */
       if (!requires_dynamic_depth_stencil) {
          mtl_release(cmd->state.gfx.depth_stencil_state);
-         cmd->state.gfx.depth_stencil_state =
-            shader->pipeline.gfx.mtl_depth_stencil_state_handle;
+         cmd->state.gfx.depth_stencil_state = shader->pipeline.gfx.ds_handle;
       }
    } else
-      cmd->state.gfx.depth_stencil_state =
-         shader->pipeline.gfx.mtl_depth_stencil_state_handle;
+      cmd->state.gfx.depth_stencil_state = shader->pipeline.gfx.ds_handle;
    cmd->state.gfx.is_depth_stencil_dynamic = requires_dynamic_depth_stencil;
-   cmd->state.gfx.dirty |= KK_DIRTY_PIPELINE;
    cmd->state.gfx.dirty |= KK_DIRTY_VB;
 
    cmd->state.gfx.sample_count = shader->info.vs.sample_count;

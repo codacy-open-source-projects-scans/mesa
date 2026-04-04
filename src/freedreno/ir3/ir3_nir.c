@@ -454,8 +454,7 @@ ir3_nir_lower_io_vars_to_temporaries(nir_shader *s)
        s->info.stage == MESA_SHADER_FRAGMENT)
       lower_modes |= nir_var_shader_in;
 
-   if (s->info.stage != MESA_SHADER_TESS_CTRL &&
-       s->info.stage != MESA_SHADER_GEOMETRY)
+   if (s->info.stage != MESA_SHADER_TESS_CTRL)
       lower_modes |= nir_var_shader_out;
 
    if (lower_modes) {
@@ -957,6 +956,11 @@ ir3_nir_lower_io(nir_shader *s)
    NIR_PASS(_, s, nir_remove_dead_variables,
             nir_var_shader_in | nir_var_shader_out,
             &(nir_remove_dead_variables_options) {});
+
+   if (s->xfb_info) {
+      NIR_PASS(_, s, nir_opt_constant_folding);
+      NIR_PASS(_, s, nir_io_add_intrinsic_xfb_info);
+   }
 
    s->info.io_lowered = true;
 }
