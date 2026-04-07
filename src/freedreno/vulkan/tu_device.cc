@@ -1831,6 +1831,7 @@ static const driOptionDescription tu_dri_options[] = {
       DRI_CONF_TU_IGNORE_FRAG_DEPTH_DIRECTION(false)
       DRI_CONF_TU_ENABLE_SOFTFLOAT32(false)
       DRI_CONF_TU_EMULATE_ALPHA_TO_COVERAGE(false)
+      DRI_CONF_TU_AUTOTUNE_ALGORITHM()
    DRI_CONF_SECTION_END
 };
 
@@ -1863,6 +1864,8 @@ tu_init_dri_options(struct tu_instance *instance)
          driQueryOptionb(&instance->dri_options, "tu_enable_softfloat32");
    instance->emulate_alpha_to_coverage =
          driQueryOptionb(&instance->dri_options, "tu_emulate_alpha_to_coverage");
+   instance->autotune_algo =
+         driQueryOptionstr(&instance->dri_options, "tu_autotune_algorithm");
 }
 
 static uint32_t instance_count = 0;
@@ -2692,7 +2695,6 @@ tu_device_destroy_mutexes(struct tu_device *device)
 {
    mtx_destroy(&device->bo_mutex);
    mtx_destroy(&device->pipeline_mutex);
-   mtx_destroy(&device->autotune_mutex);
    mtx_destroy(&device->kgsl_profiling_mutex);
    mtx_destroy(&device->event_mutex);
    mtx_destroy(&device->trace_mutex);
@@ -2726,6 +2728,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    VkResult result;
    struct tu_device *device;
    bool border_color_without_format = false;
+   bool autotune_disable_preempt_optimize = false;
 
    vk_foreach_struct_const (ext, pCreateInfo->pNext) {
       switch (ext->sType) {
@@ -2808,7 +2811,6 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
    mtx_init(&device->bo_mutex, mtx_plain);
    mtx_init(&device->pipeline_mutex, mtx_plain);
-   mtx_init(&device->autotune_mutex, mtx_plain);
    mtx_init(&device->kgsl_profiling_mutex, mtx_plain);
    mtx_init(&device->event_mutex, mtx_plain);
    mtx_init(&device->trace_mutex, mtx_plain);
@@ -2854,6 +2856,13 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    for (unsigned i = 0; i < pCreateInfo->queueCreateInfoCount; i++) {
       const VkDeviceQueueCreateInfo *queue_create =
          &pCreateInfo->pQueueCreateInfos[i];
+      const VkDeviceQueueGlobalPriorityCreateInfoKHR *priority_info =
+         vk_find_struct_const(queue_create->pNext,
+               DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO_KHR);
+      const VkQueueGlobalPriorityKHR global_priority = priority_info ?
+         priority_info->globalPriority :
+         (TU_DEBUG(HIPRIO) ? VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR :
+          VK_QUEUE_GLOBAL_PRIORITY_MEDIUM_KHR);
       uint32_t qfi = queue_create->queueFamilyIndex;
       enum tu_queue_type type = physical_device->queue_families[qfi].type;
       device->queues[qfi] = (struct tu_queue *) vk_alloc(
@@ -2873,13 +2882,16 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       device->queue_count[qfi] = queue_create->queueCount;
 
       for (unsigned q = 0; q < queue_create->queueCount; q++) {
-         result = tu_queue_init(device, &device->queues[qfi][q], type, q,
-                                queue_create);
+         result = tu_queue_init(device, &device->queues[qfi][q], type,
+                                global_priority, q, queue_create);
          if (result != VK_SUCCESS) {
             device->queue_count[qfi] = q;
             goto fail_queues;
          }
       }
+
+      autotune_disable_preempt_optimize |=
+         (global_priority == VK_QUEUE_GLOBAL_PRIORITY_HIGH_KHR);
    }
 
    result = vk_meta_device_init(&device->vk, &device->meta);
@@ -2933,9 +2945,6 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
                                 TU_BO_ALLOC_ALLOW_DUMP |
                                 TU_BO_ALLOC_INTERNAL_RESOURCE),
       "pipeline_suballoc");
-   tu_bo_suballocator_init(&device->autotune_suballoc, device,
-                           128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
-                           "autotune_suballoc");
    if (is_kgsl(physical_device->instance)) {
       tu_bo_suballocator_init(&device->kgsl_profiling_suballoc, device,
                               128 * 1024, TU_BO_ALLOC_INTERNAL_RESOURCE,
@@ -2996,6 +3005,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    global->dbg_gmem_total_stores = 0;
    global->dbg_gmem_taken_stores = 0;
 
+   global->zero_64b = 0;
+
    /* initialize to ones so ffs can be used to find unused slots */
    BITSET_ONES(device->custom_border_color);
 
@@ -3047,6 +3058,13 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       }
    }
 
+   device->autotune = new tu_autotune(device, result);
+   if (result != VK_SUCCESS)
+      goto fail_autotune;
+
+   if (autotune_disable_preempt_optimize)
+      device->autotune->disable_preempt_optimize();
+
    result = tu_init_bin_preamble(device);
    if (result != VK_SUCCESS)
       goto fail_bin_preamble;
@@ -3082,11 +3100,6 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_timeline_cond;
    }
    pthread_condattr_destroy(&condattr);
-
-   result = tu_autotune_init(&device->autotune, device);
-   if (result != VK_SUCCESS) {
-      goto fail_timeline_cond;
-   }
 
    device->use_z24uint_s8uint =
       physical_device->info->props.has_z24uint_s8uint &&
@@ -3144,6 +3157,8 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
 
 fail_timeline_cond:
 fail_a725_workaround:
+fail_autotune:
+   delete device->autotune;
 fail_bin_preamble:
 fail_prepare_perfcntrs_pass_cs:
    free(device->perfcntrs_pass_cs_entries);
@@ -3244,10 +3259,9 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       free(device->dbg_renderpass_stomp_cs);
    }
 
-   tu_autotune_fini(&device->autotune, device);
+   delete device->autotune;
 
    tu_bo_suballocator_finish(&device->pipeline_suballoc);
-   tu_bo_suballocator_finish(&device->autotune_suballoc);
    tu_bo_suballocator_finish(&device->kgsl_profiling_suballoc);
    tu_bo_suballocator_finish(&device->event_suballoc);
    tu_bo_suballocator_finish(&device->vis_stream_suballocator);
@@ -4115,7 +4129,7 @@ tu_CreateFramebuffer(VkDevice _device,
       }
    }
 
-   tu_framebuffer_tiling_config(framebuffer, device, pass);
+   tu_framebuffer_init_tiling_config(framebuffer, device, pass);
 
    /* For MSRTSS, allocate extra images that are tied to the VkFramebuffer */
    if (msrtss_attachment_count > 0) {
@@ -4177,7 +4191,7 @@ tu_setup_dynamic_framebuffer(struct tu_cmd_buffer *cmd_buffer,
          view->image->max_tile_h_constraint_fdm;
    }
 
-   tu_framebuffer_tiling_config(framebuffer, cmd_buffer->device, pass);
+   tu_framebuffer_init_tiling_config(framebuffer, cmd_buffer->device, pass);
 }
 
 VkResult

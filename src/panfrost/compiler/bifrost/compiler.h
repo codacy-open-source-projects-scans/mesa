@@ -98,7 +98,10 @@ enum bi_swizzle {
    BI_SWIZZLE_B33 = BI_SWIZZLE_B3333,
 };
 
-static inline bool
+bool bi_op_supports_swizzle(enum bi_opcode op, unsigned src,
+                            enum bi_swizzle swizzle, unsigned arch);
+
+static inline void
 bi_swizzle_to_byte_channels(enum bi_swizzle swizzle, unsigned *channels)
 {
 #define B(b0, b1, b2, b3)                                                      \
@@ -107,7 +110,7 @@ bi_swizzle_to_byte_channels(enum bi_swizzle swizzle, unsigned *channels)
       channels[1] = b1;                                                        \
       channels[2] = b2;                                                        \
       channels[3] = b3;                                                        \
-      return true;                                                             \
+      return;                                                                  \
    }
    switch (swizzle) {
       B(0, 1, 0, 1);
@@ -133,10 +136,76 @@ bi_swizzle_to_byte_channels(enum bi_swizzle swizzle, unsigned *channels)
       B(0, 0, 3, 3);
       B(1, 1, 3, 3);
       B(1, 1, 2, 3);
+   }
+#undef B
+
+   UNREACHABLE("Invalid bi_swizzle");
+}
+
+static inline bool
+bi_swizzle_from_byte_channels(const unsigned byte_channels[4],
+                              enum bi_swizzle *out_swizzle)
+{
+   unsigned index = 0;
+   for (unsigned i = 0; i < 4; i++) {
+      assert(byte_channels[i] < 4);
+      index = (index << 2) | byte_channels[i];
+   }
+
+   switch (index) {
+#define B(b0, b1, b2, b3)                                                      \
+   case ((b0) << 6) | ((b1) << 4) | ((b2) << 2) | (b3):                        \
+      *out_swizzle = BI_SWIZZLE_B##b0##b1##b2##b3;                             \
+      return true;
+      B(0, 1, 0, 1);
+      B(0, 1, 2, 3);
+      B(2, 3, 0, 1);
+      B(2, 3, 2, 3);
+      B(0, 0, 0, 0);
+      B(1, 1, 1, 1);
+      B(2, 2, 2, 2);
+      B(3, 3, 3, 3);
+      B(0, 0, 1, 1);
+      B(2, 2, 3, 3);
+      B(1, 0, 3, 2);
+      B(3, 2, 1, 0);
+      B(0, 0, 2, 2);
+      B(1, 1, 0, 0);
+      B(2, 2, 0, 0);
+      B(3, 3, 0, 0);
+      B(2, 2, 1, 1);
+      B(3, 3, 1, 1);
+      B(1, 1, 2, 2);
+      B(3, 3, 2, 2);
+      B(0, 0, 3, 3);
+      B(1, 1, 3, 3);
+      B(1, 1, 2, 3);
+#undef B
    default:
       return false;
    }
-#undef B
+}
+
+static inline bool
+bi_try_compose_swizzles(enum bi_swizzle *ab_out,
+                        enum bi_swizzle a, enum bi_swizzle b)
+{
+   unsigned a_bytes[4], b_bytes[4];
+   bi_swizzle_to_byte_channels(a, a_bytes);
+   bi_swizzle_to_byte_channels(b, b_bytes);
+
+   unsigned ab_bytes[4];
+   for (unsigned i = 0; i < 4; i++) {
+      ab_bytes[i] = b_bytes[a_bytes[i]];
+   }
+
+   return bi_swizzle_from_byte_channels(ab_bytes, ab_out);
+}
+
+static inline enum bi_swizzle
+bi_swizzle_from_half(bool x, bool y)
+{
+   return (enum bi_swizzle)(BI_SWIZZLE_H00 | (x << 1) | y);
 }
 
 /* Given a packed i16vec2/i8vec4 constant, apply a swizzle. Useful for constant
@@ -335,8 +404,17 @@ bi_passthrough(enum bifrost_packed_src value)
 static inline bi_index
 bi_swz_16(bi_index idx, bool x, bool y)
 {
-   assert(idx.swizzle == BI_SWIZZLE_H01);
-   idx.swizzle = (enum bi_swizzle)(BI_SWIZZLE_H00 | (x << 1) | y);
+   bool halves[2];
+   switch (idx.swizzle) {
+   case BI_SWIZZLE_H00: halves[0] = 0; halves[1] = 0; break;
+   case BI_SWIZZLE_H01: halves[0] = 0; halves[1] = 1; break;
+   case BI_SWIZZLE_H10: halves[0] = 1; halves[1] = 0; break;
+   case BI_SWIZZLE_H11: halves[0] = 1; halves[1] = 1; break;
+   default: UNREACHABLE("Not a half swizzle");
+   }
+   assert(idx.swizzle == bi_swizzle_from_half(halves[0], halves[1]));
+
+   idx.swizzle = bi_swizzle_from_half(halves[x], halves[y]);
    return idx;
 }
 
@@ -346,22 +424,14 @@ bi_half(bi_index idx, bool upper)
    return bi_swz_16(idx, upper, upper);
 }
 
-static inline bool
-bi_valid_lane_for_byte_swizzle(enum bi_swizzle swizzle, unsigned lane)
-{
-   unsigned channels[4];
-   if (bi_swizzle_to_byte_channels(swizzle, channels)) {
-      return lane == channels[0] || lane == channels[1] ||
-             lane == channels[2] || lane == channels[3];
-   }
-   return false;
-}
-
 static inline bi_index
 bi_byte(bi_index idx, unsigned lane)
 {
-   assert(bi_valid_lane_for_byte_swizzle(idx.swizzle, lane));
-   idx.swizzle = (enum bi_swizzle)(BI_SWIZZLE_B0 + lane);
+   unsigned bytes[4];
+   bi_swizzle_to_byte_channels(idx.swizzle, bytes);
+
+   assert(lane < 4);
+   idx.swizzle = (enum bi_swizzle)(BI_SWIZZLE_B0 + bytes[lane]);
    return idx;
 }
 
@@ -504,7 +574,7 @@ bi_is_value_equiv(bi_index left, bi_index right)
    }
 }
 
-#define BI_MAX_VEC   8
+#define BI_MAX_VEC   16
 #define BI_MAX_DESTS 4
 #define BI_MAX_SRCS  8
 
@@ -1453,6 +1523,7 @@ void va_optimize(bi_context *ctx);
 void va_lower_split_64bit(bi_context *ctx);
 
 void bi_lower_opt_instructions(bi_context *ctx);
+void bi_lower_mkvec_swz(bi_context *ctx);
 
 void bi_iterator_schedule(bi_context *ctx);
 void bi_pressure_schedule(bi_context *ctx);

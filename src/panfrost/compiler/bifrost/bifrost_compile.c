@@ -758,80 +758,6 @@ bi_emit_load_var_buf(bi_builder *b, nir_intrinsic_instr *intr)
    bi_split_def(b, &intr->def);
 }
 
-static bi_index
-bi_make_vec8_helper(bi_builder *b, bi_index *src, unsigned *channel,
-                    unsigned count)
-{
-   assert(1 <= count && count <= 4);
-
-   bi_index bytes[4] = {bi_imm_u8(0), bi_imm_u8(0), bi_imm_u8(0), bi_imm_u8(0)};
-
-   for (unsigned i = 0; i < count; ++i) {
-      unsigned chan = channel ? channel[i] : 0;
-      unsigned lane = chan & 3;
-      bi_index raw_data = bi_extract(b, src[i], chan >> 2);
-
-      /* On Bifrost, MKVEC.v4i8 cannot select b1 or b3 */
-      if (b->shader->arch < 9 && lane != 0 && lane != 2) {
-         bytes[i] = bi_byte(bi_rshift_or(b, 32, raw_data, bi_zero(),
-                                         bi_imm_u8(lane * 8), false),
-                            0);
-      } else {
-         bytes[i] = bi_byte(raw_data, lane);
-      }
-
-      assert(b->shader->arch >= 9 || bytes[i].swizzle == BI_SWIZZLE_B0 ||
-             bytes[i].swizzle == BI_SWIZZLE_B2);
-   }
-
-   if (b->shader->arch >= 9) {
-      bi_index vec = bi_zero();
-
-      if (count >= 3) {
-         if ((count == 3 && bytes[2].swizzle == BI_SWIZZLE_B0) ||
-             (count == 4 && bi_is_word_equiv(bytes[2], bytes[3]) &&
-              bytes[2].swizzle == BI_SWIZZLE_B0 &&
-              bytes[3].swizzle == BI_SWIZZLE_B1)) {
-            vec = bytes[2];
-            vec.swizzle = BI_SWIZZLE_B0123;
-         } else {
-            vec = bi_mkvec_v2i8(b, bytes[2], bytes[3], vec);
-         }
-      }
-
-      return bi_mkvec_v2i8(b, bytes[0], bytes[1], vec);
-   } else {
-      return bi_mkvec_v4i8(b, bytes[0], bytes[1], bytes[2], bytes[3]);
-   }
-}
-
-static bi_index
-bi_make_vec16_helper(bi_builder *b, bi_index *src, unsigned *channel,
-                     unsigned count)
-{
-   unsigned chan0 = channel ? channel[0] : 0;
-   bi_index w0 = bi_extract(b, src[0], chan0 >> 1);
-   bi_index h0 = bi_half(w0, chan0 & 1);
-
-   /* Zero extend */
-   if (count == 1)
-      return bi_mkvec_v2i16(b, h0, bi_imm_u16(0));
-
-   /* Else, create a vector */
-   assert(count == 2);
-
-   unsigned chan1 = channel ? channel[1] : 0;
-   bi_index w1 = bi_extract(b, src[1], chan1 >> 1);
-   bi_index h1 = bi_half(w1, chan1 & 1);
-
-   if (bi_is_word_equiv(w0, w1) && (chan0 & 1) == 0 && ((chan1 & 1) == 1))
-      return bi_mov_i32(b, w0);
-   else if (bi_is_word_equiv(w0, w1))
-      return bi_swz_v2i16(b, bi_swz_16(w0, chan0 & 1, chan1 & 1));
-   else
-      return bi_mkvec_v2i16(b, h0, h1);
-}
-
 bi_instr *
 bi_make_vec_to(bi_builder *b, bi_index dst, bi_index *src, unsigned *channel,
                unsigned count, unsigned bitsize)
@@ -839,6 +765,7 @@ bi_make_vec_to(bi_builder *b, bi_index dst, bi_index *src, unsigned *channel,
    assert(DIV_ROUND_UP(count * bitsize, 32) <= BI_MAX_SRCS &&
           "unnecessarily large vector should have been lowered");
 
+   assert(count <= BI_MAX_VEC);
    bi_index srcs[BI_MAX_VEC];
 
    if (bitsize == 64) {
@@ -848,25 +775,43 @@ bi_make_vec_to(bi_builder *b, bi_index dst, bi_index *src, unsigned *channel,
          srcs[i * 2 + 1] = bi_extract(b, src[i], c * 2 + 1);
       }
       return bi_emit_collect_to(b, dst, srcs, count * 2);
+   } else if (bitsize == 32) {
+      for (unsigned i = 0; i < count; i++) {
+         const unsigned c = channel ? channel[i] : 0;
+         srcs[i] = bi_extract(b, src[i], c);
+      }
+      return bi_emit_collect_to(b, dst, srcs, count);
+   } else if (bitsize == 16) {
+      for (unsigned i = 0; i < count; i++) {
+         const unsigned c = channel ? channel[i] : 0;
+         srcs[i] = bi_half(bi_extract(b, src[i], c >> 1), c & 1);
+      }
+
+      for (unsigned i = count; i < align(count, 2); i++)
+         srcs[i] = bi_imm_u16(0);
+
+      for (unsigned i = 0; i < count; i += 2)
+         srcs[i / 2] =  bi_mkvec_v2i16(b, srcs[i], srcs[i + 1]);
+
+      return bi_emit_collect_to(b, dst, srcs, DIV_ROUND_UP(count, 2));
+   } else if (bitsize == 8) {
+      for (unsigned i = 0; i < count; i++) {
+         const unsigned c = channel ? channel[i] : 0;
+         srcs[i] = bi_byte(bi_extract(b, src[i], c >> 2), c & 3);
+      }
+
+      for (unsigned i = count; i < align(count, 4); i++)
+         srcs[i] = bi_imm_u8(0);
+
+      for (unsigned i = 0; i < count; i += 4) {
+         srcs[i / 4] =  bi_mkvec_v4i8(b, srcs[i], srcs[i + 1],
+                                      srcs[i + 2], srcs[i + 3]);
+      }
+
+      return bi_emit_collect_to(b, dst, srcs, DIV_ROUND_UP(count, 4));
+   } else {
+      UNREACHABLE("Unsupported bit size");
    }
-
-   assert(bitsize == 8 || bitsize == 16 || bitsize == 32);
-   unsigned shift = (bitsize == 32) ? 0 : (bitsize == 16) ? 1 : 2;
-   unsigned chan_per_word = 1 << shift;
-
-   for (unsigned i = 0; i < count; i += chan_per_word) {
-      unsigned rem = MIN2(count - i, chan_per_word);
-      unsigned *channel_offset = channel ? (channel + i) : NULL;
-
-      if (bitsize == 32)
-         srcs[i] = bi_extract(b, src[i], channel_offset ? *channel_offset : 0);
-      else if (bitsize == 16)
-         srcs[i >> 1] = bi_make_vec16_helper(b, src + i, channel_offset, rem);
-      else
-         srcs[i >> 2] = bi_make_vec8_helper(b, src + i, channel_offset, rem);
-   }
-
-   return bi_emit_collect_to(b, dst, srcs, DIV_ROUND_UP(count, chan_per_word));
 }
 
 static inline bi_instr *
@@ -2330,50 +2275,6 @@ bi_emit_load_const(bi_builder *b, nir_load_const_instr *instr)
    }
 }
 
-
-static bool
-bi_byte_swizzle_from_nir_swizzle(unsigned *channels, unsigned comps,
-                                 enum bi_swizzle *out_swizzle)
-{
-   assert(comps == 4 || comps == 2);
-   unsigned index = 0;
-   for (unsigned i = 0; i < 4; i++) {
-      index = (index << 2) + channels[i * comps / 4];
-   }
-   switch (index) {
-#define B(b0, b1, b2, b3)                                                      \
-   case ((b0) << 6) | ((b1) << 4) | ((b2) << 2) | (b3):                        \
-      *out_swizzle = BI_SWIZZLE_B##b0##b1##b2##b3;                             \
-      return true;
-      B(0, 1, 0, 1);
-      B(0, 1, 2, 3);
-      B(2, 3, 0, 1);
-      B(2, 3, 2, 3);
-      B(0, 0, 0, 0);
-      B(1, 1, 1, 1);
-      B(2, 2, 2, 2);
-      B(3, 3, 3, 3);
-      B(0, 0, 1, 1);
-      B(2, 2, 3, 3);
-      B(1, 0, 3, 2);
-      B(3, 2, 1, 0);
-      B(0, 0, 2, 2);
-      B(1, 1, 0, 0);
-      B(2, 2, 0, 0);
-      B(3, 3, 0, 0);
-      B(2, 2, 1, 1);
-      B(3, 3, 1, 1);
-      B(1, 1, 2, 2);
-      B(3, 3, 2, 2);
-      B(0, 0, 3, 3);
-      B(1, 1, 3, 3);
-      B(1, 1, 2, 3);
-#undef B
-   default:
-      return false;
-   }
-}
-
 static bi_index
 bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
 {
@@ -2406,32 +2307,49 @@ bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
    } else if (bitsize == 8 && comps == 1) {
       idx.swizzle = BI_SWIZZLE_B0000 + (src.swizzle[0] & 3);
    } else if (bitsize == 8) {
-      if (comps == 2 || comps == 4) {
-         unsigned c[4] = {0};
-         for (unsigned i = 0; i < comps; ++i)
+      bool has_swizzle = false;
+      enum bi_swizzle swizzle = BI_SWIZZLE_H01;
+      if (comps == 3) {
+         unsigned c[4];
+         for (unsigned i = 0; i < 3; ++i)
             c[i] = src.swizzle[i] & 3;
 
-         enum bi_swizzle swizzle;
-         if (bi_byte_swizzle_from_nir_swizzle(c, comps, &swizzle)) {
-            idx.swizzle = swizzle;
-            return idx;
+         /* Try to find a swizzle that starts with the given v3i8 swizzle */
+         for (unsigned i = 0; i < 4; i++) {
+            c[3] = i;
+            if (bi_swizzle_from_byte_channels(c, &swizzle)) {
+               has_swizzle = true;
+               break;
+            }
          }
+      } else {
+         /* For 1 and 2-component, repeat the swizzle to increase the chances
+          * that it's a valid bi_swizzle.
+          */
+         unsigned c[4];
+         for (unsigned i = 0; i < 4; ++i)
+            c[i] = src.swizzle[i % comps] & 3;
+         has_swizzle = bi_swizzle_from_byte_channels(c, &swizzle);
       }
 
-      /* XXX: Use optimized swizzle when posisble */
-      bi_index unoffset_srcs[NIR_MAX_VEC_COMPONENTS] = {bi_null()};
-      unsigned channels[NIR_MAX_VEC_COMPONENTS] = {0};
-
-      for (unsigned i = 0; i < comps; ++i) {
-         unoffset_srcs[i] = bi_src_index(&src.src);
-         channels[i] = src.swizzle[i];
+      if (has_swizzle) {
+         idx.swizzle = swizzle;
+         return idx;
       }
 
-      bi_index temp = bi_temp(b->shader);
-      bi_make_vec_to(b, temp, unoffset_srcs, channels, comps, bitsize);
+      bi_index v4_srcs[4];
+      for (unsigned i = 0; i < comps; i++) {
+         v4_srcs[i] = idx;
+         v4_srcs[i].swizzle = BI_SWIZZLE_B0 + src.swizzle[i];
+      }
+      for (unsigned i = comps; i < 4; i++)
+         v4_srcs[i] = bi_imm_u8(0);
+
+      bi_index temp = bi_mkvec_v4i8(b, v4_srcs[0], v4_srcs[1],
+                                    v4_srcs[2], v4_srcs[3]);
 
       static const enum bi_swizzle swizzle_lut[] = {
-         BI_SWIZZLE_B0000, BI_SWIZZLE_B0011, BI_SWIZZLE_B0123, BI_SWIZZLE_B0123
+         BI_SWIZZLE_B0000, BI_SWIZZLE_B0101, BI_SWIZZLE_B0123, BI_SWIZZLE_B0123
       };
       assert(comps - 1 < ARRAY_SIZE(swizzle_lut));
 
@@ -2441,6 +2359,17 @@ bi_alu_src_index(bi_builder *b, nir_alu_src src, unsigned comps)
       return temp;
    }
 
+   return idx;
+}
+
+static bi_index
+bi_swiz_b01(bi_index idx)
+{
+   enum bi_swizzle swizzle;
+   bool valid = bi_try_compose_swizzles(&swizzle, BI_SWIZZLE_B01, idx.swizzle);
+   assert(valid);
+
+   idx.swizzle = swizzle;
    return idx;
 }
 
@@ -2961,12 +2890,6 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
    bi_index s2 =
       srcs > 2 ? bi_alu_src_index(b, instr->src[2], comps) : bi_null();
 
-   bool need_post_swizzle = sz == 8 && comps == 2;
-   bi_index post_swizzle_dst = dst;
-   if (need_post_swizzle) {
-      dst = bi_temp(b->shader);
-   }
-
    switch (instr->op) {
    case nir_op_ffma:
       bi_fma_to(b, sz, dst, s0, s1, s2);
@@ -3244,7 +3167,7 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       if (src_sz == 16)
          bi_v2u16_to_v2f16_to(b, dst, s0);
       else if (src_sz == 8)
-         bi_v2u8_to_v2f16_to(b, dst, s0);
+         bi_v2u8_to_v2f16_to(b, dst, bi_swiz_b01(s0));
       break;
 
    case nir_op_u2f32:
@@ -3270,7 +3193,7 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       if (src_sz == 16)
          bi_v2s16_to_v2f16_to(b, dst, s0);
       else if (src_sz == 8)
-         bi_v2s8_to_v2f16_to(b, dst, s0);
+         bi_v2s8_to_v2f16_to(b, dst, bi_swiz_b01(s0));
       break;
 
    case nir_op_i2f32:
@@ -3312,7 +3235,7 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       assert(src_sz == 8 || src_sz == 32);
 
       if (src_sz == 8)
-         bi_v2s8_to_v2s16_to(b, dst, s0);
+         bi_v2s8_to_v2s16_to(b, dst, bi_swiz_b01(s0));
       else
          bi_mov_i32_to(b, dst, s0);
       break;
@@ -3321,7 +3244,7 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       assert(src_sz == 8 || src_sz == 32);
 
       if (src_sz == 8)
-         bi_v2u8_to_v2u16_to(b, dst, s0);
+         bi_v2u8_to_v2u16_to(b, dst, bi_swiz_b01(s0));
       else
          bi_mov_i32_to(b, dst, s0);
       break;
@@ -3535,12 +3458,6 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
    default:
       fprintf(stderr, "Unhandled ALU op %s\n", nir_op_infos[instr->op].name);
       UNREACHABLE("Unknown ALU op");
-   }
-
-   if (need_post_swizzle) {
-      bi_index srcs[2] = {dst, dst};
-      unsigned channels[2] = {0, 2};
-      bi_make_vec_to(b, post_swizzle_dst, srcs, channels, 2, 8);
    }
 }
 
@@ -3762,7 +3679,8 @@ bi_emit_valhall_offsets(bi_builder *b, nir_tex_instr *instr)
    /* Component 2: multisample index */
    if (ms_idx >= 0 && (!nir_src_is_const(instr->src[ms_idx].src) ||
                        nir_src_as_uint(instr->src[ms_idx].src) != 0)) {
-      dest = bi_mkvec_v2i16(b, dest, bi_src_index(&instr->src[ms_idx].src));
+      bi_index ms = bi_src_index(&instr->src[ms_idx].src);
+      dest = bi_mkvec_v2i16(b, bi_half(dest, false), bi_half(ms, false));
    }
 
    /* Component 3: 8-bit LOD */
@@ -5392,6 +5310,7 @@ bi_compile_variant_nir(nir_shader *nir,
    }
 
    bi_lower_opt_instructions(ctx);
+   bi_lower_mkvec_swz(ctx);
 
    if (ctx->arch >= 9) {
       va_lower_isel(ctx);
