@@ -259,6 +259,8 @@ nir_shader_add_variable(nir_shader *shader, nir_variable *var)
    case nir_var_mem_pixel_local_in:
    case nir_var_mem_pixel_local_out:
    case nir_var_mem_pixel_local_inout:
+   case nir_var_resource_heap:
+   case nir_var_sampler_heap:
       break;
 
    default:
@@ -2572,10 +2574,6 @@ nir_intrinsic_from_system_value(gl_system_value val)
       return nir_intrinsic_load_warp_id_arm;
    case SYSTEM_VALUE_WARP_MAX_ID_ARM:
       return nir_intrinsic_load_warp_max_id_arm;
-   case SYSTEM_VALUE_SAMPLER_HEAP_PTR:
-      return nir_intrinsic_load_sampler_heap_ptr;
-   case SYSTEM_VALUE_RESOURCE_HEAP_PTR:
-      return nir_intrinsic_load_resource_heap_ptr;
    default:
       return nir_num_intrinsics;
    }
@@ -2762,10 +2760,6 @@ nir_system_value_from_intrinsic(nir_intrinsic_op intrin)
       return SYSTEM_VALUE_WARP_ID_ARM;
    case nir_intrinsic_load_warp_max_id_arm:
       return SYSTEM_VALUE_WARP_MAX_ID_ARM;
-   case nir_intrinsic_load_sampler_heap_ptr:
-      return SYSTEM_VALUE_SAMPLER_HEAP_PTR;
-   case nir_intrinsic_load_resource_heap_ptr:
-      return SYSTEM_VALUE_RESOURCE_HEAP_PTR;
    default:
       return SYSTEM_VALUE_MAX;
    }

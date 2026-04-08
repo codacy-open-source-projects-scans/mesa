@@ -3860,16 +3860,16 @@ gfx103_emit_vrs_state(struct radv_cmd_buffer *cmd_buffer)
       radeon_begin(cs);
       if (pdev->info.gfx_level >= GFX12) {
          gfx12_begin_context_regs();
-         gfx12_opt_set_context_reg(R_0283D0_PA_SC_VRS_OVERRIDE_CNTL, AC_TRACKED_PA_SC_VRS_OVERRIDE_CNTL,
+         gfx12_opt_set_context_reg(R_0283D0_PA_SC_VRS_OVERRIDE_CNTL, AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL,
                                    pa_sc_vrs_override_cntl);
          gfx12_end_context_regs();
       } else if (pdev->info.has_set_context_pairs_packed) {
          gfx11_begin_packed_context_regs();
-         gfx11_opt_set_context_reg(R_0283D0_PA_SC_VRS_OVERRIDE_CNTL, AC_TRACKED_PA_SC_VRS_OVERRIDE_CNTL,
+         gfx11_opt_set_context_reg(R_0283D0_PA_SC_VRS_OVERRIDE_CNTL, AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL,
                                    pa_sc_vrs_override_cntl);
          gfx11_end_packed_context_regs();
       } else {
-         radeon_opt_set_context_reg(R_0283D0_PA_SC_VRS_OVERRIDE_CNTL, AC_TRACKED_PA_SC_VRS_OVERRIDE_CNTL,
+         radeon_opt_set_context_reg(R_0283D0_PA_SC_VRS_OVERRIDE_CNTL, AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL,
                                     pa_sc_vrs_override_cntl);
       }
       radeon_end();
@@ -3903,7 +3903,7 @@ gfx103_emit_vrs_state(struct radv_cmd_buffer *cmd_buffer)
       }
 
       radeon_begin(cs);
-      radeon_opt_set_context_reg(R_028064_DB_VRS_OVERRIDE_CNTL, AC_TRACKED_DB_VRS_OVERRIDE_CNTL,
+      radeon_opt_set_context_reg(R_028064_DB_VRS_OVERRIDE_CNTL, AC_TRACKED_DB_PA_SC_VRS_OVERRIDE_CNTL,
                                  S_028064_VRS_OVERRIDE_RATE_COMBINER_MODE(mode) | S_028064_VRS_OVERRIDE_RATE_X(rate_x) |
                                     S_028064_VRS_OVERRIDE_RATE_Y(rate_y));
       radeon_end();
@@ -4933,7 +4933,6 @@ radv_gfx12_emit_null_ds_state(struct radv_cmd_buffer *cmd_buffer)
    gfx12_set_context_reg(R_02801C_DB_STENCIL_INFO,
                          S_02801C_FORMAT(V_02801C_STENCIL_INVALID) | S_02801C_TILE_STENCIL_DISABLE(1));
    gfx12_set_context_reg(R_028B94_PA_SC_HIZ_INFO, S_028B94_SURFACE_ENABLE(0));
-   gfx12_set_context_reg(R_028B98_PA_SC_HIS_INFO, S_028B98_SURFACE_ENABLE(0));
    gfx12_set_context_reg(R_028010_DB_RENDER_OVERRIDE2, S_028010_CENTROID_COMPUTATION_MODE(1));
    gfx12_end_context_regs();
    radeon_end();
