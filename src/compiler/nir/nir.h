@@ -45,6 +45,7 @@
 #include "util/set.h"
 #include "util/simple_mtx.h"
 #include "util/sparse_bitset.h"
+#include "util/u_dynarray.h"
 #include "util/u_math.h"
 #include "nir_defines.h"
 #include "nir_shader_compiler_options.h"
@@ -3261,7 +3262,8 @@ typedef struct nir_block {
    nir_block *successors[2];
 
    /* Set of nir_block predecessors in the CFG */
-   struct set predecessors;
+   struct util_dynarray predecessors;
+   nir_block *_preds_storage[2];
 
    /*
     * this node's immediate dominator in the dominance tree - set to NULL for
@@ -3310,6 +3312,50 @@ typedef struct nir_block {
    struct u_sparse_bitset live_in;
    struct u_sparse_bitset live_out;
 } nir_block;
+
+static ALWAYS_INLINE nir_block **
+_nir_pred_iter_begin(const nir_block *block)
+{
+   return (nir_block **)util_dynarray_begin(&block->predecessors);
+}
+
+static ALWAYS_INLINE bool
+_nir_pred_iter_end(const nir_block *block, nir_block **iter, nir_block **pred)
+{
+   if (iter == (nir_block **)util_dynarray_end(&block->predecessors))
+      return false;
+   *pred = *iter;
+   return true;
+}
+
+#define nir_foreach_pred(pred, block)                                    \
+   for (nir_block * pred, **pred##_iter = _nir_pred_iter_begin((block)); \
+        _nir_pred_iter_end((block), pred##_iter, &pred);                 \
+        pred##_iter++)
+
+static inline size_t
+nir_block_num_preds(const nir_block *block)
+{
+   return util_dynarray_num_elements(&block->predecessors, nir_block *);
+}
+
+static inline bool
+nir_block_has_pred(const nir_block *block, const nir_block *pred)
+{
+   return pred->successors[0] == block || pred->successors[1] == block;
+}
+
+static inline void
+nir_block_add_pred(nir_block *block, nir_block *pred)
+{
+   util_dynarray_append(&block->predecessors, pred);
+}
+
+static inline void
+nir_block_remove_pred(nir_block *block, nir_block *pred)
+{
+   util_dynarray_delete_unordered(&block->predecessors, nir_block *, pred);
+}
 
 static inline bool
 nir_block_is_reachable(nir_block *b)
@@ -3862,6 +3908,8 @@ nir_loop_last_continue_block(nir_loop *loop)
    struct exec_node *tail = exec_list_get_tail(&loop->continue_list);
    return nir_cf_node_as_block(exec_node_data(nir_cf_node, tail, node));
 }
+
+bool nir_loop_has_back_edge(nir_loop *loop);
 
 /**
  * Return true if this list of cf_nodes contains a single empty block.

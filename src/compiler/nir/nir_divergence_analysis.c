@@ -764,7 +764,6 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_vulkan_descriptor:
    case nir_intrinsic_load_heap_descriptor:
    case nir_intrinsic_load_resource_heap_data:
-   case nir_intrinsic_global_addr_to_descriptor:
    case nir_intrinsic_load_input_attachment_target_pan:
    case nir_intrinsic_load_input_attachment_conv_pan:
    case nir_intrinsic_load_global_cvt_pan:
@@ -1512,7 +1511,7 @@ visit_loop(nir_loop *loop, struct divergence_state *state)
    /* setup loop state */
    struct divergence_state loop_state = *state;
    loop_state.loop = loop;
-   loop_state.loop_all_invariant = loop_header->predecessors.entries == 1;
+   loop_state.loop_all_invariant = nir_block_num_preds(loop_header) == 1;
    loop_state.divergent_cf = false;
    loop_state.divergent_loop_continue = false;
    loop_state.divergent_loop_break = false;

@@ -270,8 +270,10 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
 
    P_IMMD(p, NV9097, SET_CT_SELECT, { .target_count = 1 });
 
-//   P_MTHD(cmd->push, NVC0_3D, CSAA_ENABLE);
-//   P_INLINE_DATA(cmd->push, 0);
+   /* TODO: The proprietary driver set method 0x15b4 to 0
+    * and the golden ctx set it to 1 so we should probably unset it.
+    * On the Gallium driver, the unofficial name of this is CSAA_ENABLE.
+    */
 
    P_IMMD(p, NV9097, SET_ALIASED_LINE_WIDTH_ENABLE, V_TRUE);
 
@@ -293,12 +295,9 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
 
    P_IMMD(p, NV9097, SET_ZCULL_STATS, ENABLE_TRUE);
 
-   P_IMMD(p, NV9097, SET_L1_CONFIGURATION,
-                     DIRECTLY_ADDRESSABLE_MEMORY_SIZE_48KB);
-
    P_IMMD(p, NV9097, SET_REDUCE_COLOR_THRESHOLDS_ENABLE, V_FALSE);
    P_IMMD(p, NV9097, SET_REDUCE_COLOR_THRESHOLDS_UNORM8, {
-      .all_covered_all_hit_once = 0xff,
+      .all_covered_all_hit_once = 0x4,
    });
    P_MTHD(p, NV9097, SET_REDUCE_COLOR_THRESHOLDS_UNORM10);
    P_NV9097_SET_REDUCE_COLOR_THRESHOLDS_UNORM10(p, {
@@ -314,7 +313,7 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
       .all_covered_all_hit_once = 0xff,
    });
    P_NV9097_SET_REDUCE_COLOR_THRESHOLDS_SRGB8(p, {
-      .all_covered_all_hit_once = 0xff,
+      .all_covered_all_hit_once = 0x4,
    });
    P_IMMD(p, NV9097, SET_SHADER_CACHE_CONTROL, pdev->info.cls_eng3d >= ADA_A);
 
@@ -333,6 +332,10 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    if (pdev->info.cls_eng3d < MAXWELL_A)
       P_IMMD(p, NV9097, SET_SHADER_SCHEDULING, MODE_OLDEST_THREAD_FIRST);
 
+   P_IMMD(p, NV9097, SET_L2_CACHE_CONTROL_FOR_VAF_REQUESTS, {
+      .system_memory_volatile = false,
+      .policy                 = POLICY_EVICT_NORMAL,
+   });
    P_IMMD(p, NV9097, SET_L2_CACHE_CONTROL_FOR_ROP_PREFETCH_READ_REQUESTS,
                      POLICY_EVICT_NORMAL);
    P_IMMD(p, NV9097, SET_L2_CACHE_CONTROL_FOR_ROP_NONINTERLOCKED_READ_REQUESTS,
@@ -468,8 +471,6 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
                         BY_VIEWPORT_INDEX_FALSE);
    }
 
-   /* TODO: Vertex runout */
-
    P_IMMD(p, NV9097, SET_WINDOW_ORIGIN, {
       .mode    = MODE_UPPER_LEFT,
       .flip_y  = FLIP_Y_FALSE,
@@ -491,11 +492,6 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
    P_1INC(p, NV9097, CALL_MME_MACRO(NVK_MME_UPDATE_WINDOW_CLIP));
    P_INLINE_DATA(p, 1);
    P_IMMD(p, NV9097, SET_CLIP_ID_TEST, ENABLE_FALSE);
-
-//   P_IMMD(p, NV9097, X_X_X_SET_CLEAR_CONTROL, {
-//      .respect_stencil_mask   = RESPECT_STENCIL_MASK_FALSE,
-//      .use_clear_rect         = USE_CLEAR_RECT_FALSE,
-//   });
 
    P_IMMD(p, NV9097, SET_VIEWPORT_SCALE_OFFSET, ENABLE_TRUE);
 
@@ -564,14 +560,10 @@ nvk_push_draw_state_init(struct nvk_queue *queue, struct nv_push *p)
       }
    }
 
-//   P_MTHD(cmd->push, NVC0_3D, MACRO_GP_SELECT);
-//   P_INLINE_DATA(cmd->push, 0x40);
    P_IMMD(p, NV9097, SET_RT_LAYER, {
       .v = 0,
       .control = CONTROL_V_SELECTS_LAYER,
    });
-//   P_MTHD(cmd->push, NVC0_3D, MACRO_TEP_SELECT;
-//   P_INLINE_DATA(cmd->push, 0x30);
 
    P_IMMD(p, NV9097, SET_POINT_CENTER_MODE, V_OGL);
    P_IMMD(p, NV9097, SET_EDGE_FLAG, V_TRUE);

@@ -1227,7 +1227,7 @@ validate_phi_instr(nir_phi_instr *instr, validate_state *state)
 
    exec_list_validate(&instr->srcs);
    validate_assert(state, exec_list_length(&instr->srcs) ==
-                             state->block->predecessors.entries);
+                             nir_block_num_preds(state->block));
 }
 
 static void
@@ -1472,18 +1472,30 @@ validate_block_predecessors(nir_block *block, validate_state *state)
                                               block->successors[i]));
 
       /* And we have to be in our successor's predecessors set */
-      validate_assert(state,
-                      _mesa_set_search(&block->successors[i]->predecessors, block));
+      bool has_pred = false;
+      nir_foreach_pred(pred, block->successors[i])
+         has_pred |= pred == block;
+      validate_assert(state, has_pred);
 
       validate_phi_srcs(block, block->successors[i], state);
    }
 
    /* The start block cannot have any predecessors */
    if (block == nir_start_block(state->impl))
-      validate_assert(state, block->predecessors.entries == 0);
+      validate_assert(state, nir_block_num_preds(block) == 0);
 
-   set_foreach(&block->predecessors, entry) {
-      const nir_block *pred = entry->key;
+   /* Check for duplicate predecessors. */
+   nir_foreach_pred(pred, block) {
+      bool found = false;
+      nir_foreach_pred(pred2, block) {
+         if (pred == pred2) {
+            validate_assert(state, !found);
+            found = true;
+         }
+      }
+   }
+
+   nir_foreach_pred(pred, block) {
       validate_assert(state, _mesa_set_search(state->blocks, pred));
       validate_assert(state, pred->successors[0] == block ||
                                 pred->successors[1] == block);
@@ -1631,7 +1643,7 @@ validate_loop(nir_loop *loop, validate_state *state)
    validate_assert(state, next_node->type == nir_cf_node_block);
 
    validate_assert(state, !exec_list_is_empty(&loop->body));
-   validate_assert(state, nir_loop_first_block(loop)->predecessors.entries <= 2);
+   validate_assert(state, nir_block_num_preds(nir_loop_first_block(loop)) <= 2);
 
    nir_cf_node *old_parent = state->parent_node;
    state->parent_node = &loop->cf_node;
