@@ -9,12 +9,14 @@
 #include "compiler/glsl_types.h"
 #include "compiler/nir/nir_builder.h"
 #include "dev/intel_debug.h"
+#include "dev/intel_device_info.h"
 #include "util/sparse_bitset.h"
 #include "intel_nir.h"
 #include "nir.h"
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
 #include "nir_intrinsics_indices.h"
+#include "shader_enums.h"
 
 /*
  * Intel scratch swizzling can be described with the formula:
@@ -1721,6 +1723,9 @@ lower_bit_size_callback(const nir_instr *instr, void *data)
       switch (alu->op) {
       case nir_op_bitfield_reverse:
          return alu->def.bit_size != 32 ? 32 : 0;
+      case nir_op_umul_high:
+      case nir_op_imul_high:
+         return alu->def.bit_size < 32 ? 32 : 0;
       case nir_op_idiv:
       case nir_op_imod:
       case nir_op_irem:
@@ -1961,6 +1966,8 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
    };
    OPT(nir_lower_compute_system_values, &lower_csv_options);
 
+   bool jay = intel_use_jay(devinfo, nir->info.stage);
+
    const nir_lower_subgroups_options subgroups_options = {
       .subgroup_size = brw_nir_api_subgroup_size(nir, 0),
       .ballot_bit_size = 32,
@@ -1968,9 +1975,19 @@ brw_preprocess_nir(const struct brw_compiler *compiler, nir_shader *nir,
       .lower_to_scalar = true,
       .lower_relative_shuffle = true,
       .lower_quad_broadcast_dynamic = true,
-      .lower_elect = true,
-      .lower_inverse_ballot = true,
+      .lower_elect = !jay,
+      .lower_inverse_ballot = !jay,
       .lower_rotate_to_shuffle = true,
+      .lower_subgroup_masks = jay,
+      /* TODO: Optimize reduces. Or don't. I'm not your Mom. */
+      .lower_reduce = jay,
+      .lower_vote = jay,
+      .lower_vote_feq = jay,
+      .lower_vote_ieq = jay,
+      /* TODO: jay supports quad broadcast and should(?) do swaphorizontal */
+      .lower_quad = jay,
+      .lower_quad_vote = jay,
+      .lower_vote_bool_eq = jay,
    };
    OPT(nir_lower_subgroups, &subgroups_options);
 
@@ -2399,6 +2416,12 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
       if (bytes == 3)
          bytes = is_load ? 4 : 2;
 
+      /* Ensure we split into aligned pieces. We cannot blindly turn an i8vec4
+       * into i32 due to the alignment requirements. It might be possible to
+       * relax this later, though.
+       */
+      bytes = MIN2(bytes, align);
+
       if (is_scratch) {
          /* The way scratch address swizzling works in the back-end, it
           * happens at a DWORD granularity so we can't have a single load
@@ -2415,7 +2438,7 @@ get_mem_access_size_align(nir_intrinsic_op intrin, uint8_t bytes,
       return (nir_mem_access_size_align) {
          .bit_size = bytes * 8,
          .num_components = 1,
-         .align = 1,
+         .align = MIN2(align, 4),
          .shift = nir_mem_access_shift_method_scalar,
       };
    } else {
@@ -2505,6 +2528,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
       .modes = nir_var_mem_ubo | nir_var_mem_ssbo |
                nir_var_mem_global | nir_var_mem_shared |
                nir_var_mem_task_payload,
+      .round_up_components = lsc_urb_round_up_components,
       .callback = brw_nir_should_vectorize_mem,
       .robust_modes = (nir_variable_mode)0,
    };
@@ -2552,6 +2576,7 @@ brw_vectorize_lower_mem_access(brw_pass_tracker *pt)
 
    nir_lower_mem_access_bit_sizes_options mem_access_options = {
       .modes = nir_var_mem_ssbo |
+               nir_var_mem_ubo |
                nir_var_mem_constant |
                nir_var_mem_task_payload |
                nir_var_shader_temp |
@@ -2787,7 +2812,10 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
       OPT(nir_lower_tex, &tex_options);
 
    OPT(brw_nir_lower_mcs_fetch, devinfo);
-   OPT(intel_nir_lower_sparse_intrinsics);
+
+   bool jay = intel_use_jay(devinfo, nir->info.stage);
+
+   OPT(intel_nir_lower_sparse_intrinsics, jay);
 
    /* Any constants leftover should be folded so we have constant textures */
    OPT(nir_opt_constant_folding);
@@ -2930,7 +2958,8 @@ brw_postprocess_nir_opts(brw_pass_tracker *pt)
       .lower_subgroup_masks = true,
    };
 
-   if (OPT(nir_opt_uniform_atomics, false))
+   if (!intel_use_jay(devinfo, pt->nir->info.stage) &&
+       OPT(nir_opt_uniform_atomics, false))
       OPT(nir_lower_subgroups, &subgroups_options);
 
    if (pt->key->divergent_atomics_flags)
