@@ -40,6 +40,8 @@
 #include "vk_debug_report.h"
 #include "vk_format.h"
 #include "vk_nir.h"
+#include "vk_nir_lower_descriptor_heaps.h"
+#include "vk_sampler.h"
 #include "vk_nir_convert_ycbcr.h"
 #include "vk_semaphore.h"
 #include "vk_sync.h"
@@ -220,7 +222,15 @@ radv_optimize_nir(struct nir_shader *shader, bool optimize_conservatively)
       NIR_LOOP_PASS(progress, skip, shader, nir_opt_undef);
 
       if (shader->options->max_unroll_iterations) {
-         NIR_LOOP_PASS_NOT_IDEMPOTENT(progress, skip, shader, nir_opt_loop_unroll);
+         bool unroll_progess = false;
+         NIR_LOOP_PASS_NOT_IDEMPOTENT(unroll_progess, skip, shader, nir_opt_loop_unroll);
+         /* Loop unrolling can add trivial phis for constants defined in the loop,
+          * which can break all kinds of validation if they aren't removed immediately.
+          */
+         if (unroll_progess) {
+            progress = true;
+            NIR_LOOP_PASS(progress, skip, shader, nir_opt_remove_phis);
+         }
       }
    } while (progress && !optimize_conservatively);
    _mesa_set_destroy(skip, NULL);
@@ -438,21 +448,29 @@ ycbcr_conversion_lookup(const void *data, uint32_t set, uint32_t binding, uint32
 {
    const struct radv_shader_layout *layout = data;
 
-   const struct radv_descriptor_set_layout *set_layout = layout->set[set].layout;
-   const struct vk_ycbcr_conversion_state *ycbcr_samplers = radv_immutable_ycbcr_samplers(set_layout, binding);
+   if (set == VK_NIR_YCBCR_SET_IMMUTABLE_SAMPLERS) {
+      const struct vk_sampler_state_array *embedded_samplers = &layout->embedded_samplers;
+      assert(binding < embedded_samplers->sampler_count);
+      return &embedded_samplers->samplers[binding].ycbcr_conversion;
+   } else {
 
-   if (!ycbcr_samplers)
-      return NULL;
+      const struct radv_descriptor_set_layout *set_layout = layout->set[set].layout;
+      const struct vk_ycbcr_conversion_state *ycbcr_samplers = radv_immutable_ycbcr_samplers(set_layout, binding);
 
-   return ycbcr_samplers + array_index;
+      if (!ycbcr_samplers)
+         return NULL;
+
+      return ycbcr_samplers + array_index;
+   }
 }
 
 nir_shader *
-radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_stage *stage,
+radv_shader_spirv_to_nir(struct radv_device *device, struct radv_shader_stage *stage,
                          const struct radv_spirv_to_nir_options *options, bool is_internal)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_instance *instance = radv_physical_device_instance(pdev);
+   struct vk_sampler_state_array embedded_samplers;
    nir_shader *nir;
    bool progress;
 
@@ -512,6 +530,12 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
          .emit_debug_break = !!device->trap_handler_shader,
          .debug_info = !!(instance->debug_flags & RADV_DEBUG_NIR_DEBUG_INFO),
          .printf = !!device->debug_nir.printf.buffer_addr,
+         .sampler_descriptor_size = pdev->vk.properties.samplerDescriptorSize,
+         .sampler_descriptor_alignment = pdev->vk.properties.samplerDescriptorAlignment,
+         .image_descriptor_size = pdev->vk.properties.imageDescriptorSize,
+         .image_descriptor_alignment = pdev->vk.properties.imageDescriptorAlignment,
+         .buffer_descriptor_size = pdev->vk.properties.bufferDescriptorSize,
+         .buffer_descriptor_alignment = pdev->vk.properties.bufferDescriptorAlignment,
       };
       nir = spirv_to_nir(spirv, stage->spirv.size / 4, spec_entries, num_spec_entries, stage->stage, stage->entrypoint,
                          &spirv_options, &pdev->nir_options[stage->stage]);
@@ -774,6 +798,29 @@ radv_shader_spirv_to_nir(struct radv_device *device, const struct radv_shader_st
                          (nir->options->lower_flrp64 ? 64 : 0);
    if (lower_flrp != 0)
       NIR_PASS(progress, nir, nir_lower_flrp, lower_flrp, false /* always precise */);
+
+   if (stage->key.descriptor_heap) {
+      progress = false;
+      NIR_PASS(progress, nir, vk_nir_lower_descriptor_heaps, stage->layout.mapping, &embedded_samplers);
+      if (progress) {
+         NIR_PASS(_, nir, nir_remove_dead_variables, nir_var_uniform | nir_var_image, NULL);
+         NIR_PASS(_, nir, nir_opt_dce);
+
+         if (embedded_samplers.sampler_count > 0) {
+            /* Copy embedded samplers to the shader layout for easier uses. */
+            stage->layout.embedded_samplers.samplers =
+               malloc(embedded_samplers.sampler_count * sizeof(struct vk_sampler_state));
+            if (!stage->layout.embedded_samplers.samplers)
+               return NULL;
+
+            memcpy(stage->layout.embedded_samplers.samplers, embedded_samplers.samplers,
+                   embedded_samplers.sampler_count * sizeof(*embedded_samplers.samplers));
+            stage->layout.embedded_samplers.sampler_count = embedded_samplers.sampler_count;
+
+            vk_sampler_state_array_finish(&embedded_samplers);
+         }
+      }
+   }
 
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const, nir_address_format_32bit_offset);
 
@@ -2915,7 +2962,8 @@ radv_parse_binary_debug_info(struct radv_device *device, const struct radv_shade
 
 VkResult
 radv_shader_create_uncached(struct radv_device *device, const struct radv_shader_binary *binary, bool replayable,
-                            struct radv_serialized_shader_arena_block *replay_block, struct radv_shader **out_shader)
+                            struct radv_serialized_shader_arena_block *replay_block, struct radv_shader_debug_info *dbg,
+                            struct radv_shader **out_shader)
 {
    VkResult result = VK_SUCCESS;
    struct radv_shader *shader = calloc(1, sizeof(struct radv_shader));
@@ -2932,6 +2980,9 @@ radv_shader_create_uncached(struct radv_device *device, const struct radv_shader
    shader->info = binary->info;
    shader->config = binary->config;
    shader->max_waves = radv_get_max_waves(device, &shader->config, &shader->info);
+
+   if (dbg)
+      shader->dbg = *dbg;
 
    if (binary->type == RADV_BINARY_TYPE_RTLD) {
 #if !defined(USE_LIBELF)
@@ -2956,11 +3007,6 @@ radv_shader_create_uncached(struct radv_device *device, const struct radv_shader
          shader->dbg.statistics = calloc(bin->stats_size, 1);
          memcpy(shader->dbg.statistics, layout.stats, bin->stats_size);
       }
-   }
-
-   if (radv_device_physical(device)->info.family_overridden) {
-      *out_shader = shader;
-      return VK_SUCCESS;
    }
 
    if (replay_block) {
@@ -3067,9 +3113,6 @@ radv_shader_part_create(struct radv_device *device, struct radv_shader_part_bina
    shader_part->spi_shader_col_format = binary->info.spi_shader_col_format;
    shader_part->cb_shader_mask = binary->info.cb_shader_mask;
    shader_part->spi_shader_z_format = binary->info.spi_shader_z_format;
-
-   if (radv_device_physical(device)->info.family_overridden)
-      return shader_part;
 
    /* Allocate memory and upload. */
    shader_part->alloc = radv_alloc_shader_memory(device, shader_part->code_size, false, NULL);
@@ -3411,7 +3454,8 @@ radv_create_trap_handler_shader(struct radv_device *device)
    info.type = RADV_SHADER_TYPE_TRAP_HANDLER;
 
    struct radv_shader_args args;
-   radv_declare_shader_args(device, NULL, &info, stage, MESA_SHADER_NONE, &args);
+   struct radv_shader_debug_info debug = {};
+   radv_declare_shader_args(device, NULL, &info, stage, MESA_SHADER_NONE, &args, &debug);
 
 #if AMD_LLVM_AVAILABLE
    if (options.dump_shader || options.record_ir)
@@ -3431,7 +3475,7 @@ radv_create_trap_handler_shader(struct radv_device *device)
    radv_postprocess_binary_config(device, binary, &args);
 
    struct radv_shader *shader;
-   radv_shader_create_uncached(device, binary, false, NULL, &shader);
+   radv_shader_create_uncached(device, binary, false, NULL, &debug, &shader);
    radv_parse_binary_debug_info(device, binary, &shader->dbg);
 
    if (options.dump_shader) {
@@ -3470,7 +3514,8 @@ radv_aco_build_shader_part(void **bin, uint32_t num_sgprs, uint32_t num_vgprs, c
 }
 
 struct radv_shader *
-radv_compile_rt_prolog(struct radv_device *device, struct radv_shader_stage *stage)
+radv_compile_rt_prolog(struct radv_device *device, struct radv_shader_stage *stage,
+                       struct radv_shader_debug_info *debug)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -3504,7 +3549,7 @@ radv_compile_rt_prolog(struct radv_device *device, struct radv_shader_stage *sta
    binary->info = stage->info;
 
    radv_postprocess_binary_config(device, binary, &stage->args);
-   radv_shader_create_uncached(device, binary, false, NULL, &prolog);
+   radv_shader_create_uncached(device, binary, false, NULL, debug, &prolog);
    if (!prolog || radv_parse_binary_debug_info(device, binary, &prolog->dbg) != VK_SUCCESS)
       goto done;
 
@@ -3545,7 +3590,7 @@ radv_create_vs_prolog(struct radv_device *device, const struct radv_vs_prolog_ke
    struct radv_graphics_state_key gfx_state = {0};
 
    radv_declare_shader_args(device, &gfx_state, &info, key->next_stage,
-                            key->next_stage != MESA_SHADER_VERTEX ? MESA_SHADER_VERTEX : MESA_SHADER_NONE, &args);
+                            key->next_stage != MESA_SHADER_VERTEX ? MESA_SHADER_VERTEX : MESA_SHADER_NONE, &args, NULL);
 
    info.user_sgprs_locs = args.user_sgprs_locs;
    info.inline_push_constant_mask = args.ac.inline_push_const_mask;
