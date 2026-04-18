@@ -1211,85 +1211,6 @@ static const mesa_shader_stage graphics_shader_order[] = {
    MESA_SHADER_FRAGMENT,
 };
 
-static void
-radv_link_vs(struct radv_shader_stage *vs_stage, struct radv_shader_stage *next_stage,
-             const struct radv_graphics_state_key *gfx_state)
-{
-   assert(vs_stage->nir->info.stage == MESA_SHADER_VERTEX);
-
-   if (radv_should_export_multiview(vs_stage, gfx_state)) {
-      NIR_PASS(_, vs_stage->nir, radv_nir_export_multiview);
-   }
-}
-
-static void
-radv_link_tcs(struct radv_shader_stage *tcs_stage, struct radv_shader_stage *tes_stage,
-              const struct radv_graphics_state_key *gfx_state)
-{
-   if (!tes_stage)
-      return;
-
-   assert(tcs_stage->nir->info.stage == MESA_SHADER_TESS_CTRL);
-   assert(tes_stage->nir->info.stage == MESA_SHADER_TESS_EVAL);
-
-   /* Copy TCS info into the TES info */
-   merge_tess_info(&tes_stage->nir->info, &tcs_stage->nir->info);
-}
-
-static void
-radv_link_tes(struct radv_shader_stage *tes_stage, struct radv_shader_stage *next_stage,
-              const struct radv_graphics_state_key *gfx_state)
-{
-   assert(tes_stage->nir->info.stage == MESA_SHADER_TESS_EVAL);
-
-   if (radv_should_export_multiview(tes_stage, gfx_state)) {
-      NIR_PASS(_, tes_stage->nir, radv_nir_export_multiview);
-   }
-}
-
-static void
-radv_link_gs(struct radv_shader_stage *gs_stage, struct radv_shader_stage *fs_stage,
-             const struct radv_graphics_state_key *gfx_state)
-{
-   assert(gs_stage->nir->info.stage == MESA_SHADER_GEOMETRY);
-
-   if (radv_should_export_multiview(gs_stage, gfx_state)) {
-      NIR_PASS(_, gs_stage->nir, radv_nir_export_multiview);
-   }
-}
-
-static void
-radv_link_mesh(struct radv_shader_stage *mesh_stage, struct radv_shader_stage *fs_stage,
-               const struct radv_graphics_state_key *gfx_state)
-{
-   assert(mesh_stage->nir->info.stage == MESA_SHADER_MESH);
-
-   if (fs_stage) {
-      assert(fs_stage->nir->info.stage == MESA_SHADER_FRAGMENT);
-
-      nir_foreach_shader_in_variable (var, fs_stage->nir) {
-         /* These variables are per-primitive when used with a mesh shader. */
-         if (var->data.location == VARYING_SLOT_PRIMITIVE_ID || var->data.location == VARYING_SLOT_VIEWPORT ||
-             var->data.location == VARYING_SLOT_LAYER) {
-            var->data.per_primitive = true;
-         }
-      }
-   }
-
-   /* Lower mesh shader draw ID to zero prevent app bugs from triggering undefined behaviour. */
-   if (mesh_stage->info.ms.has_task && BITSET_TEST(mesh_stage->nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID))
-      radv_nir_lower_draw_id_to_zero(mesh_stage->nir);
-}
-
-static void
-radv_link_fs(struct radv_shader_stage *fs_stage, const struct radv_graphics_state_key *gfx_state)
-{
-   assert(fs_stage->nir->info.stage == MESA_SHADER_FRAGMENT);
-
-   /* Lower the view index to map on the layer. */
-   NIR_PASS(_, fs_stage->nir, radv_nir_lower_view_index);
-}
-
 static bool
 radv_pipeline_needs_noop_fs(struct radv_graphics_pipeline *pipeline, const struct radv_graphics_state_key *gfx_state)
 {
@@ -1303,46 +1224,6 @@ radv_pipeline_needs_noop_fs(struct radv_graphics_pipeline *pipeline, const struc
       return true;
 
    return false;
-}
-
-static void
-radv_graphics_shaders_link(const struct radv_device *device, const struct radv_graphics_state_key *gfx_state,
-                           struct radv_shader_stage *stages)
-{
-   /* Walk backwards to link */
-   struct radv_shader_stage *next_stage = NULL;
-   for (int i = ARRAY_SIZE(graphics_shader_order) - 1; i >= 0; i--) {
-      mesa_shader_stage s = graphics_shader_order[i];
-      if (!stages[s].nir)
-         continue;
-
-      switch (s) {
-      case MESA_SHADER_VERTEX:
-         radv_link_vs(&stages[s], next_stage, gfx_state);
-         break;
-      case MESA_SHADER_TESS_CTRL:
-         radv_link_tcs(&stages[s], next_stage, gfx_state);
-         break;
-      case MESA_SHADER_TESS_EVAL:
-         radv_link_tes(&stages[s], next_stage, gfx_state);
-         break;
-      case MESA_SHADER_GEOMETRY:
-         radv_link_gs(&stages[s], next_stage, gfx_state);
-         break;
-      case MESA_SHADER_TASK:
-         break;
-      case MESA_SHADER_MESH:
-         radv_link_mesh(&stages[s], next_stage, gfx_state);
-         break;
-      case MESA_SHADER_FRAGMENT:
-         radv_link_fs(&stages[s], gfx_state);
-         break;
-      default:
-         UNREACHABLE("Invalid graphics shader stage");
-      }
-
-      next_stage = &stages[s];
-   }
 }
 
 static void
@@ -1586,7 +1467,6 @@ struct radv_ps_epilog_key
 radv_generate_ps_epilog_key(const struct radv_device *device, const struct radv_ps_epilog_state *state)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const struct radv_instance *instance = radv_physical_device_instance(pdev);
    unsigned col_format = 0, is_int8 = 0, is_int10 = 0, is_float32 = 0, z_format = 0, no_signed_zero = 0;
    struct radv_ps_epilog_key key;
 
@@ -1652,7 +1532,7 @@ radv_generate_ps_epilog_key(const struct radv_device *device, const struct radv_
    key.spi_shader_col_format = col_format;
    key.color_is_int8 = pdev->info.compiler_info.has_cb_lt16bit_int_clamp_bug ? is_int8 : 0;
    key.color_is_int10 = pdev->info.compiler_info.has_cb_lt16bit_int_clamp_bug ? is_int10 : 0;
-   key.enable_mrt_output_nan_fixup = instance->drirc.debug.enable_mrt_output_nan_fixup ? is_float32 : 0;
+   key.enable_mrt_output_nan_fixup = pdev->cache_key.enable_mrt_output_nan_fixup ? is_float32 : 0;
    key.no_signed_zero = no_signed_zero;
    key.colors_written = state->colors_written;
    key.mrt0_is_dual_src = state->mrt0_is_dual_src && key.colors_needed & 0xf;
@@ -2617,7 +2497,10 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
       NIR_PASS(_, stages[MESA_SHADER_GEOMETRY].nir, nir_lower_vars_to_ssa);
    }
 
-   radv_graphics_shaders_link(device, gfx_state, stages);
+   if (stages[MESA_SHADER_TESS_CTRL].nir && stages[MESA_SHADER_TESS_EVAL].nir) {
+      /* Copy TCS info into the TES info */
+      merge_tess_info(&stages[MESA_SHADER_TESS_EVAL].nir->info, &stages[MESA_SHADER_TESS_CTRL].nir->info);
+   }
 
    if (stages[MESA_SHADER_FRAGMENT].nir) {
       unsigned vgt_outprim_type = radv_get_vgt_outprim_type(stages, gfx_state);
@@ -2644,7 +2527,20 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
    radv_foreach_stage (i, active_nir_stages) {
       int64_t stage_start = os_time_get_nano();
 
-      radv_nir_lower_io(device, stages[i].nir);
+      if (i == MESA_SHADER_FRAGMENT && stages[MESA_SHADER_MESH].nir) {
+         nir_foreach_shader_in_variable (var, stages[i].nir) {
+            /* These variables are implicitly per-primitive when used with mesh->fragment stages
+             * and this can't be determined with only the FS.
+             * nir_opt_varyings relies on inputs and outputs agreeing on per-primitive.
+             */
+            if (var->data.location == VARYING_SLOT_PRIMITIVE_ID || var->data.location == VARYING_SLOT_VIEWPORT ||
+                var->data.location == VARYING_SLOT_LAYER) {
+               var->data.per_primitive = true;
+            }
+         }
+      }
+
+      radv_nir_lower_io(stages[i].nir);
 
       if (!stages[i].key.optimisations_disabled) {
          /* Scalarize all I/O, because nir_opt_varyings and nir_opt_vectorize_io expect all I/O to be scalarized. */
@@ -2678,11 +2574,22 @@ radv_graphics_shaders_compile(struct radv_device *device, struct vk_pipeline_cac
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_copy_prop);
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_dce);
       NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, nir_opt_frag_coord_to_pixel_coord);
+
+      /* Lower the view index to map on the layer. */
+      NIR_PASS(_, stages[MESA_SHADER_FRAGMENT].nir, radv_nir_lower_view_index);
    }
 
    radv_foreach_stage (i, active_nir_stages) {
       if (!radv_is_last_vgt_stage(&stages[i]))
          continue;
+
+      /* Lower mesh shader draw ID to zero prevent app bugs from triggering undefined behaviour. */
+      if (i == MESA_SHADER_MESH && stages[i].info.ms.has_task &&
+          BITSET_TEST(stages[i].nir->info.system_values_read, SYSTEM_VALUE_DRAW_ID))
+         radv_nir_lower_draw_id_to_zero(stages[i].nir);
+
+      if (i != MESA_SHADER_MESH && radv_should_export_multiview(&stages[i], gfx_state))
+         NIR_PASS(_, stages[i].nir, radv_nir_export_multiview);
 
       uint64_t remove_as_varying = 0;
       uint64_t remove_as_sysval = 0;

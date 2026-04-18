@@ -288,6 +288,7 @@ radv_physical_device_init_cache_key(struct radv_physical_device *pdev)
    key->disable_shrink_image_store = instance->drirc.debug.disable_shrink_image_store;
    key->disable_sinking_load_input_fs = instance->drirc.debug.disable_sinking_load_input_fs;
    key->disable_trunc_coord = instance->drirc.debug.disable_trunc_coord;
+   key->enable_mrt_output_nan_fixup = instance->drirc.debug.enable_mrt_output_nan_fixup;
    key->emulate_rt = radv_emulate_rt(pdev);
    key->bvh8 = radv_use_bvh8(pdev);
    key->ge_wave32 = pdev->ge_wave_size == 32;
@@ -832,7 +833,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_shader_atomic_float = true,
       .EXT_shader_atomic_float2 = true,
       .EXT_shader_demote_to_helper_invocation = true,
-      .EXT_shader_float8 = pdev->info.gfx_level >= GFX12 && !pdev->use_llvm,
+      .EXT_shader_float8 = pdev->info.gfx_level >= GFX11_7 && !pdev->use_llvm,
       .EXT_shader_image_atomic_int64 = true,
       .EXT_shader_module_identifier = true,
       .EXT_shader_object = !pdev->use_llvm && !(instance->debug_flags & RADV_DEBUG_NO_ESO),
@@ -897,8 +898,8 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
    bool taskmesh_en = radv_taskmesh_enabled(pdev);
    bool has_perf_query = radv_perf_query_supported(pdev);
-   bool has_shader_image_float_minmax = pdev->info.gfx_level != GFX8 && pdev->info.gfx_level != GFX9 &&
-                                        pdev->info.gfx_level != GFX11 && pdev->info.gfx_level != GFX11_5;
+   bool has_shader_image_float_minmax = pdev->info.gfx_level <= GFX7 || pdev->info.gfx_level == GFX10 ||
+                                        pdev->info.gfx_level == GFX10_3 || pdev->info.gfx_level >= GFX12;
    bool has_fragment_shader_interlock = radv_has_pops(pdev);
    const bool enable_sparse = radv_sparse_enabled(pdev);
 
@@ -1526,7 +1527,7 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .shaderMixedFloatDotProductFloat16AccFloat32 = true,
       .shaderMixedFloatDotProductFloat16AccFloat16 = pdev->info.gfx_level >= GFX11,
       .shaderMixedFloatDotProductBFloat16Acc = radv_bfloat16_enabled(pdev),
-      .shaderMixedFloatDotProductFloat8AccFloat32 = pdev->info.gfx_level >= GFX12,
+      .shaderMixedFloatDotProductFloat8AccFloat32 = pdev->info.gfx_level >= GFX11_7,
 
       /* VK_KHR_copy_memory_indirect */
       .indirectMemoryCopy = pdev->info.gfx_level >= GFX8,
@@ -3336,7 +3337,7 @@ fill_array_sizes_structs(const struct radv_physical_device *pdev, struct __vk_ou
     */
    struct matrix_prop prop;
 
-   if (pdev->info.gfx_level >= GFX12) {
+   if (pdev->info.gfx_level >= GFX11_7) {
       for (unsigned e5m2_a = 0; e5m2_a < 2; e5m2_a++) {
          for (unsigned e5m2_b = 0; e5m2_b < 2; e5m2_b++) {
             prop.saturate = false;
