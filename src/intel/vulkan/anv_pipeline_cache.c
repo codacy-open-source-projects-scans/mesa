@@ -116,7 +116,7 @@ anv_shader_internal_create(struct anv_device *device,
    shader->code = code;
    memcpy(shader->code, kernel_data, kernel_size);
 
-   if (INTEL_DEBUG(DEBUG_SHADER_PRINT)) {
+   if (anv_needs_printf_buffer()) {
       struct intel_shader_reloc_value reloc_values[3];
       uint32_t rv_count = 0;
 
@@ -151,7 +151,7 @@ anv_shader_internal_create(struct anv_device *device,
 
    anv_shader_heap_upload(&device->shader_heap,
                           shader->kernel,
-                          kernel_data,
+                          shader->code,
                           shader->prog_data,
                           shader->stats->dispatch_width);
 
