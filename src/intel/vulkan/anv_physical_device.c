@@ -222,6 +222,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .KHR_separate_depth_stencil_layouts    = true,
       .KHR_shader_atomic_int64               = true,
       .KHR_shader_clock                      = true,
+      .KHR_shader_constant_data              = true,
       .KHR_shader_draw_parameters            = true,
       .KHR_shader_expect_assume              = true,
       .KHR_shader_float16_int8               = !device->instance->no_16bit,
@@ -375,7 +376,7 @@ get_device_extensions(const struct anv_physical_device *device,
       .EXT_shader_subgroup_vote              = true,
       .EXT_shader_viewport_index_layer       = true,
       .EXT_shader_uniform_buffer_unsized_array = true,
-      .EXT_subgroup_size_control             = true,
+      .EXT_subgroup_size_control             = !device->brw_disable_subgroup_size_control,
 #ifdef ANV_USE_WSI_PLATFORM
       .EXT_swapchain_maintenance1            = true,
 #endif
@@ -1023,6 +1024,9 @@ get_features(const struct anv_physical_device *pdevice,
 
       /* VK_EXT_primitive_restart_index */
       .primitiveRestartIndex = true,
+
+      /* VK_KHR_shader_constant_data */
+      .shaderConstantData = true,
    };
 
    /* The new DOOM and Wolfenstein games require depthBounds without
@@ -2776,6 +2780,10 @@ anv_physical_device_try_create(struct vk_instance *vk_instance,
    }
    device->disable_fcv = device->info.verx10 >= 125 ||
                          instance->disable_fcv;
+   device->brw_disable_subgroup_size_control =
+      !intel_use_jay(&device->info, MESA_SHADER_COMPUTE) &&
+      driQueryOptionb(&device->instance->dri_options,
+                      "anv_brw_disable_subgroup_size_control");
 
    result = anv_physical_device_init_heaps(device, fd);
    if (result != VK_SUCCESS)

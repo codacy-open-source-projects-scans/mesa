@@ -289,7 +289,7 @@ radv_physical_device_init_cache_key(struct radv_physical_device *pdev)
 
    key->clear_lds = instance->drirc.misc.clear_lds;
    key->cs_wave32 = pdev->cs_wave_size == 32;
-   key->disable_aniso_single_level = instance->drirc.debug.disable_aniso_single_level && pdev->info.gfx_level < GFX8;
+   key->disable_aniso_single_level = instance->drirc.debug.disable_aniso_single_level;
    key->disable_shrink_image_store = instance->drirc.debug.disable_shrink_image_store;
    key->disable_sinking_load_input_fs = instance->drirc.debug.disable_sinking_load_input_fs;
    key->disable_trunc_coord = instance->drirc.debug.disable_trunc_coord;
@@ -701,6 +701,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_shader_atomic_int64 = true,
       .KHR_shader_bfloat16 = radv_bfloat16_enabled(pdev),
       .KHR_shader_clock = true,
+      .KHR_shader_constant_data = true,
       .KHR_shader_draw_parameters = true,
       .KHR_shader_expect_assume = true,
       .KHR_shader_float16_int8 = true,
@@ -1547,6 +1548,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       /* VK_EXT_descriptor_heap */
       .descriptorHeap = true,
       .descriptorHeapCaptureReplay = true,
+
+      /* VK_KHR_shader_constant_data */
+      .shaderConstantData = true,
    };
 }
 
