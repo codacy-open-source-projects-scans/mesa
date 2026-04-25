@@ -29,7 +29,6 @@
 #include "radv_sdma.h"
 #include "radv_shader_args.h"
 
-#include "util/u_debug.h"
 #include "ac_binary.h"
 #include "ac_nir.h"
 #if defined(USE_LIBELF)
@@ -38,7 +37,6 @@
 #include "aco_interface.h"
 #include "sid.h"
 #include "vk_debug_report.h"
-#include "vk_format.h"
 #include "vk_nir.h"
 #include "vk_nir_lower_descriptor_heaps.h"
 #include "vk_sampler.h"
@@ -851,21 +849,6 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
        nir->info.outputs_written & VARYING_BIT_PRIMITIVE_SHADING_RATE) {
       /* Lower primitive shading rate to match HW requirements. */
       NIR_PASS(_, nir, radv_nir_lower_primitive_shading_rate, compiler_info->ac->gfx_level);
-   }
-
-   /* Indirect lowering must be called after the radv_optimize_nir() loop
-    * has been called at least once. Otherwise indirect lowering can
-    * bloat the instruction count of the loop and cause it to be
-    * considered too large for unrolling.
-    */
-   bool indirect_derefs_lowered = false;
-   NIR_PASS(indirect_derefs_lowered, nir, ac_nir_lower_indirect_derefs);
-   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-
-   if (indirect_derefs_lowered && !stage->key.optimisations_disabled &&
-       nir->info.stage != MESA_SHADER_COMPUTE) {
-      /* Optimize the lowered code before the linking optimizations. */
-      radv_optimize_nir(nir, false);
    }
 
    /* Lower immutable/embedded sampler derefs to vec4. */

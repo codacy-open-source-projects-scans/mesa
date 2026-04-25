@@ -10,33 +10,22 @@
 
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
-#include "nir/nir_builder.h"
-#include "nir/nir_serialize.h"
 #include "nir/radv_nir.h"
-#include "spirv/nir_spirv.h"
-#include "util/disk_cache.h"
 #include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "util/u_atomic.h"
-#include "radv_cs.h"
 #include "radv_debug.h"
 #include "radv_pipeline_binary.h"
 #include "radv_pipeline_cache.h"
 #include "radv_rmv.h"
 #include "radv_shader.h"
 #include "radv_shader_args.h"
-#include "vk_nir_convert_ycbcr.h"
 #include "vk_pipeline.h"
-#include "vk_render_pass.h"
 #include "vk_util.h"
 
-#include "util/u_debug.h"
 #include "ac_binary.h"
-#include "ac_nir.h"
-#include "ac_shader_util.h"
 #include "aco_interface.h"
 #include "sid.h"
-#include "vk_format.h"
 
 uint32_t
 radv_get_compute_resource_limits(const struct radv_physical_device *pdev, const struct radv_shader_info *info)
@@ -105,6 +94,9 @@ radv_compile_cs(const struct radv_compiler_info *compiler_info, struct radv_shad
 
    /* Compile SPIR-V shader to NIR. */
    cs_stage->nir = radv_shader_spirv_to_nir(compiler_info, cs_stage, NULL, is_internal);
+
+   NIR_PASS(_, cs_stage->nir, ac_nir_lower_indirect_derefs);
+   NIR_PASS(_, cs_stage->nir, nir_lower_vars_to_ssa);
 
    radv_optimize_nir(cs_stage->nir, cs_stage->key.optimisations_disabled);
 

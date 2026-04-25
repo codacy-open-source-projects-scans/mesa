@@ -1228,20 +1228,20 @@ radv_update_preambles(struct radv_queue_state *queue, struct radv_device *device
    for (uint32_t j = 0; j < cmd_buffer_count; j++) {
       struct radv_cmd_buffer *cmd_buffer = container_of(cmd_buffers[j], struct radv_cmd_buffer, vk);
 
-      needs.scratch_size_per_wave = MAX2(needs.scratch_size_per_wave, cmd_buffer->scratch_size_per_wave_needed);
-      needs.scratch_waves = MAX2(needs.scratch_waves, cmd_buffer->scratch_waves_wanted);
+      needs.scratch_size_per_wave = MAX2(needs.scratch_size_per_wave, cmd_buffer->queue_state.scratch_size_per_wave_needed);
+      needs.scratch_waves = MAX2(needs.scratch_waves, cmd_buffer->queue_state.scratch_waves_wanted);
       needs.compute_scratch_size_per_wave =
-         MAX2(needs.compute_scratch_size_per_wave, cmd_buffer->compute_scratch_size_per_wave_needed);
-      needs.compute_scratch_waves = MAX2(needs.compute_scratch_waves, cmd_buffer->compute_scratch_waves_wanted);
-      needs.esgs_ring_size = MAX2(needs.esgs_ring_size, cmd_buffer->esgs_ring_size_needed);
-      needs.gsvs_ring_size = MAX2(needs.gsvs_ring_size, cmd_buffer->gsvs_ring_size_needed);
-      needs.tess_rings |= cmd_buffer->tess_rings_needed;
-      needs.task_rings |= cmd_buffer->task_rings_needed;
-      needs.mesh_scratch_ring |= cmd_buffer->mesh_scratch_ring_needed;
-      needs.gds |= cmd_buffer->gds_needed;
-      needs.gds_oa |= cmd_buffer->gds_oa_needed;
-      needs.sample_positions |= cmd_buffer->sample_positions_needed;
-      *use_perf_counters |= cmd_buffer->state.uses_perf_counters;
+         MAX2(needs.compute_scratch_size_per_wave, cmd_buffer->queue_state.compute_scratch_size_per_wave_needed);
+      needs.compute_scratch_waves = MAX2(needs.compute_scratch_waves, cmd_buffer->queue_state.compute_scratch_waves_wanted);
+      needs.esgs_ring_size = MAX2(needs.esgs_ring_size, cmd_buffer->queue_state.esgs_ring_size_needed);
+      needs.gsvs_ring_size = MAX2(needs.gsvs_ring_size, cmd_buffer->queue_state.gsvs_ring_size_needed);
+      needs.tess_rings |= cmd_buffer->queue_state.tess_rings_needed;
+      needs.task_rings |= cmd_buffer->queue_state.task_rings_needed;
+      needs.mesh_scratch_ring |= cmd_buffer->queue_state.mesh_scratch_ring_needed;
+      needs.gds |= cmd_buffer->queue_state.gds_needed;
+      needs.gds_oa |= cmd_buffer->queue_state.gds_oa_needed;
+      needs.sample_positions |= cmd_buffer->queue_state.sample_positions_needed;
+      *use_perf_counters |= cmd_buffer->queue_state.uses_perf_counters;
       *has_follower |= !!cmd_buffer->gang.cs;
    }
 
@@ -1623,7 +1623,7 @@ radv_queue_submit_normal(struct radv_queue *queue, struct vk_queue_submit *submi
 
    for (uint32_t j = 0; j < submission->command_buffer_count; j++) {
       struct radv_cmd_buffer *cmd_buffer = (struct radv_cmd_buffer *)submission->command_buffers[j];
-      shader_upload_seq = MAX2(shader_upload_seq, cmd_buffer->shader_upload_seq);
+      shader_upload_seq = MAX2(shader_upload_seq, cmd_buffer->queue_state.shader_upload_seq);
    }
 
    if (shader_upload_seq > queue->last_shader_upload_seq) {

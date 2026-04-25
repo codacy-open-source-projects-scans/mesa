@@ -9,7 +9,6 @@
 #include "nir/nir_serialize.h"
 
 #include "ac_shader_util.h"
-#include "vk_shader_module.h"
 
 #include "nir/radv_nir.h"
 #include "nir/radv_nir_rt_stage_cps.h"
@@ -27,8 +26,6 @@
 
 #include "nir/radv_nir_rt_stage_common.h"
 #include "aco_interface.h"
-#include "aco_nir_call_attribs.h"
-#include "radv_aco_shader_info.h"
 #include "radv_rmv.h"
 #include "radv_shader.h"
 
@@ -656,6 +653,10 @@ radv_rt_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct radv
                      uint32_t *payload_size, uint32_t *hit_attrib_size, struct radv_ray_tracing_stage_info *info)
 {
    stage->nir = radv_shader_spirv_to_nir(compiler_info, stage, NULL, false);
+
+   NIR_PASS(_, stage->nir, ac_nir_lower_indirect_derefs);
+   NIR_PASS(_, stage->nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, stage->nir, nir_remove_dead_variables, nir_var_function_temp, NULL);
 
    nir_foreach_variable_with_modes (var, stage->nir, nir_var_ray_hit_attrib) {
       unsigned size, alignment;

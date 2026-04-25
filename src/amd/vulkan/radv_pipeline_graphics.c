@@ -10,16 +10,12 @@
 
 #include "meta/radv_meta.h"
 #include "nir/nir.h"
-#include "nir/nir_builder.h"
 #include "nir/nir_serialize.h"
 #include "nir/nir_xfb_info.h"
 #include "nir/radv_nir.h"
-#include "spirv/nir_spirv.h"
-#include "util/disk_cache.h"
 #include "util/mesa-blake3.h"
 #include "util/os_time.h"
 #include "util/u_atomic.h"
-#include "radv_cs.h"
 #include "radv_debug.h"
 #include "radv_entrypoints.h"
 #include "radv_formats.h"
@@ -30,18 +26,14 @@
 #include "radv_shader.h"
 #include "radv_shader_args.h"
 #include "shader_enums.h"
-#include "vk_nir_convert_ycbcr.h"
 #include "vk_pipeline.h"
-#include "vk_render_pass.h"
 #include "vk_util.h"
 
-#include "util/u_debug.h"
 #include "ac_binary.h"
 #include "ac_formats.h"
 #include "ac_nir.h"
 #include "ac_shader_util.h"
 #include "aco_interface.h"
-#include "sid.h"
 
 static bool
 radv_is_static_vrs_enabled(const struct vk_graphics_pipeline_state *state)
@@ -2611,6 +2603,9 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
    radv_foreach_stage (i, active_nir_stages) {
       int64_t stage_start = os_time_get_nano();
 
+      ac_nir_lower_indirect_derefs_early(stages[i].nir);
+      NIR_PASS(_, stages[i].nir, nir_lower_vars_to_ssa);
+
       radv_optimize_nir(stages[i].nir, stages[i].key.optimisations_disabled);
 
       stages[i].feedback.duration += os_time_get_nano() - stage_start;
@@ -2631,6 +2626,28 @@ radv_graphics_shaders_compile(const struct radv_compiler_info *compiler_info, st
       int64_t stage_start = os_time_get_nano();
 
       NIR_PASS(_, stages[i].nir, nir_opt_clip_cull_const);
+
+      stages[i].feedback.duration += os_time_get_nano() - stage_start;
+   }
+
+   radv_foreach_stage (i, active_nir_stages) {
+      int64_t stage_start = os_time_get_nano();
+
+      /* Indirect lowering must be called after the radv_optimize_nir() loop
+       * has been called at least once. Otherwise indirect lowering can
+       * bloat the instruction count of the loop and cause it to be
+       * considered too large for unrolling.
+       *
+       * We want to do this as late as possible because scratch access isn't
+       * very optimizable. We lower smaller arrays to SSA earlier with
+       * ac_nir_lower_indirect_derefs_early, because that can actually enable
+       * optimizations.
+       */
+      bool indirect_derefs_lowered = false;
+      NIR_PASS(indirect_derefs_lowered, stages[i].nir, ac_nir_lower_indirect_derefs);
+      NIR_PASS(_, stages[i].nir, nir_lower_vars_to_ssa);
+      if (indirect_derefs_lowered && !stages[i].key.optimisations_disabled)
+         radv_optimize_nir(stages[i].nir, false);
 
       stages[i].feedback.duration += os_time_get_nano() - stage_start;
    }
