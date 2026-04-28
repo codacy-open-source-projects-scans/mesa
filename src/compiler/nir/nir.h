@@ -2118,7 +2118,8 @@ typedef struct nir_io_semantics {
 
    /* Start of the second uint. */
    unsigned no_signed_zero : 1; /* whether it matters if the input/output is -0.0 or +0.0. */
-   unsigned padding : 31;
+   unsigned clamp : 1; /* whether the IO component should be clamped when GL_CLAMP_VERTEX_COLOR is enabled */
+   unsigned padding : 30;
 } nir_io_semantics;
 
 /* Transform feedback info for 4 outputs. */
@@ -5444,6 +5445,7 @@ bool nir_lower_vars_to_scratch_global(nir_shader *shader,
 bool nir_lower_scratch_to_var(nir_shader *nir);
 
 bool nir_lower_clip_halfz(nir_shader *shader);
+bool nir_lower_clip_halfz_dynamic(nir_shader *shader);
 
 void nir_shader_gather_info(nir_shader *shader, nir_function_impl *entrypoint);
 void nir_gather_clip_cull_distance_sizes_from_vars(nir_shader *nir);

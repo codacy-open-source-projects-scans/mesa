@@ -519,7 +519,6 @@ struct radv_compiler_info {
       uint32_t address32_hi;
       bool rbplus_allowed;
       bool mesh_fast_launch_2;
-      bool has_dedicated_vram;
       bool has_cs_regalloc_hang_bug;
       uint32_t lds_size_per_workgroup;
    } hw;
@@ -560,6 +559,7 @@ struct radv_compiler_info {
    uint8_t override_ray_tracing_shader_version;
 
    /* Shader features */
+   const struct vk_pipeline_robustness_state *device_robustness_state;
    uint8_t sampled_image_desc_size;
    uint8_t combined_image_sampler_desc_size;
    uint8_t combined_image_sampler_offset;
@@ -581,6 +581,7 @@ struct radv_compiler_info {
    bool force_vrs_enabled;
    bool robust_buffer_access; /* Only used by LLVM. */
    int force_aniso;
+   uint8_t nggc_max_ps_params;
 
    /* Wave/subgroup sizes */
    uint32_t subgroup_size;

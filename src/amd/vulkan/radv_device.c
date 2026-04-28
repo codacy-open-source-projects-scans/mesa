@@ -1111,8 +1111,8 @@ radv_device_init_compiler_info(struct radv_device *device)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    struct radv_instance *instance = radv_physical_device_instance(pdev);
-
    VkShaderStageFlags dump_shaders = 0;
+   uint32_t nggc_max_ps_params = 0;
 
    if (instance->debug_flags & RADV_DEBUG_DUMP_VS)
       dump_shaders |= VK_SHADER_STAGE_VERTEX_BIT;
@@ -1131,6 +1131,13 @@ radv_device_init_compiler_info(struct radv_device *device)
    if (instance->debug_flags & RADV_DEBUG_DUMP_CS)
       dump_shaders |= VK_SHADER_STAGE_COMPUTE_BIT | RADV_RT_STAGE_BITS;
 
+   if (pdev->cache_key.use_ngg_culling) {
+      /* Shader based culling efficiency can depend on PS throughput.
+       * Estimate an upper limit for PS input param count based on GPU info.
+       */
+      nggc_max_ps_params = pdev->info.has_dedicated_vram ? 12 : 8;
+   }
+
    struct radv_compiler_info info = {
       /* Hardware info */
       .ac = &pdev->info.compiler_info,
@@ -1140,7 +1147,6 @@ radv_device_init_compiler_info(struct radv_device *device)
             .address32_hi = pdev->info.address32_hi,
             .rbplus_allowed = pdev->info.rbplus_allowed,
             .mesh_fast_launch_2 = pdev->info.mesh_fast_launch_2,
-            .has_dedicated_vram = pdev->info.has_dedicated_vram,
             .has_cs_regalloc_hang_bug = pdev->info.has_cs_regalloc_hang_bug,
             .lds_size_per_workgroup = pdev->info.lds_size_per_workgroup,
          },
@@ -1190,6 +1196,7 @@ radv_device_init_compiler_info(struct radv_device *device)
       .buffer_descriptor_size = pdev->vk.properties.bufferDescriptorSize,
       .buffer_descriptor_alignment = pdev->vk.properties.bufferDescriptorAlignment,
       /* Shader features */
+      .device_robustness_state = &device->vk.robustness_state,
       .use_ngg = pdev->use_ngg,
       .use_ngg_streamout = pdev->use_ngg_streamout,
       .load_grid_size_from_user_sgpr = device->load_grid_size_from_user_sgpr,
@@ -1203,6 +1210,7 @@ radv_device_init_compiler_info(struct radv_device *device)
       .robust_buffer_access =
          (device->vk.enabled_features.robustBufferAccess2 || device->vk.enabled_features.robustBufferAccess),
       .force_aniso = device->force_aniso,
+      .nggc_max_ps_params = nggc_max_ps_params,
       /* Wave/subgroup sizes */
       .subgroup_size = device->vk.physical->properties.subgroupSize,
       .min_subgroup_size = device->vk.physical->properties.minSubgroupSize,
@@ -1244,8 +1252,12 @@ radv_destroy_device(struct radv_device *device, const VkAllocationCallbacks *pAl
    for (unsigned i = 0; i < RADV_MAX_QUEUE_FAMILIES; i++) {
       for (unsigned q = 0; q < device->queue_count[i]; q++)
          radv_queue_finish(&device->queues[i][q]);
+      for (unsigned q = 0; q < device->queue_count_protected[i]; q++)
+         radv_queue_finish(&device->queues_protected[i][q]);
       if (device->queue_count[i])
          vk_free(&device->vk.alloc, device->queues[i]);
+      if (device->queue_count_protected[i])
+         vk_free(&device->vk.alloc, device->queues_protected[i]);
    }
    if (device->private_sdma_queue != VK_NULL_HANDLE) {
       radv_queue_finish(device->private_sdma_queue);
@@ -1429,17 +1441,23 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       const VkDeviceQueueGlobalPriorityCreateInfo *global_priority =
          vk_find_struct_const(queue_create->pNext, DEVICE_QUEUE_GLOBAL_PRIORITY_CREATE_INFO);
 
-      device->queues[qfi] = vk_zalloc(&device->vk.alloc, queue_create->queueCount * sizeof(struct radv_queue), 8,
-                                      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
-      if (!device->queues[qfi]) {
+      struct radv_queue **queues = queue_create->flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT
+                                      ? &device->queues_protected[qfi]
+                                      : &device->queues[qfi];
+      *queues = vk_zalloc(&device->vk.alloc, queue_create->queueCount * sizeof(struct radv_queue), 8,
+                          VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
+      if (!*queues) {
          result = VK_ERROR_OUT_OF_HOST_MEMORY;
          goto fail;
       }
 
-      device->queue_count[qfi] = queue_create->queueCount;
+      if (queue_create->flags & VK_DEVICE_QUEUE_CREATE_PROTECTED_BIT)
+         device->queue_count_protected[qfi] = queue_create->queueCount;
+      else
+         device->queue_count[qfi] = queue_create->queueCount;
 
       for (unsigned q = 0; q < queue_create->queueCount; q++) {
-         result = radv_queue_init(device, &device->queues[qfi][q], q, queue_create, global_priority);
+         result = radv_queue_init(device, &(*queues)[q], q, queue_create, global_priority);
          if (result != VK_SUCCESS)
             goto fail;
       }
@@ -1598,6 +1616,9 @@ radv_GetImageMemoryRequirements2(VkDevice _device, const VkImageMemoryRequiremen
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits =
       ((1u << pdev->memory_properties.memoryTypeCount) - 1u) & ~pdev->memory_types_32bit;
+
+   if (image->vk.create_flags & VK_IMAGE_CREATE_PROTECTED_BIT)
+      pMemoryRequirements->memoryRequirements.memoryTypeBits &= pdev->memory_types_protected;
 
    if (image->vk.usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT) {
       /* Only expose host visible memory types for images that need to be mapped on the CPU. */
