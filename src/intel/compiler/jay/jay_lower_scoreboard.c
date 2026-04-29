@@ -12,8 +12,7 @@
 #include "jay_opcodes.h"
 #include "jay_private.h"
 
-/* TODO: Shrink */
-#define MAX_KEYS   (2 * JAY_NUM_UGPR)
+#define MAX_KEYS   (JAY_NUM_PHYS_GRF + JAY_NUM_UGPR)
 #define NUM_TOKENS (16)
 
 /** SEND scoreboarding */
@@ -132,7 +131,7 @@ struct swsb_state {
 static enum tgl_pipe
 inst_exec_pipe(const struct intel_device_info *devinfo, jay_inst *I)
 {
-   if (I->op == JAY_OPCODE_SEND || jay_op_is_control_flow(I->op) /* XXX*/) {
+   if (I->op == JAY_OPCODE_SEND || jay_op_is_control_flow(I->op)) {
       return TGL_PIPE_NONE;
    } else if (I->op == JAY_OPCODE_MATH) {
       return TGL_PIPE_MATH;

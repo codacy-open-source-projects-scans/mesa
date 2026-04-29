@@ -518,7 +518,6 @@ struct radv_compiler_info {
       uint32_t family;
       uint32_t address32_hi;
       bool rbplus_allowed;
-      bool mesh_fast_launch_2;
       bool has_cs_regalloc_hang_bug;
       uint32_t lds_size_per_workgroup;
    } hw;
@@ -570,7 +569,6 @@ struct radv_compiler_info {
    uint32_t buffer_descriptor_size;
    uint32_t buffer_descriptor_alignment;
    bool use_ngg;
-   bool use_ngg_streamout;
    bool load_grid_size_from_user_sgpr;
    bool emulate_ngg_gs_query_pipeline_stat;
    bool primitives_generated_query;

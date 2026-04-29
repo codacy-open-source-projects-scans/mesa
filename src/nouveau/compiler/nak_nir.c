@@ -1328,12 +1328,14 @@ nak_postprocess_nir(nir_shader *nir,
    if (nak->sm >= 70)
       OPT(nir, nir_normalize_sin_cos);
 
+   OPT(nir, nir_opt_fp_math_ctrl);
    nak_optimize_nir(nir, nak);
 
    do {
       progress = false;
       OPT(nir, nir_opt_algebraic_late);
       OPT(nir, nak_nir_lower_algebraic_late, nak);
+      OPT(nir, nir_opt_algebraic_distribute_src_mods);
 
       /* If we're lowering fp64 sat but not min/max, the sat lowering may have
        * been undone by nir_opt_algebraic.  Lower sat again just to be sure.
