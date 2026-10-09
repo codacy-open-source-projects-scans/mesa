@@ -217,7 +217,7 @@ iris_init_batch(struct iris_context *ice,
          (INTEL_DEBUG(DEBUG_COLOR) ? INTEL_BATCH_DECODE_IN_COLOR : 0);
 
       if (screen->brw) {
-         intel_batch_decode_ctx_init_brw(&batch->decoder, &screen->brw->isa,
+         intel_batch_decode_ctx_init_gen(&batch->decoder,
                                          screen->devinfo,
                                          stderr, decode_flags, NULL,
                                          decode_get_bo, decode_get_state_size, batch);
@@ -232,9 +232,12 @@ iris_init_batch(struct iris_context *ice,
          UNREACHABLE("no elk support");
 #endif
       }
-      batch->decoder.dynamic_base = IRIS_MEMZONE_DYNAMIC_START;
-      batch->decoder.instruction_base = IRIS_MEMZONE_SHADER_START;
-      batch->decoder.surface_base = IRIS_MEMZONE_BINDER_START;
+      if (!iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr)) {
+         batch->decoder.dynamic_base = IRIS_MEMZONE_DYNAMIC_START;
+         batch->decoder.instruction_base = IRIS_MEMZONE_SHADER_START;
+         batch->decoder.surface_base = IRIS_MEMZONE_BINDER_START;
+      }
+      batch->decoder.use_efficient_64bit = iris_bufmgr_is_eff_64bit_enabled(screen->bufmgr);
       batch->decoder.max_vbo_decoded_lines = 32;
       if (batch->name == IRIS_BATCH_BLITTER)
          batch->decoder.engine = INTEL_ENGINE_CLASS_COPY;

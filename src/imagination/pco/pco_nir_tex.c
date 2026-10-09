@@ -53,7 +53,7 @@ static bool lower_tex_query_basic(nir_builder *b,
                                   pco_data *data)
 {
    nir_def *new_def;
-   
+
    b->cursor = nir_before_instr(&tex->instr);
 
    switch (tex->op) {
@@ -749,6 +749,8 @@ static bool lower_tex(nir_builder *b, nir_tex_instr *tex, void *cb_data)
       UNREACHABLE("");
    }
 
+   nir_intrinsic_set_access(smp, (enum gl_access_qualifier)tex->backend_flags);
+
    if (tex->is_shadow) {
       nir_def *compare_op =
          nir_load_smp_meta_pco(b,
@@ -796,7 +798,7 @@ bool pco_nir_lower_tex(nir_shader *shader, pco_data *data, pco_ctx *ctx)
 
    return nir_shader_tex_pass(shader,
                               lower_tex,
-                              nir_metadata_control_flow,
+                              nir_metadata_none,
                               &state);
 }
 
@@ -831,6 +833,59 @@ static enum pipe_format nir_type_to_pipe_format(nir_alu_type nir_type,
                                 num_components,
                                 false,
                                 pure_integer);
+}
+
+struct nonatomic_ctx {
+   unsigned desc_set;
+   unsigned binding;
+   bool has_nonatomic_io;
+};
+
+static bool check_nonatomic_io(nir_builder *b,
+                               nir_intrinsic_instr *intr,
+                               void *cb_data)
+{
+   switch (intr->intrinsic) {
+   case nir_intrinsic_image_deref_load:
+   case nir_intrinsic_image_deref_store:
+      break;
+
+   default:
+      return false;
+   }
+
+   struct nonatomic_ctx *ctx = cb_data;
+
+   nir_scalar scalar = nir_scalar_resolved(intr->src[0].ssa, 0);
+   unsigned desc_set = nir_scalar_as_uint(scalar);
+   if (desc_set != ctx->desc_set)
+      return false;
+
+   scalar = nir_scalar_resolved(intr->src[0].ssa, 1);
+   unsigned binding = nir_scalar_as_uint(scalar);
+   if (binding != ctx->binding)
+      return false;
+
+   ctx->has_nonatomic_io = true;
+
+   return false;
+}
+
+static bool
+image_desc_has_nonatomic_io(nir_shader *shader, unsigned desc_set, unsigned binding)
+{
+   struct nonatomic_ctx ctx = {
+      .desc_set = desc_set,
+      .binding = binding,
+      .has_nonatomic_io = false,
+   };
+
+   nir_shader_intrinsics_pass(shader,
+                              check_nonatomic_io,
+                              nir_metadata_none,
+                              &ctx);
+
+   return ctx.has_nonatomic_io;
 }
 
 static bool
@@ -869,8 +924,13 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
    enum glsl_sampler_dim image_dim = nir_intrinsic_image_dim(intr);
    bool is_array = nir_intrinsic_image_array(intr);
    enum pipe_format format = nir_intrinsic_format(intr);
-   unsigned desc_set = nir_src_comp_as_uint(intr->src[0], 0);
-   unsigned binding = nir_src_comp_as_uint(intr->src[0], 1);
+
+   nir_scalar scalar = nir_scalar_resolved(intr->src[0].ssa, 0);
+   unsigned desc_set = nir_scalar_as_uint(scalar);
+
+   scalar = nir_scalar_resolved(intr->src[0].ssa, 1);
+   unsigned binding = nir_scalar_as_uint(scalar);
+
    nir_def *elem = nir_channel(b, intr->src[0].ssa, 2);
 
    if (intr->intrinsic == nir_intrinsic_image_deref_size) {
@@ -910,6 +970,25 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
       nir_def *image_size =
          nir_trim_vector(b, size_comps, intr->def.num_components);
+
+      if (data->common.image_sliced_view_of_3d &&
+          image_dim == GLSL_SAMPLER_DIM_3D) {
+         nir_def *tex_meta = nir_load_tex_meta_pco(b,
+                                                   PCO_IMAGE_META_COUNT,
+                                                   elem,
+                                                   .desc_set = desc_set,
+                                                   .binding = binding);
+
+         nir_def *z_slice_pck =
+            nir_channel(b, tex_meta, PCO_IMAGE_META_Z_SLICE);
+         nir_def *z_count =
+            nir_ubitfield_extract_imm(b,
+                                      z_slice_pck,
+                                      PVR_SLICED_VIEW_COUNT_OFFSET,
+                                      PVR_SLICED_VIEW_COUNT_LENGTH);
+         image_size = nir_vector_insert_imm(b, image_size, z_count, 2);
+      }
+
       nir_def_rewrite_uses(&intr->def, image_size);
       nir_instr_remove(&intr->instr);
       return true;
@@ -936,6 +1015,26 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
       PCO_DEBUG(INT_SMP)
          ? PVR_HAS_FEATURE(dev_info, tpu_extended_integer_lookup)
          : false;
+
+    if (data->common.image_sliced_view_of_3d &&
+              image_dim == GLSL_SAMPLER_DIM_3D) {
+      nir_def *tex_meta = nir_load_tex_meta_pco(b,
+                                                PCO_IMAGE_META_COUNT,
+                                                elem,
+                                                .desc_set = desc_set,
+                                                .binding = binding);
+
+      nir_def *z_slice_pck = nir_channel(b, tex_meta, PCO_IMAGE_META_Z_SLICE);
+      nir_def *z_offset =
+         nir_ubitfield_extract_imm(b,
+               z_slice_pck,
+               PVR_SLICED_VIEW_OFFSET_OFFSET,
+               PVR_SLICED_VIEW_OFFSET_LENGTH);
+
+      nir_def *z = nir_channel(b, coords, 2);
+      z = nir_iadd(b, z, z_offset);
+      coords = nir_vector_insert_imm(b, coords, z, 2);
+   }
 
    if (write_data) {
       assert(intr->num_components == 4);
@@ -1076,8 +1175,8 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
    if (ia) {
       assert(!is_array);
-      nir_load_const_instr *load = nir_def_as_load_const(intr->src[0].ssa);
-      bool onchip = load->def.num_components == 4;
+
+      bool onchip = intr->src[0].ssa->num_components == 4;
 
       if (onchip) {
          unsigned ia_idx = nir_src_comp_as_uint(intr->src[0], 3);
@@ -1109,8 +1208,13 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
    if (intr->intrinsic == nir_intrinsic_image_deref_atomic ||
        intr->intrinsic == nir_intrinsic_image_deref_atomic_swap) {
+      nir_atomic_op atomic_op = nir_intrinsic_atomic_op(intr);
+
       assert(util_format_is_plain(format));
-      assert(util_format_is_pure_integer(format));
+
+      /* xchg doesn't care about format/type. */
+      assert(util_format_is_pure_integer(format) ||
+             atomic_op == nir_atomic_op_xchg);
 
       assert(util_format_get_nr_components(format) == 1);
       assert(util_format_get_blockwidth(format) == 1);
@@ -1139,9 +1243,23 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
       case GLSL_SAMPLER_DIM_2D: {
          /* Calculate untwiddled offset. */
-         nir_def *x = nir_i2i16(b, nir_channel(b, coords, 0));
-         nir_def *y = nir_i2i16(b, nir_channel(b, coords, 1));
-         twiddled_offset = nir_interleave(b, y, x);
+         nir_def *num_comps = nir_imm_int(b, 2);
+         nir_def *dim = nir_imm_int(b, image_dim);
+         nir_def *_is_array = nir_imm_bool(b, is_array);
+         nir_def *is_image = nir_imm_bool(b, true);
+         nir_def *size_comps = usclib_tex_state_size(b,
+                                                     tex_state,
+                                                     num_comps,
+                                                     dim,
+                                                     _is_array,
+                                                     is_image,
+                                                     lod);
+
+         twiddled_offset = usclib_twiddle2d(b,
+                                            nir_channels(b, coords, 0b11),
+                                            nir_channels(b, size_comps, 0b11));
+         data->common.uses.usclib = true;
+
          twiddled_offset =
             nir_imul_imm(b, twiddled_offset, util_format_get_blocksize(format));
 
@@ -1219,10 +1337,16 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
          nir_def *atomic_swap = nir_global_atomic_swap_pco(
             b,
+            intr->num_components,
             addr_data,
-            .atomic_op = nir_intrinsic_atomic_op(intr));
+            .access = nir_intrinsic_access(intr),
+            .atomic_op = atomic_op);
          nir_def_rewrite_uses(&intr->def, atomic_swap);
          nir_instr_remove(&intr->instr);
+
+         if (image_desc_has_nonatomic_io(b->shader, desc_set, binding))
+            nir_dma_flush_pco(b, addr);
+
          return true;
       }
 
@@ -1234,10 +1358,16 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
 
       nir_def *atomic =
          nir_global_atomic_pco(b,
+                               intr->num_components,
                                addr_data,
-                               .atomic_op = nir_intrinsic_atomic_op(intr));
+                               .access = nir_intrinsic_access(intr),
+                               .atomic_op = atomic_op);
       nir_def_rewrite_uses(&intr->def, atomic);
       nir_instr_remove(&intr->instr);
+
+      if (image_desc_has_nonatomic_io(b->shader, desc_set, binding))
+         nir_dma_flush_pco(b, addr);
+
       return true;
    }
 
@@ -1396,6 +1526,8 @@ lower_image(nir_builder *b, nir_intrinsic_instr *intr, void *cb_data)
    }
 
    nir_intrinsic_instr *smp = pco_emit_nir_smp(b, &params);
+
+   nir_intrinsic_set_access(smp, nir_intrinsic_access(intr));
 
    if (intr->intrinsic == nir_intrinsic_image_deref_load) {
       nir_def_rewrite_uses(&intr->def, &smp->def);

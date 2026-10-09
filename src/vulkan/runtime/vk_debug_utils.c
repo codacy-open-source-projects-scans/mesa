@@ -33,6 +33,7 @@
 #include "stdarg.h"
 #include "util/u_dynarray.h"
 #include "util/u_printf.h"
+#include "vulkan/vulkan_core.h"
 
 void
 vk_debug_message(struct vk_instance *instance,
@@ -119,31 +120,6 @@ vk_address_binding_report(struct vk_instance *instance,
    vk_debug_message(instance, VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT,
                     VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT,
                     &cb_data);
-}
-
-void
-vk_emit_device_memory_report(struct vk_device* device,
-                             VkDeviceMemoryReportEventTypeEXT type,
-                             uint64_t mem_obj_id,
-                             VkDeviceSize size,
-                             VkObjectType obj_type,
-                             uint64_t obj_handle,
-                             uint32_t heap_index)
-{
-   assert(device->memory_reports);
-
-   const VkDeviceMemoryReportCallbackDataEXT report = {
-      .sType = VK_STRUCTURE_TYPE_DEVICE_MEMORY_REPORT_CALLBACK_DATA_EXT,
-      .type = type,
-      .memoryObjectId = mem_obj_id,
-      .size = size,
-      .objectType = obj_type,
-      .objectHandle = obj_handle,
-      .heapIndex = heap_index,
-   };
-
-   for (uint32_t i = 0; i < device->memory_report_count; i++)
-      device->memory_reports[i].callback(&report, device->memory_reports[i].data);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -261,8 +237,6 @@ vk_common_DebugMarkerSetObjectNameEXT(
 {
    VK_FROM_HANDLE(vk_device, device, _device);
 
-   assert(pNameInfo->sType == VK_STRUCTURE_TYPE_DEBUG_MARKER_OBJECT_NAME_INFO_EXT);
-
    VkObjectType object_type;
    switch (pNameInfo->objectType) {
    case VK_DEBUG_REPORT_OBJECT_TYPE_SURFACE_KHR_EXT:
@@ -296,6 +270,50 @@ vk_common_DebugMarkerSetObjectNameEXT(
    };
 
    return device->dispatch_table.SetDebugUtilsObjectNameEXT(_device, &name_info);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+vk_common_DebugMarkerSetObjectTagEXT(
+   VkDevice _device,
+   const VkDebugMarkerObjectTagInfoEXT *pTagInfo)
+{
+   VK_FROM_HANDLE(vk_device, device, _device);
+
+   VkObjectType object_type;
+   switch (pTagInfo->objectType) {
+      case VK_DEBUG_REPORT_OBJECT_TYPE_SURFACE_KHR_EXT:
+         object_type = VK_OBJECT_TYPE_SURFACE_KHR;
+         break;
+      case VK_DEBUG_REPORT_OBJECT_TYPE_SWAPCHAIN_KHR_EXT:
+         object_type = VK_OBJECT_TYPE_SWAPCHAIN_KHR;
+         break;
+      case VK_DEBUG_REPORT_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT_EXT:
+         object_type = VK_OBJECT_TYPE_DEBUG_REPORT_CALLBACK_EXT;
+         break;
+      case VK_DEBUG_REPORT_OBJECT_TYPE_DISPLAY_KHR_EXT:
+         object_type = VK_OBJECT_TYPE_DISPLAY_KHR;
+         break;
+      case VK_DEBUG_REPORT_OBJECT_TYPE_DISPLAY_MODE_KHR_EXT:
+         object_type = VK_OBJECT_TYPE_DISPLAY_MODE_KHR;
+         break;
+      case VK_DEBUG_REPORT_OBJECT_TYPE_VALIDATION_CACHE_EXT_EXT:
+         object_type = VK_OBJECT_TYPE_VALIDATION_CACHE_EXT;
+         break;
+      default:
+         object_type = (VkObjectType)pTagInfo->objectType;
+         break;
+   }
+
+   VkDebugUtilsObjectTagInfoEXT tag_info = {
+      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_OBJECT_TAG_INFO_EXT,
+      .objectType = object_type,
+      .objectHandle = pTagInfo->object,
+      .tagName = pTagInfo->tagName,
+      .tagSize = pTagInfo->tagSize,
+      .pTag = pTagInfo->pTag
+   };
+   
+   return device->dispatch_table.SetDebugUtilsObjectTagEXT(_device, &tag_info);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -433,6 +451,42 @@ vk_common_CmdInsertDebugUtilsLabelEXT(
    command_buffer->region_begin = false;
 }
 
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdDebugMarkerBeginEXT(
+   VkCommandBuffer _commandBuffer,
+   const VkDebugMarkerMarkerInfoEXT *pMarkerInfo)
+{
+   VkDebugUtilsLabelEXT label_info = {
+      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+      .pNext = pMarkerInfo->pNext,
+      .pLabelName = pMarkerInfo->pMarkerName,
+   };
+   memcpy(label_info.color, pMarkerInfo->color, sizeof(label_info.color));
+   
+   vk_common_CmdBeginDebugUtilsLabelEXT(_commandBuffer, &label_info);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdDebugMarkerEndEXT(VkCommandBuffer _commandBuffer)
+{
+   vk_common_CmdEndDebugUtilsLabelEXT(_commandBuffer);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+vk_common_CmdDebugMarkerInsertEXT(
+   VkCommandBuffer _commandBuffer,
+   const VkDebugMarkerMarkerInfoEXT *pMarkerInfo)
+{
+   VkDebugUtilsLabelEXT label_info = {
+      .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_LABEL_EXT,
+      .pNext = pMarkerInfo->pNext,
+      .pLabelName = pMarkerInfo->pMarkerName,
+   };
+   memcpy(label_info.color, pMarkerInfo->color, sizeof(label_info.color));
+   
+   vk_common_CmdInsertDebugUtilsLabelEXT(_commandBuffer, &label_info);
+}
+
 void
 vk_queue_begin_debug_utils_label(struct vk_queue *queue,
                                  const VkDebugUtilsLabelEXT *pLabelInfo)
@@ -515,7 +569,7 @@ vk_common_QueueInsertDebugUtilsLabelEXT(
 VkResult
 vk_check_printf_status(struct vk_device *dev, struct u_printf_ctx *ctx)
 {
-   if (u_printf_check_abort(stdout, ctx)) {
+   if (u_printf_check_abort(dev->debug_output, ctx)) {
       vk_device_set_lost(dev, "GPU abort.");
       return VK_ERROR_DEVICE_LOST;
    } else {

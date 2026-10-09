@@ -138,12 +138,6 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       ms_state.sampleShadingEnable = VK_TRUE;
       ms_state.minSampleShading = MIN2((float)(state->rast_samples + 1) / (state->min_samples + 1), 1.0f);
    }
-   VkPipelineSampleLocationsStateCreateInfoEXT pslsci = {
-      VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT,
-      NULL,
-      VK_TRUE,
-      .sampleLocationsInfo.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT
-   };
 
    VkPipelineViewportStateCreateInfo viewport_state = {0};
    VkPipelineViewportDepthClipControlCreateInfoEXT clip = {
@@ -214,10 +208,6 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       VK_DYNAMIC_STATE_STENCIL_REFERENCE,
    };
    unsigned state_count = 4;
-   if (state->custom_sample_locations) {
-      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
-      ms_state.pNext = &pslsci;
-   }
    if (screen->info.have_EXT_extended_dynamic_state) {
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_VIEWPORT_WITH_COUNT;
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SCISSOR_WITH_COUNT;
@@ -261,7 +251,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       if (!screen->driver_workarounds.no_linestipple) {
          if (screen->info.dynamic_state3_feats.extendedDynamicState3LineStippleEnable)
             dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE_ENABLE_EXT;
-         dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE_EXT;
+         dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE;
       }
       if (screen->have_full_ds3) {
          dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_MASK_EXT;
@@ -282,33 +272,37 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       if (screen->info.dynamic_state3_feats.extendedDynamicState3RepresentativeFragmentTestEnable)
          dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_REPRESENTATIVE_FRAGMENT_TEST_ENABLE_NV;
    }
+   if (screen->base.caps.programmable_sample_locations) {
+      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
+      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_ENABLE_EXT;
+   }
    if (screen->info.have_EXT_color_write_enable)
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT;
 
    assert(state->rast_prim != MESA_PRIM_COUNT || zink_debug & ZINK_DEBUG_SHADERDB || is_mesh);
 
-   VkPipelineRasterizationLineStateCreateInfoEXT rast_line_state;
+   VkPipelineRasterizationLineStateCreateInfo rast_line_state;
    if (screen->info.have_EXT_line_rasterization && !is_mesh &&
        !state->shader_keys.key[MESA_SHADER_FRAGMENT].key.fs.lower_line_smooth) {
-      rast_line_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO_EXT;
+      rast_line_state.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_LINE_STATE_CREATE_INFO;
       rast_line_state.pNext = rast_state.pNext;
       rast_line_state.stippledLineEnable = VK_FALSE;
-      rast_line_state.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_DEFAULT_EXT;
+      rast_line_state.lineRasterizationMode = VK_LINE_RASTERIZATION_MODE_DEFAULT;
 
       if (state->rast_prim == MESA_PRIM_LINES) {
          const char *features[4][2] = {
-            [VK_LINE_RASTERIZATION_MODE_DEFAULT_EXT] = {"",""},
-            [VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT] = {"rectangularLines", "stippledRectangularLines"},
-            [VK_LINE_RASTERIZATION_MODE_BRESENHAM_EXT] = {"bresenhamLines", "stippledBresenhamLines"},
-            [VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH_EXT] = {"smoothLines", "stippledSmoothLines"},
+            [VK_LINE_RASTERIZATION_MODE_DEFAULT] = {"",""},
+            [VK_LINE_RASTERIZATION_MODE_RECTANGULAR] = {"rectangularLines", "stippledRectangularLines"},
+            [VK_LINE_RASTERIZATION_MODE_BRESENHAM] = {"bresenhamLines", "stippledBresenhamLines"},
+            [VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH] = {"smoothLines", "stippledSmoothLines"},
          };
          static bool warned[6] = {0};
-         const VkPhysicalDeviceLineRasterizationFeaturesEXT *line_feats = &screen->info.line_rast_feats;
+         const VkPhysicalDeviceLineRasterizationFeatures *line_feats = &screen->info.line_rast_feats;
          /* line features can be represented as an array VkBool32[6],
           * with the 3 base features preceding the 3 (matching) stippled features
           */
          const VkBool32 *feat = &line_feats->rectangularLines;
-         unsigned mode_idx = hw_rast_state->line_mode - VK_LINE_RASTERIZATION_MODE_RECTANGULAR_EXT;
+         unsigned mode_idx = hw_rast_state->line_mode - VK_LINE_RASTERIZATION_MODE_RECTANGULAR;
          /* add base mode index, add 3 if stippling is enabled */
          mode_idx += hw_rast_state->line_stipple_enable * 3;
          if (*(feat + mode_idx))
@@ -330,7 +324,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
 
       if (hw_rast_state->line_stipple_enable) {
          if (!screen->info.have_EXT_extended_dynamic_state3)
-            dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE_EXT;
+            dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE;
          rast_line_state.stippledLineEnable = VK_TRUE;
       }
 
@@ -542,24 +536,18 @@ zink_create_gfx_pipeline_output(struct zink_screen *screen, struct zink_gfx_pipe
       ms_state.sampleShadingEnable = VK_TRUE;
       ms_state.minSampleShading = MIN2((float)(state->rast_samples + 1) / (state->min_samples + 1), 1.0f);
    }
-   VkPipelineSampleLocationsStateCreateInfoEXT pslsci = {
-      VK_STRUCTURE_TYPE_PIPELINE_SAMPLE_LOCATIONS_STATE_CREATE_INFO_EXT,
-      NULL,
-      VK_TRUE,
-      .sampleLocationsInfo.sType = VK_STRUCTURE_TYPE_SAMPLE_LOCATIONS_INFO_EXT
-   };
 
    VkDynamicState dynamicStateEnables[30] = {
       VK_DYNAMIC_STATE_BLEND_CONSTANTS,
    };
    unsigned state_count = 1;
-   if (state->custom_sample_locations) {
-      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
-      ms_state.pNext = &pslsci;
-   }
    if (screen->info.have_EXT_color_write_enable)
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT;
 
+   if (screen->base.caps.programmable_sample_locations) {
+      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_EXT;
+      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_LOCATIONS_ENABLE_EXT;
+   }
    if (screen->have_full_ds3) {
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_SAMPLE_MASK_EXT;
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_RASTERIZATION_SAMPLES_EXT;
@@ -820,7 +808,7 @@ create_gfx_pipeline_library(struct zink_screen *screen, struct zink_shader_objec
    if (screen->info.dynamic_state3_feats.extendedDynamicState3LineStippleEnable)
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE_ENABLE_EXT;
    if (!screen->driver_workarounds.no_linestipple)
-      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE_EXT;
+      dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_LINE_STIPPLE;
    if (screen->info.dynamic_state3_feats.extendedDynamicState3RepresentativeFragmentTestEnable)
       dynamicStateEnables[state_count++] = VK_DYNAMIC_STATE_REPRESENTATIVE_FRAGMENT_TEST_ENABLE_NV;
    assert(state_count < ARRAY_SIZE(dynamicStateEnables));

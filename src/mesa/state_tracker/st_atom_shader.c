@@ -37,6 +37,7 @@
 
 
 #include "main/mtypes.h"
+#include "main/fog.h"
 #include "main/framebuffer.h"
 #include "main/state.h"
 #include "main/texobj.h"
@@ -45,7 +46,6 @@
 #include "program/program.h"
 
 #include "pipe/p_context.h"
-#include "pipe/p_shader_tokens.h"
 #include "cso_cache/cso_context.h"
 #include "util/u_debug.h"
 
@@ -54,6 +54,60 @@
 #include "st_program.h"
 #include "st_texture.h"
 #include "st_util.h"
+
+
+/**
+ * Does the current draw rasterize polygons (and so get polygon-stippled)?
+ *
+ * Polygon stipple only applies to polygon primitives, so points and lines --
+ * whether drawn directly, emitted by a geometry/tessellation shader, or the
+ * result of glPolygonMode(GL_POINT/GL_LINE) -- must not be stippled.  This
+ * mirrors what the draw module's pstipple stage (a tri-only stage) and native
+ * hardware do.
+ */
+static bool
+st_rasterizes_polygons(const struct st_context *st)
+{
+   const struct gl_context *ctx = st->ctx;
+   enum mesa_prim prim;
+
+   /* The rasterized primitive comes from the last primitive-producing stage. */
+   if (ctx->GeometryProgram._Current) {
+      prim = ctx->GeometryProgram._Current->info.gs.output_primitive;
+   } else if (ctx->TessEvalProgram._Current) {
+      const struct shader_info *info = &ctx->TessEvalProgram._Current->info;
+      if (info->tess.point_mode)
+         prim = MESA_PRIM_POINTS;
+      else if (info->tess._primitive_mode == TESS_PRIMITIVE_ISOLINES)
+         prim = MESA_PRIM_LINES;
+      else
+         prim = MESA_PRIM_TRIANGLES;
+   } else {
+      prim = st->state.stipple_input_prim;
+   }
+
+   if (u_reduced_prim(prim) != MESA_PRIM_TRIANGLES)
+      return false;
+
+   /* A polygon drawn as points or lines via glPolygonMode isn't stippled.
+    * Supporting differing front/back modes would require different shader
+    * lowering, and we don't have an example of a workload needing it.
+    */
+   return ctx->Polygon.FrontMode == GL_FILL;
+}
+
+
+/**
+ * Early atom (runs before the fragment shader atom): turn the input primitive
+ * into the reduced primitive the fragment shader sees, so st_update_fp() can
+ * pick the right emulated-polygon-stipple variant.  A no-op unless emulating.
+ */
+void
+st_update_stipple_emulate(struct st_context *st)
+{
+   if (st->emulate_polygon_stipple)
+      st->fp_stipple_polygon = st->ctx->Polygon.StippleFlag && st_rasterizes_polygons(st);
+}
 
 
 static unsigned
@@ -75,7 +129,7 @@ get_texture_index(struct gl_context *ctx, const unsigned unit)
 static void
 update_gl_clamp(struct st_context *st, struct gl_program *prog, uint32_t *gl_clamp)
 {
-   if (!st->emulate_gl_clamp)
+   if (st->screen->caps.gl_clamp)
       return;
 
    if (!st->ctx->Texture.NumSamplersWithClamp)
@@ -122,6 +176,8 @@ st_update_fp( struct st_context *st )
 
    void *shader;
 
+   st->fp_stipple_sampler = -1;
+
    if (st->shader_has_one_variant[MESA_SHADER_FRAGMENT] &&
        !fp->ati_fs && /* ATI_fragment_shader always has multiple variants */
        !fp->ExternalSamplersUsed && /* external samplers need variants */
@@ -133,18 +189,18 @@ st_update_fp( struct st_context *st )
       /* use memset, not an initializer to be sure all memory is zeroed */
       memset(&key, 0, sizeof(key));
 
-      key.st = st->has_shareable_shaders ? NULL : st;
+      key.st = st->screen->caps.shareable_shaders ? NULL : st;
 
-      key.lower_flatshade = st->lower_flatshade &&
+      key.lower_flatshade = !st->screen->caps.flatshade &&
                             st->ctx->Light.ShadeModel == GL_FLAT;
 
       /* _NEW_COLOR */
       key.lower_alpha_func = COMPARE_FUNC_ALWAYS;
-      if (st->lower_alpha_test && _mesa_is_alpha_test_enabled(st->ctx))
+      if (!st->screen->caps.alpha_test && _mesa_is_alpha_test_enabled(st->ctx))
          key.lower_alpha_func = st->ctx->Color.AlphaFunc;
 
       /* _NEW_LIGHT_STATE | _NEW_PROGRAM */
-      key.lower_two_sided_color = st->lower_two_sided_color &&
+      key.lower_two_sided_color = !st->screen->caps.two_sided_color &&
          _mesa_vertex_program_two_side_enabled(st->ctx);
 
       /* gl_driver_flags::NewFragClamp */
@@ -161,6 +217,12 @@ st_update_fp( struct st_context *st )
 
       if (fp->ati_fs) {
          key.fog = st->ctx->Fog._PackedEnabledMode;
+
+         /* When the fixed-function vertex program feeds the fog coordinate as
+          * signed eye-space Z, ATI_fragment_shader fog must take abs() of it
+          * per fragment (GL_EYE_PLANE_ABSOLUTE_NV).  See mesa #15407.
+          */
+         key.fog_coord_abs = _mesa_fog_coord_needs_deferred_abs(st->ctx);
 
          for (unsigned u = 0; u < MAX_NUM_FRAGMENT_REGISTERS_ATI; u++) {
             key.texture_index[u] = get_texture_index(st->ctx, u);
@@ -182,9 +244,25 @@ st_update_fp( struct st_context *st )
       key.external = st_get_external_sampler_key(st, fp);
       update_gl_clamp(st, st->ctx->FragmentProgram._Current, key.gl_clamp);
 
+
+      /* When the driver can't do polygon stipple itself, we lower it in the
+       * fragment shader, which needs a dedicated variant.  Only the primitives
+       * that rasterize as polygons are stippled; st->fp_stipple_polygon tracks
+       * that for the current draw (see st_draw.c).
+       */
+      key.lower_polygon_stipple = st->fp_stipple_polygon;
+
       simple_mtx_lock(&st->ctx->Shared->Mutex);
-      shader = st_get_fp_variant(st, fp, &key, false, NULL)->base.driver_shader;
+      struct st_fp_variant *fpv =
+         st_get_fp_variant(st, fp, &key, false, NULL);
       simple_mtx_unlock(&st->ctx->Shared->Mutex);
+
+      shader = fpv->base.driver_shader;
+
+      /* Remember where the emulated stipple texture/sampler must be bound (or not) so
+       * the texture and sampler atoms can append it for this draw.
+       */
+      st->fp_stipple_sampler = fpv->stipple_sampler;
    }
 
    _mesa_reference_program(st->ctx, &st->fp, fp);
@@ -219,7 +297,7 @@ st_update_vp( struct st_context *st )
 
       memset(&key, 0, sizeof(key));
 
-      key.st = st->has_shareable_shaders ? NULL : st;
+      key.st = st->screen->caps.shareable_shaders ? NULL : st;
 
       /* When this is true, we will add an extra input to the vertex
        * shader translation (for edgeflags), an extra output with
@@ -243,7 +321,7 @@ st_update_vp( struct st_context *st )
          if (st->lower_point_size)
             key.export_point_size = !st->ctx->VertexProgram.PointSizeEnabled && !st->ctx->PointSizeIsSet;
          /* _NEW_TRANSFORM */
-         if (st->lower_ucp && st_user_clip_planes_enabled(st->ctx))
+         if (!st->screen->caps.clip_planes && st_user_clip_planes_enabled(st->ctx))
             key.lower_ucp = st->ctx->Transform.ClipPlanesEnabled;
       }
 
@@ -280,7 +358,7 @@ st_update_common_program(struct st_context *st, struct gl_program *prog,
    /* use memset, not an initializer to be sure all memory is zeroed */
    memset(&key, 0, sizeof(key));
 
-   key.st = st->has_shareable_shaders ? NULL : st;
+   key.st = st->screen->caps.shareable_shaders ? NULL : st;
 
    if (pipe_shader == MESA_SHADER_GEOMETRY ||
        pipe_shader == MESA_SHADER_TESS_EVAL) {
@@ -292,7 +370,7 @@ st_update_common_program(struct st_context *st, struct gl_program *prog,
                           VARYING_SLOT_BFC0 |
                           VARYING_SLOT_BFC1));
 
-      if (st->lower_ucp && st_user_clip_planes_enabled(st->ctx) &&
+      if (!st->screen->caps.clip_planes && st_user_clip_planes_enabled(st->ctx) &&
           (pipe_shader == MESA_SHADER_GEOMETRY ||
              !st->ctx->GeometryProgram._Current))
          key.lower_ucp = st->ctx->Transform.ClipPlanesEnabled;

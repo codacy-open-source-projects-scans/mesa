@@ -149,7 +149,7 @@ allow_rgb_colormask_promotion(const struct st_context *st,
    /* We can support different per-RT promotion decisions if we driver
     * supports independent blending (but we must actually enable it).
     */
-   if (st->has_indep_blend_enable && !same) {
+   if (st->screen->caps.indep_blend_enable && !same) {
       *need_independent_blend = true;
       return true;
    }
@@ -186,7 +186,7 @@ blend_per_rt(const struct st_context *st, unsigned num_cb)
       /* Overriding requires independent blend functions (not just enables),
        * requiring drivers to expose pipe_caps.indep_blend_func.
        */
-      assert(st->has_indep_blend_func);
+      assert(st->screen->caps.indep_blend_func);
 
       /* If some of the buffers are RGB or emulated L/I, we may need to override blend
        * factors that reference destination-alpha to constants.  We may
@@ -236,6 +236,11 @@ st_update_blend( struct st_context *st )
 
    blend->max_rt = MAX2(1, num_cb) - 1;
 
+   /* Whether we're rendering to a YUV target (GL_EXT_YUV_target) is computed
+    * when the framebuffer changes; see st_update_framebuffer_state().
+    */
+   blend->is_yuv = st->state.fb_is_yuv;
+
    bool need_independent_blend = num_cb > 1 &&
       (blend_per_rt(st, num_cb) || colormask_per_rt(ctx, num_cb));
 
@@ -272,7 +277,8 @@ st_update_blend( struct st_context *st )
       blend->logicop_func = ctx->Color._LogicOp;
    }
    else if (ctx->Color.BlendEnabled &&
-            ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE) {
+            ctx->Color._AdvancedBlendMode != PIPE_ADVANCED_BLEND_NONE &&
+            _mesa_advanced_blend_mode_is_native(ctx, ctx->Color._AdvancedBlendMode)) {
       blend->advanced_blend_func = ctx->Color._AdvancedBlendMode;
    }
    else if (ctx->Color.BlendEnabled &&
@@ -333,7 +339,7 @@ st_update_blend( struct st_context *st )
       /* no blending / logicop */
    }
 
-   if (st->can_dither)
+   if (st->screen->caps.dithering)
       blend->dither = ctx->Color.DitherFlag;
 
    if (_mesa_is_multisample_enabled(ctx) &&

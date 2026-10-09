@@ -40,6 +40,10 @@
 #include "virgl_context.h"
 #include "virgl_encode.h"
 
+#if !defined(_WIN32)
+#include "drm-uapi/drm_fourcc.h"
+#endif
+
 int virgl_debug = 0;
 const struct debug_named_value virgl_debug_options[] = {
    { "verbose",         VIRGL_DEBUG_VERBOSE,                 NULL },
@@ -126,32 +130,24 @@ virgl_get_video_param(struct pipe_screen *screen,
 
    /*
     * Since there are calls like this:
-    *   pot_buffers = !pipe->screen->get_video_param
+    *   pipe->screen->get_video_param
     *   (
     *      pipe->screen,
     *      PIPE_VIDEO_PROFILE_UNKNOWN,
     *      PIPE_VIDEO_ENTRYPOINT_UNKNOWN,
-    *      PIPE_VIDEO_CAP_NPOT_TEXTURES
+    *      PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE
     *   );
     * All parameters need to check the vcaps.
     */
    switch (param) {
       case PIPE_VIDEO_CAP_SUPPORTED:
          return vcaps != NULL;
-      case PIPE_VIDEO_CAP_NPOT_TEXTURES:
-         return vcaps ? vcaps->npot_texture : true;
       case PIPE_VIDEO_CAP_MAX_WIDTH:
          return vcaps ? vcaps->max_width : 0;
       case PIPE_VIDEO_CAP_MAX_HEIGHT:
          return vcaps ? vcaps->max_height : 0;
-      case PIPE_VIDEO_CAP_PREFERRED_FORMAT:
-         return vcaps ? virgl_to_pipe_format(vcaps->prefered_format) : PIPE_FORMAT_NV12;
       case PIPE_VIDEO_CAP_SUPPORTS_PROGRESSIVE:
          return vcaps ? vcaps->supports_progressive : true;
-      case PIPE_VIDEO_CAP_MAX_LEVEL:
-         return vcaps ? vcaps->max_level : 0;
-      case PIPE_VIDEO_CAP_STACKED_FRAMES:
-         return vcaps ? vcaps->stacked_frames : 0;
       case PIPE_VIDEO_CAP_MAX_MACROBLOCKS:
          return vcaps ? vcaps->max_macroblocks : 0;
       case PIPE_VIDEO_CAP_MAX_TEMPORAL_LAYERS:
@@ -309,6 +305,7 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->max_texture_cube_levels = vscreen->caps.caps.v2.max_texture_cube_size ?
       1 + util_logbase2(vscreen->caps.caps.v2.max_texture_cube_size) :
       13; /* 4K x 4K */
+   caps->polygon_stipple = true;
    caps->blend_equation_separate = true;
    caps->indep_blend_enable = vscreen->caps.caps.v1.bset.indep_blend_enable;
    caps->indep_blend_func = vscreen->caps.caps.v1.bset.indep_blend_func;
@@ -381,7 +378,6 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->max_viewports = vscreen->caps.caps.v1.max_viewports;
    caps->max_texel_buffer_elements = vscreen->caps.caps.v1.max_tbo_size;
    caps->texture_border_color_quirk = 0;
-   caps->endianness = PIPE_ENDIAN_LITTLE;
    caps->query_pipeline_statistics =
       !!(vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_PIPELINE_STATISTICS_QUERY);
    caps->mixed_framebuffer_sizes = true;
@@ -427,7 +423,8 @@ virgl_init_screen_caps(struct virgl_screen *vscreen)
    caps->fbfetch =
       (vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_FBFETCH) ? 1 : 0;
    caps->blend_equation_advanced =
-      vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION;
+      (vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_BLEND_EQUATION) ?
+      PIPE_ADVANCED_BLEND_KHR_MODES_MASK : 0;
    caps->shader_clock = vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_SHADER_CLOCK;
    caps->shader_array_components =
       vscreen->caps.caps.v2.capability_bits & VIRGL_CAP_TGSI_COMPONENTS;
@@ -981,6 +978,99 @@ virgl_screen_get_fd(struct pipe_screen *pscreen)
       return -1;
 }
 
+#if !defined(_WIN32)
+static void
+virgl_screen_query_dmabuf_modifiers(struct pipe_screen *pscreen,
+                                    enum pipe_format format, int max,
+                                    uint64_t *modifiers,
+                                    unsigned int *external_only,
+                                    int *count)
+{
+   struct virgl_screen *vscreen = virgl_screen(pscreen);
+   uint32_t vformat = pipe_to_virgl_format(format);
+   uint64_t mod = DRM_FORMAT_MOD_LINEAR;
+
+   virgl_screen_sync_format_modifier(vscreen);
+
+   for (int i = 0; i < vscreen->gbm.list.num; i++) {
+      if (vscreen->gbm.list.formats[i].virgl_format == vformat) {
+         mod = vscreen->gbm.list.formats[i].modifier;
+         break;
+      }
+   }
+
+   if (max) {
+      *count = MIN2(max, 2);
+
+      for (int i = 0; i < *count; i++) {
+         modifiers[i] = (i > 0) ? DRM_FORMAT_MOD_LINEAR : mod;
+
+         if (external_only)
+               external_only[i] = 0;
+      }
+   } else {
+      *count = (mod != DRM_FORMAT_MOD_LINEAR) ? 2 : 1;
+   }
+}
+#endif
+
+static void
+virgl_init_screen_format_modifier_async(struct virgl_screen *vscreen)
+{
+   struct virgl_resource *res;
+   struct virgl_context *vctx;
+   struct pipe_context *ctx;
+
+   simple_mtx_init(&vscreen->gbm.lock, mtx_plain);
+
+   if (!(vscreen->caps.caps.v2.capability_bits_v2 & VIRGL_CAP_V2_QUERY_FORMAT_MODIFIER))
+      return;
+
+   res = (struct virgl_resource *)
+      pipe_buffer_create(&vscreen->base, PIPE_BIND_CUSTOM, PIPE_USAGE_STAGING,
+                         sizeof(vscreen->gbm.list));
+
+   if (!res)
+      return;
+
+   ctx = vscreen->base.context_create(&vscreen->base, NULL, 0);
+   vctx = virgl_context(ctx);
+
+   virgl_encoder_query_gbm_format_modifier(vctx, res);
+
+   ctx->flush(ctx, NULL, 0);
+
+   vscreen->gbm.res = res;
+   vscreen->gbm.ctx = ctx;
+}
+
+void virgl_screen_sync_format_modifier(struct virgl_screen *vscreen)
+{
+   simple_mtx_lock(&vscreen->gbm.lock);
+
+   if (!vscreen->gbm.ctx) {
+      simple_mtx_unlock(&vscreen->gbm.lock);
+      return;
+   }
+
+   vscreen->vws->resource_wait(vscreen->vws, vscreen->gbm.res->hw_res);
+
+   pipe_buffer_read(vscreen->gbm.ctx, &vscreen->gbm.res->b,
+                    0, sizeof(vscreen->gbm.list), &vscreen->gbm.list);
+
+   vscreen->gbm.ctx->destroy(vscreen->gbm.ctx);
+   pipe_resource_reference((struct pipe_resource **)&vscreen->gbm.res, NULL);
+
+   if (vscreen->gbm.list.num > ARRAY_SIZE(vscreen->gbm.list.formats)) {
+      mesa_loge("invalid number of host gbm formats\n");
+      vscreen->gbm.list.num = 0;
+   }
+
+   vscreen->gbm.ctx = NULL;
+
+   simple_mtx_unlock(&vscreen->gbm.lock);
+}
+
 struct pipe_screen *
 virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *config)
 {
@@ -998,8 +1088,8 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    virgl_debug = debug_get_option_virgl_debug();
 
    if (config && config->options) {
-      driParseConfigFiles(config->options, config->options_info, 0, "virtio_gpu",
-                          NULL, NULL, NULL, 0, NULL, 0);
+      driParseConfigFiles(config->options, config->options_info,
+                          &(driConfigFileParseParams) { .driverName = "virtio_gpu" });
 
       screen->tweak_gles_emulate_bgra =
             driQueryOptionb(config->options, VIRGL_GLES_EMULATE_BGRA);
@@ -1039,6 +1129,9 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
    screen->base.get_disk_shader_cache = virgl_get_disk_shader_cache;
    screen->base.is_dmabuf_modifier_supported = virgl_is_dmabuf_modifier_supported;
    screen->base.get_dmabuf_modifier_planes = virgl_get_dmabuf_modifier_planes;
+#if !defined(_WIN32)
+   screen->base.query_dmabuf_modifiers = virgl_screen_query_dmabuf_modifiers;
+#endif
 
    virgl_init_screen_resource_functions(&screen->base);
 
@@ -1064,10 +1157,11 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
        */
       screen->compiler_options.lower_ffloor = true;
       screen->compiler_options.lower_fneg = true;
+      /* We implement TGSI's MAD as fmul + fadd in virglrenderer */
+      screen->compiler_options.float_mul_add64 = nir_float_muladd_support_has_fmad |
+         nir_float_muladd_support_fuse;
    }
    screen->compiler_options.no_integers = screen->caps.caps.v1.glsl_level < 130;
-   screen->compiler_options.lower_ffma32 = true;
-   screen->compiler_options.fuse_ffma32 = false;
    screen->compiler_options.lower_image_offset_to_range_base = true;
    screen->compiler_options.lower_atomic_offset_to_range_base = true;
    screen->compiler_options.support_indirect_outputs = BITFIELD_BIT(MESA_SHADER_TESS_CTRL);
@@ -1080,6 +1174,7 @@ virgl_create_screen(struct virgl_winsys *vws, const struct pipe_screen_config *c
 
    slab_create_parent(&screen->transfer_pool, sizeof(struct virgl_transfer), 16);
 
+   virgl_init_screen_format_modifier_async(screen);
    virgl_disk_cache_create(screen);
    return &screen->base;
 }

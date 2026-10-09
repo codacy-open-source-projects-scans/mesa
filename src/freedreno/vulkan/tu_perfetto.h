@@ -14,6 +14,9 @@
 #include "c11/threads.h"
 #include "vulkan/vulkan_core.h"
 
+#include "tu_common.h"
+#include "tu_tile_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -41,6 +44,7 @@ enum tu_queue_id {
    ANNOTATIONS_QUEUE_ID,
    BR_HW_QUEUE_ID,
    BV_HW_QUEUE_ID,
+   PERF_WARNINGS_QUEUE_ID,
 
    TU_QUEUE_ID_COUNT,
 };
@@ -80,6 +84,11 @@ enum tu_stage_id {
    UPDATE_BUFFER_STAGE_ID,
    SLOW_CLEAR_LRZ_STAGE_ID,
    DISABLE_LRZ_STAGE_ID,
+   WARNING_SLOW_CLEAR_LRZ_STAGE_ID,
+   WARNING_DEPTH_IMAGE_NO_LRZ_STAGE_ID,
+   WARNING_LRZ_DISABLED_STAGE_ID,
+   WARNING_LRZ_WRITE_DISABLED_STAGE_ID,
+   WARNING_FDM_FORCE_DISABLED_STAGE_ID,
 
    TU_STAGE_ID_COUNT,
 };
@@ -111,6 +120,7 @@ struct tu_perfetto_clocks
 struct tu_perfetto_state {
    struct tu_perfetto_stage_stack annotations_stack;
    struct tu_perfetto_stage_stack render_stack;
+   struct tu_perfetto_stage_stack sticky_warnings_stack;
 
    uint64_t context_iid;
    uint64_t queue_iids[TU_QUEUE_ID_COUNT];
@@ -160,7 +170,6 @@ void
 tu_perfetto_refresh_debug_utils_object_name(
    struct tu_device *dev,
    const struct vk_object_base *object);
-
 #ifdef __cplusplus
 }
 #endif

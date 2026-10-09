@@ -18,6 +18,39 @@ The easiest way to track the feature set of RADV (and other Vulkan drivers in Me
 take a look at the
 `Mesa matrix <https://mesamatrix.net/#Vulkan>`__.
 
+Contributing to RADV
+~~~~~~~~~~~~~~~~~~~~
+
+RADV is part of Mesa, so we recommend reading Mesa's
+guidelines for :doc:`submitting patches <../submittingpatches>`.
+
+Additionally, the RADV team agreed on the following workflow for contributions:
+
+* Do NOT merge any MRs without at least one approval from someone familiar with
+  the code.
+* There are different types of approvals:
+
+  - Reviewed-by tag
+
+  - MR approval button
+
+  - Acked-by tag
+
+* After receiving the first approval, please wait at least 24 hours (excluding
+  weekends) before merging the MR. This is to make sure that anyone who may be
+  interested had opportunity and time to look at the MR (eg. timezone
+  differences). The wait is not required in the following cases:
+
+  - The MR is trivial (eg. very simple cleanups, typos, CI flakes updates)
+
+  - The MR has been approved by two or more developers
+
+* Even if your MR has been approved and is ready to be merged, please make sure
+  to resolve any open conversations about potentially controversial commits.
+
+In case your MR needs to be merged immediately (should be rarely needed), feel
+free to ping the developers to get more approvals.
+
 Supported hardware
 ~~~~~~~~~~~~~~~~~~
 
@@ -43,10 +76,18 @@ refreshes of the same chip, because they are functionally exactly the same.
 For more information about which GPU chip name corresponds to which GPU product,
 `see the src/amd/common/amd_family.h file <https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/amd/common/amd_family.h>`__.
 
-Note that for GFX6-7 (GCN 1-2) GPUs, the ``amdgpu`` kernel driver is currently not the default in Linux
-(by default the old ``radeon`` KMD is used for these old GPUs, which is not supported by RADV),
-so users need to manually enable ``amdgpu`` by adding the following to the kernel command line:
-``radeon.si_support=0 radeon.cik_support=0 amdgpu.si_support=1 amdgpu.cik_support=1``
+Notes about GFX6-7 (GCN 1-2) GPUs:
+
+* RADV should work out of the box on GFX6-7 dGPUs as of Linux 6.19
+  as the default kernel driver was changed to amdgpu.
+* RADV should work out of the box on GFX7 APUs as of Linux 7.1
+  as the default kernel driver was changed to amdgpu.
+* RADV is not supported by the older ``radeon`` kernel driver,
+  so it won't work out of the box on older kernels
+  where the default driver is ``radeon``.
+  On these kernel versions, users need to switch to ``amdgpu`` manually
+  by adding the following to the kernel command line:
+  ``radeon.si_support=0 radeon.cik_support=0 amdgpu.si_support=1 amdgpu.cik_support=1``
 
 Basics
 ~~~~~~
@@ -186,12 +227,23 @@ For a list of environment variables to debug RADV, please see
 
 Instructions for debugging GPU hangs can be found :ref:`here <radv-debug-hang>`.
 
+DRI Configuration Options
+-------------------------
+
+RADV supports per-application option overrides via ``~/.drirc``, ``/etc/drirc``,
+or a file in ``/etc/drirc.d/``. Options can also be set like environment
+variables.
+
+See the `driconf documentation <https://dri.freedesktop.org/wiki/DriConf>`__ for the file format.
+
+.. include:: ../_generated/radv_drirc.rst
+
 Hardware Documentation
 ----------------------
 
 You can find a list of documentation for the various generations of
 AMD hardware on the `X.Org wiki
-<https://www.x.org/wiki/RadeonFeature/#documentation>`__.
+<https://www.x.org/RadeonFeature/#documentation>`__.
 
 Additional community-written documentation is also available in Mesa:
 

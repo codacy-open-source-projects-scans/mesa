@@ -503,6 +503,16 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
          transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
    }
 
+   /* Some games keep a large buffer, where they map the entire buffer with the
+    * GL_MAP_INVALIDATE_BUFFER_BIT or GL_MAP_INVALIDATE_RANGE_BIT (but specify
+    * the range as the whole buffer), and only write to a portion of the buffer
+    * each time - so each subsequent map/write will discard the data that was
+    * previously written. This option tells the driver to ignore
+    * invalidating the entire buffer and keep the existing data in the buffer.
+    */
+   if (unlikely(ctx->st_opts->ignore_map_invalidate_buffer))
+      transfer_flags &= ~PIPE_MAP_DISCARD_WHOLE_RESOURCE;
+
    if (ctx->Const.ForceMapBufferSynchronized)
       transfer_flags &= ~PIPE_MAP_UNSYNCHRONIZED;
 
@@ -512,6 +522,18 @@ _mesa_bufferobj_map_range(struct gl_context *ctx,
                                                         transfer_flags,
                                                         &obj->transfer[index]);
    if (obj->Mappings[index].Pointer) {
+      /* Some games (e.g. Little Inferno) only partially write the mapped
+       * range and rely on the untouched bytes reading back as zero when
+       * drawn, which happens to be true with drivers that map buffer
+       * storage directly (llvmpipe), but not with staging-buffer uploads.
+       */
+      if (unlikely(ctx->st_opts->zero_invalidated_buffers) &&
+          index == MAP_USER &&
+          transfer_flags & (PIPE_MAP_DISCARD_RANGE |
+                            PIPE_MAP_DISCARD_WHOLE_RESOURCE) &&
+          !(transfer_flags & PIPE_MAP_READ))
+         memset(obj->Mappings[index].Pointer, 0, length);
+
       obj->Mappings[index].Offset = offset;
       obj->Mappings[index].Length = length;
       obj->Mappings[index].AccessFlags = access;
@@ -1488,8 +1510,22 @@ unbind(struct gl_context *ctx,
        struct gl_buffer_object *obj)
 {
    if (vao->BufferBinding[index].BufferObj == obj) {
+      const bool core_profile = _mesa_is_desktop_gl_core(ctx);
+
+      /* Core profiles don't support client arrays.  Clear the pointer state
+       * so that a buffer offset isn't interpreted as a user pointer if the
+       * array remains enabled after the buffer is deleted.
+       */
+      if (core_profile) {
+         GLbitfield mask = vao->BufferBinding[index]._BoundArrays;
+
+         while (mask)
+            vao->VertexAttrib[u_bit_scan(&mask)].Ptr = NULL;
+      }
+
       _mesa_bind_vertex_buffer(ctx, vao, index, NULL,
-                               vao->BufferBinding[index].Offset,
+                               core_profile ? 0 :
+                                  vao->BufferBinding[index].Offset,
                                vao->BufferBinding[index].Stride, true, false);
    }
 }
@@ -1526,11 +1562,6 @@ void GLAPIENTRY
 _mesa_BindBuffer(GLenum target, GLuint buffer)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API) {
-      _mesa_debug(ctx, "glBindBuffer(%s, %u)\n",
-                  _mesa_enum_to_string(target), buffer);
-   }
 
    struct gl_buffer_object **bindTarget = get_buffer_target(ctx, target, false);
    if (!bindTarget) {
@@ -1995,12 +2026,8 @@ create_buffers(struct gl_context *ctx, GLsizei n, GLuint *buffers, bool dsa)
 static void
 create_buffers_err(struct gl_context *ctx, GLsizei n, GLuint *buffers, bool dsa)
 {
-   const char *func = dsa ? "glCreateBuffers" : "glGenBuffers";
-
-   if (MESA_VERBOSE & VERBOSE_API)
-      _mesa_debug(ctx, "%s(%d)\n", func, n);
-
    if (n < 0) {
+      const char *func = dsa ? "glCreateBuffers" : "glGenBuffers";
       _mesa_error(ctx, GL_INVALID_VALUE, "%s(n %d < 0)", func, n);
       return;
    }
@@ -2336,14 +2363,6 @@ buffer_data(struct gl_context *ctx, struct gl_buffer_object *bufObj,
             const char *func, bool no_error)
 {
    bool valid_usage;
-
-   if (MESA_VERBOSE & VERBOSE_API) {
-      _mesa_debug(ctx, "%s(%s, %ld, %p, %s)\n",
-                  func,
-                  _mesa_enum_to_string(target),
-                  (long int) size, data,
-                  _mesa_enum_to_string(usage));
-   }
 
    if (!no_error) {
       if (size < 0) {
@@ -4877,12 +4896,6 @@ bind_buffer_range(GLenum target, GLuint index, GLuint buffer, GLintptr offset,
    GET_CURRENT_CONTEXT(ctx);
    struct gl_buffer_object *bufObj;
 
-   if (MESA_VERBOSE & VERBOSE_API) {
-      _mesa_debug(ctx, "glBindBufferRange(%s, %u, %u, %lu, %lu)\n",
-                  _mesa_enum_to_string(target), index, buffer,
-                  (unsigned long) offset, (unsigned long) size);
-   }
-
    if (buffer == 0) {
       bufObj = NULL;
    } else {
@@ -4970,11 +4983,6 @@ _mesa_BindBufferBase(GLenum target, GLuint index, GLuint buffer)
    GET_CURRENT_CONTEXT(ctx);
    struct gl_buffer_object *bufObj;
 
-   if (MESA_VERBOSE & VERBOSE_API) {
-      _mesa_debug(ctx, "glBindBufferBase(%s, %u, %u)\n",
-                  _mesa_enum_to_string(target), index, buffer);
-   }
-
    if (buffer == 0) {
       bufObj = NULL;
    } else {
@@ -5038,12 +5046,6 @@ _mesa_BindBuffersRange(GLenum target, GLuint first, GLsizei count,
 {
    GET_CURRENT_CONTEXT(ctx);
 
-   if (MESA_VERBOSE & VERBOSE_API) {
-      _mesa_debug(ctx, "glBindBuffersRange(%s, %u, %d, %p, %p, %p)\n",
-                  _mesa_enum_to_string(target), first, count,
-                  buffers, offsets, sizes);
-   }
-
    switch (target) {
    case GL_TRANSFORM_FEEDBACK_BUFFER:
       bind_xfb_buffers(ctx, first, count, buffers, true, offsets, sizes,
@@ -5073,11 +5075,6 @@ _mesa_BindBuffersBase(GLenum target, GLuint first, GLsizei count,
                       const GLuint *buffers)
 {
    GET_CURRENT_CONTEXT(ctx);
-
-   if (MESA_VERBOSE & VERBOSE_API) {
-      _mesa_debug(ctx, "glBindBuffersBase(%s, %u, %d, %p)\n",
-                  _mesa_enum_to_string(target), first, count, buffers);
-   }
 
    switch (target) {
    case GL_TRANSFORM_FEEDBACK_BUFFER:

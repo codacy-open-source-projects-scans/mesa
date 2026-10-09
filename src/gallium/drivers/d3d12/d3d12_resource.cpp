@@ -106,12 +106,13 @@ resource_is_busy(struct d3d12_context *ctx,
    if (d3d12_batch_has_references(d3d12_current_batch(ctx), res->bo, want_to_write))
       return true;
 
-   bool busy = false;
-   d3d12_foreach_submitted_batch(ctx, batch) {
-      if (!d3d12_reset_batch(ctx, batch, 0))
-         busy |= d3d12_batch_has_references(batch, res->bo, want_to_write);
-   }
-   return busy;
+   d3d12_foreach_submitted_batch(ctx, batch)
+      d3d12_reset_batch(ctx, batch, 0);
+
+   uint64_t offset;
+   struct d3d12_bo *base = d3d12_bo_get_base(res->bo, &offset);
+   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
+   return base->last_used_fence > screen->fence->GetCompletedValue();
 }
 
 void
@@ -121,12 +122,19 @@ d3d12_resource_wait_idle(struct d3d12_context *ctx,
 {
    if (d3d12_batch_has_references(d3d12_current_batch(ctx), res->bo, want_to_write)) {
       d3d12_flush_cmdlist_and_wait(ctx);
-   } else {
-      d3d12_foreach_submitted_batch(ctx, batch) {
-         if (d3d12_batch_has_references(batch, res->bo, want_to_write))
-            d3d12_reset_batch(ctx, batch, OS_TIMEOUT_INFINITE);
-      }
+      return;
    }
+
+   uint64_t offset;
+   struct d3d12_bo *base = d3d12_bo_get_base(res->bo, &offset);
+   struct d3d12_screen *screen = d3d12_screen(ctx->base.screen);
+   uint64_t target = base->last_used_fence;
+   if (target > screen->fence->GetCompletedValue())
+      screen->fence->SetEventOnCompletion(target, nullptr);
+
+   d3d12_foreach_submitted_batch(ctx, batch)
+      d3d12_reset_batch(ctx, batch, 0);
+   d3d12_screen_reclaim_completed(screen);
 }
 
 void
@@ -313,6 +321,7 @@ init_texture(struct d3d12_screen *screen,
 
    HRESULT hres = E_FAIL;
    enum d3d12_residency_status init_residency;
+   do {
 #ifndef _GAMING_XBOX
 
    if (heap && screen->max_feature_level == D3D_FEATURE_LEVEL_1_0_GENERIC) {
@@ -400,6 +409,7 @@ init_texture(struct d3d12_screen *screen,
                                                      IID_PPV_ARGS(&d3d12_res));
       }
    }
+   } while (hres == E_OUTOFMEMORY && d3d12_screen_reclaim_one(screen));
 
    if (FAILED(hres))
       return false;
@@ -538,6 +548,30 @@ d3d12_resource_create(struct pipe_screen *pscreen,
    return d3d12_resource_create_or_place(d3d12_screen(pscreen), res, templ, nullptr, 0);
 }
 
+/* A staging buffer backed by a CPU-visible readback heap can be mapped directly
+ * instead of going through a staging copy. Resources allocated with the properties
+ * returned by GetCustomHeapProperties(D3D12_HEAP_TYPE_READBACK) report their heap
+ * as CUSTOM with CPUPageProperty WRITE_BACK and MemoryPoolPreference L0, so accept
+ * both ways.
+ */
+static bool
+d3d12_resource_can_import_as_staging(const struct pipe_resource *templ, 
+                                     ID3D12Resource *resource)
+{
+   if (!templ || templ->usage != PIPE_USAGE_STAGING)
+      return false;
+
+   D3D12_HEAP_PROPERTIES heap_props = {};
+   D3D12_HEAP_FLAGS heap_flags = D3D12_HEAP_FLAG_NONE;
+   if (FAILED(resource->GetHeapProperties(&heap_props, &heap_flags)))
+      return false;
+
+   return heap_props.Type == D3D12_HEAP_TYPE_READBACK ||
+          (heap_props.Type == D3D12_HEAP_TYPE_CUSTOM &&
+           heap_props.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_WRITE_BACK &&
+           heap_props.MemoryPoolPreference == D3D12_MEMORY_POOL_L0);
+}
+
 static struct pipe_resource *
 d3d12_resource_from_handle(struct pipe_screen *pscreen,
                           const struct pipe_resource *templ,
@@ -580,8 +614,11 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
                       " match d3d12 device (%p) instance from this pipe_screen."
                       " Attempting to re-import via NT Handle...\n", screen_device.Get(), res_device.Get());
 
+         ComPtr<ID3D12Device> res_d3d12_device;
+         res_device.As(&res_d3d12_device);
+
          handle->type = WINSYS_HANDLE_TYPE_FD;
-         HRESULT hr = screen->dev->CreateSharedHandle(((ID3D12DeviceChild *)handle->com_obj),
+         HRESULT hr = res_d3d12_device->CreateSharedHandle(((ID3D12DeviceChild *)handle->com_obj),
                nullptr,
                GENERIC_ALL,
                nullptr,
@@ -699,7 +736,8 @@ d3d12_resource_from_handle(struct pipe_screen *pscreen,
    }
    res->base.b.nr_samples = static_cast<uint8_t>(incoming_res_desc.SampleDesc.Count);
    res->base.b.last_level = static_cast<uint8_t>(incoming_res_desc.MipLevels - 1);
-   res->base.b.usage = PIPE_USAGE_DEFAULT;
+   res->base.b.usage = d3d12_resource_can_import_as_staging(templ, d3d12_res) ?
+      PIPE_USAGE_STAGING : PIPE_USAGE_DEFAULT;
    res->base.b.bind |= PIPE_BIND_SHARED;
    if (incoming_res_desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
       res->base.b.bind |= PIPE_BIND_RENDER_TARGET | PIPE_BIND_BLENDABLE | PIPE_BIND_DISPLAY_TARGET;

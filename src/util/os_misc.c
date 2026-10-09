@@ -32,7 +32,9 @@
 #include "os_file.h"
 #include "ralloc.h"
 #include "simple_mtx.h"
+#include "u_call_once.h"
 #include "u_debug.h"
+#include "u_math.h"
 
 #include <stdarg.h>
 
@@ -56,7 +58,7 @@
 #if DETECT_OS_ANDROID
 #  define LOG_TAG "MESA"
 #  include <unistd.h>
-#  include <log/log.h>
+#  include <android/log.h>
 #  include <sys/system_properties.h>
 #elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
 #  include <unistd.h>
@@ -66,7 +68,9 @@
 #elif DETECT_OS_APPLE || DETECT_OS_BSD
 #  include <sys/sysctl.h>
 #  if DETECT_OS_APPLE
+#    include <sys/mman.h>
 #    include <mach/mach_host.h>
+#    include <mach/mach_init.h>
 #    include <mach/vm_param.h>
 #    include <mach/vm_statistics.h>
 #   endif
@@ -132,7 +136,7 @@ os_log_message(const char *message)
    fputs(message, fout);
    fflush(fout);
 #  if DETECT_OS_ANDROID
-   LOG_PRI(ANDROID_LOG_ERROR, LOG_TAG, "%s", message);
+   __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, message);
 #  endif
 #endif
 }
@@ -190,7 +194,15 @@ os_get_android_option(const char *name)
    }
 
    /* prefixes to search sorted by preference */
-   const char *prefices[] = { "debug.", "vendor.", "" };
+   const char *prefices[] =
+   {
+      "debug.",
+      "vendor.",
+#if ANDROID_API_LEVEL < 33
+      /* Before Android T, non-prefixed sysprops were allowed */
+      "",
+#endif
+   };
    char full_key[PROP_NAME_MAX];
    int len = 0;
    for (int i = 0; i < ARRAY_SIZE(prefices); i++) {
@@ -355,7 +367,7 @@ os_set_option(const char *name, const char *value, bool override)
 bool
 os_get_total_physical_memory(uint64_t *size)
 {
-#if HAVE_SYSCONF
+#if HAVE_SYSCONF && HAVE_SC_PHYS_PAGES
    const long phys_pages = sysconf(_SC_PHYS_PAGES);
    const long page_size = sysconf(_SC_PAGESIZE);
 
@@ -506,5 +518,48 @@ os_get_page_size(uint64_t *size)
 #else
 #error unexpected platform in os_sysinfo.c
    return false;
+#endif
+}
+
+#if DETECT_OS_APPLE
+
+static bool jit_allowed;
+
+/**
+ * On macOS, a process that has library validation enabled but lacks the
+ * com.apple.security.cs.allow-jit entitlement is not permitted to create
+ * writable+executable mappings.  There is no API to query that policy, so
+ * probe it by attempting the MAP_JIT mapping that any JIT would need.
+ */
+static void
+os_probe_jit_allowed(void)
+{
+   uint64_t page_size;
+
+   if (!os_get_page_size(&page_size))
+      return;
+
+   void *addr = mmap(NULL, page_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                     MAP_ANONYMOUS | MAP_PRIVATE | MAP_JIT, -1, 0);
+   if (addr == MAP_FAILED)
+      return;
+
+   munmap(addr, page_size);
+   jit_allowed = true;
+}
+
+#endif /* DETECT_OS_APPLE */
+
+bool
+os_jit_allowed(void)
+{
+#if DETECT_OS_APPLE
+   static util_once_flag once = UTIL_ONCE_FLAG_INIT;
+
+   util_call_once(&once, os_probe_jit_allowed);
+
+   return jit_allowed;
+#else
+   return true;
 #endif
 }

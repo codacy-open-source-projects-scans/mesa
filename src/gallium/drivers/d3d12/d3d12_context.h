@@ -184,6 +184,7 @@ struct d3d12_context {
    ID3D12GraphicsCommandList8 *cmdlist8;
    ID3D12GraphicsCommandList *state_fixup_cmdlist;
    struct hash_table_u64 *bo_state_table;
+   struct set *local_state_bos;
    struct blitter_context *blitter;
    uint flags;
    bool queries_disabled;
@@ -241,14 +242,6 @@ struct d3d12_context {
 
    dxil_texture_swizzle_state tex_swizzle_state[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
    enum compare_func tex_compare_func[MESA_SHADER_STAGES][PIPE_MAX_SHADER_SAMPLER_VIEWS];
-
-   struct {
-      bool enabled;
-      uint32_t pattern[32];
-      struct pipe_resource *texture;
-      struct pipe_sampler_view *sampler_view;
-      struct d3d12_sampler_state *sampler_cso;
-   } pstipple;
 
    struct pipe_stream_output_target *so_targets[PIPE_MAX_SO_BUFFERS];
    D3D12_STREAM_OUTPUT_BUFFER_VIEW so_buffer_views[PIPE_MAX_SO_BUFFERS];
@@ -414,9 +407,6 @@ d3d12_rebind_buffer(struct d3d12_context *ctx, struct d3d12_resource *res);
 
 void
 d3d12_init_null_sampler(struct d3d12_context *ctx);
-
-bool
-d3d12_init_polygon_stipple(struct pipe_context *pctx);
 
 void
 d3d12_init_graphics_context_functions(struct d3d12_context *ctx);

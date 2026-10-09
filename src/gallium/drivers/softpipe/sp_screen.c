@@ -76,8 +76,12 @@ softpipe_get_name(struct pipe_screen *screen)
 
 static const nir_shader_compiler_options sp_compiler_options = {
    .fdot_replicates = true,
-   .fuse_ffma32 = true,
-   .fuse_ffma64 = true,
+   .float_mul_add32 =
+      nir_float_muladd_support_has_fmad |
+      nir_float_muladd_support_fuse,
+   .float_mul_add64 =
+      nir_float_muladd_support_has_fmad |
+      nir_float_muladd_support_fuse,
    .lower_extract_byte = true,
    .lower_extract_word = true,
    .lower_insert_byte = true,
@@ -329,6 +333,7 @@ softpipe_init_screen_caps(struct softpipe_screen *sp_screen)
    caps->min_texture_gather_offset = -32;
    caps->max_texture_gather_offset = 31;
    caps->draw_indirect = true;
+   caps->multi_draw_indirect = true;
    caps->query_so_overflow = true;
    caps->nir_images_as_deref = false;
 

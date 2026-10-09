@@ -10,9 +10,7 @@ use crate::sm30_instr_latencies::{
     encode_kepler_shader, instr_exec_latency, instr_latency,
     latency_upper_bound, KeplerInstructionEncoder,
 };
-use bitview::{
-    BitMutView, BitMutViewable, BitView, BitViewable, SetBit, SetField,
-};
+use mesa_util::bitview::*;
 
 use rustc_hash::FxHashMap;
 use std::ops::Range;
@@ -230,7 +228,7 @@ impl SM32Encoder<'_> {
     }
 
     fn set_reg_src(&mut self, range: Range<usize>, src: &Src) {
-        assert!(src.src_swizzle.is_none());
+        assert!(src.src_swizzle.is_none() || src.src_swizzle == SrcSwizzle::Yy);
         self.set_reg_src_ref(range, &src.src_ref);
     }
 
@@ -319,7 +317,7 @@ enum AluSrc {
 
 impl AluSrc {
     fn from_src(src: &Src) -> AluSrc {
-        assert!(src.src_swizzle.is_none());
+        assert!(src.src_swizzle.is_none() || src.src_swizzle == SrcSwizzle::Yy);
         // do not assert src_mod, can be encoded by opcode.
 
         match &src.src_ref {

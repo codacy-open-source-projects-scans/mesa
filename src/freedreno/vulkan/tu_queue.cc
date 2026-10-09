@@ -9,6 +9,8 @@
 
 #include "tu_queue.h"
 
+#include <inttypes.h>
+
 #include "vk_util.h"
 
 #include "tu_buffer.h"
@@ -109,7 +111,7 @@ get_vis_stream_patchpoint_cs(struct tu_cmd_buffer *cmd,
    util_dynarray_foreach (&cmd->vis_stream_cs_bos,
                           struct tu_vis_stream_patchpoint_cs,
                           patchpoint_cs) {
-      uint32_t *fence = (uint32_t *)patchpoint_cs->fence_bo.bo->map;
+      uint32_t *fence = (uint32_t *)tu_suballoc_bo_map(&patchpoint_cs->fence_bo);
       if (*fence == 1) {
          *fence = 0;
          tu_cs_init_suballoc(cs, cmd->device, &patchpoint_cs->cs_bo);
@@ -182,7 +184,7 @@ resolve_vis_stream_patchpoints(struct tu_queue *queue,
     * streams and therefore should be avoided.
     */
    uint32_t min_vis_stream_count =
-      (TU_DEBUG(NO_CONCURRENT_BINNING) || dev->physical_device->info->chip < 7) ?
+      (!dev->instance->drirc.perf.allow_concurrent_binning || dev->physical_device->info->chip < 7) ?
       1 : MIN2(MAX2(rp_count, 1), TU_MAX_VIS_STREAMS);
    uint32_t vis_stream_count;
 
@@ -527,7 +529,12 @@ queue_submit(struct vk_queue *_queue, struct vk_queue_submit *vk_submit)
          uint32_t buf[3] = { iova, bo->size, iova >> 32 };
          fd_rd_output_write_section(rd_output, RD_GPUADDR, buf, 12);
          if (bo->dump || FD_RD_DUMP(FULL)) {
-            tu_bo_map(device, bo, NULL); /* note: this would need locking to be safe */
+            const VkResult result = tu_bo_map(device, bo, NULL); /* note: this would need locking to be safe */
+            if (result != VK_SUCCESS) {
+               mesa_loge("FD_RD_DUMP: failed to map BO '%s' (iova 0x%" PRIx64 ", size %" PRIu64 "): %d",
+                         bo->name ? bo->name : "<unnamed>", iova, bo->size, result);
+               continue;
+            }
             fd_rd_output_write_section(rd_output, RD_BUFFER_CONTENTS, bo->map, bo->size);
          }
       }
@@ -609,7 +616,8 @@ tu_queue_init(struct tu_device *device,
               enum tu_queue_type type,
               const VkQueueGlobalPriorityKHR global_priority,
               int idx,
-              const VkDeviceQueueCreateInfo *create_info)
+              const VkDeviceQueueCreateInfo *create_info,
+              struct tu_queue *shared_queue)
 {
    const int priority = tu_get_submitqueue_priority(
          device->physical_device, global_priority, type,
@@ -624,17 +632,33 @@ tu_queue_init(struct tu_device *device,
       return result;
 
    queue->device = device;
+   queue->type = type;
+   queue->fence = -1;
+   queue->priority = -1;
+   queue->msm_queue_id = 0;
+
+   if (shared_queue) {
+      /* Emulated queue: submissions are redirected to the real queue by
+       * the common runtime, so no kernel submitqueue is needed. The real
+       * queue's priority is what actually takes effect on the hardware;
+       * the priority requested for the alias has already been validated
+       * above.
+       */
+      assert(shared_queue->type == type);
+      vk_queue_set_emulated(&queue->vk, &shared_queue->vk);
+      return VK_SUCCESS;
+   }
+
    queue->priority = priority;
    queue->vk.driver_submit =
       (type == TU_QUEUE_SPARSE) ? queue_submit_sparse : queue_submit;
-   queue->type = type;
 
    int ret = tu_drm_submitqueue_new(device, queue);
-   if (ret)
+   if (ret) {
+      vk_queue_finish(&queue->vk);
       return vk_startup_errorf(device->instance, VK_ERROR_INITIALIZATION_FAILED,
                                "submitqueue create failed");
-
-   queue->fence = -1;
+   }
 
    return VK_SUCCESS;
 }
@@ -642,7 +666,9 @@ tu_queue_init(struct tu_device *device,
 void
 tu_queue_finish(struct tu_queue *queue)
 {
+   bool emulated = vk_queue_is_emulated(&queue->vk);
    vk_queue_finish(&queue->vk);
-   tu_drm_submitqueue_close(queue->device, queue);
+   if (!emulated)
+      tu_drm_submitqueue_close(queue->device, queue);
 }
 

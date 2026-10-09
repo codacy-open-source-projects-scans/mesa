@@ -182,9 +182,7 @@ vk_extent3d_el_to_px(const VkExtent3D extent_el,
 static bool
 isl_tiling_supports_standard_block_shapes(enum isl_tiling tiling)
 {
-   return isl_tiling_is_64(tiling) ||
-          tiling == ISL_TILING_ICL_Ys ||
-          tiling == ISL_TILING_SKL_Ys;
+   return (1 << tiling) & ISL_TILING_STD_64KB_MASK;
 }
 
 static uint32_t
@@ -231,13 +229,6 @@ static const VkExtent3D block_shapes_2d_8samples[] = {
    /* 64 bits:  */ { .width = 32, .height =  32, .depth = 1 },
    /* 128 bits: */ { .width = 16, .height =  32, .depth = 1 },
 };
-static const VkExtent3D block_shapes_2d_16samples[] = {
-   /* 8 bits:   */ { .width = 64, .height = 64, .depth = 1 },
-   /* 16 bits:  */ { .width = 64, .height = 32, .depth = 1 },
-   /* 32 bits:  */ { .width = 32, .height = 32, .depth = 1 },
-   /* 64 bits:  */ { .width = 32, .height = 16, .depth = 1 },
-   /* 128 bits: */ { .width = 16, .height = 16, .depth = 1 },
-};
 
 static VkExtent3D
 anv_sparse_get_standard_image_block_shape(enum isl_format format,
@@ -276,9 +267,6 @@ anv_sparse_get_standard_image_block_shape(enum isl_format format,
       break;
    case VK_SAMPLE_COUNT_8_BIT:
       block_shape = block_shapes_2d_8samples[table_idx];
-      break;
-   case VK_SAMPLE_COUNT_16_BIT:
-      block_shape = block_shapes_2d_16samples[table_idx];
       break;
    default:
       fprintf(stderr, "unexpected sample count: %d\n", samples);
@@ -691,13 +679,13 @@ anv_trtt_first_bind_init(struct anv_device *device)
     * before the TRTT mutex for consistency with the order of other paths
     * (e.g., anv_queue_submit_cmd_buffers_locked()).
     */
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    simple_mtx_lock(&trtt->mutex);
 
    /* This means we have already initialized the first bind. */
    if (likely(trtt->l3_addr)) {
       simple_mtx_unlock(&trtt->mutex);
-      pthread_mutex_unlock(&device->mutex);
+      simple_mtx_unlock(&device->mutex);
       return VK_SUCCESS;
    }
 
@@ -743,7 +731,7 @@ out:
       trtt->l3_addr = 0;
 
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
    return result;
 }
 
@@ -778,7 +766,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
     * before the TRTT mutex for consistency with the order that locking is
     * done around other paths (e.g., anv_queue_submit_cmd_buffers_locked()).
     */
-   pthread_mutex_lock(&device->mutex);
+   simple_mtx_lock(&device->mutex);
    simple_mtx_lock(&trtt->mutex);
 
    /* Do this so we can avoid reallocs later. */
@@ -885,7 +873,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
    list_addtail(&submit->link, &trtt->in_flight_batches);
 
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
 
    ANV_RMV(vm_binds, device, sparse_submit->binds, sparse_submit->binds_len);
 
@@ -896,7 +884,7 @@ anv_sparse_bind_trtt(struct anv_device *device,
    util_dynarray_fini(&l3l2_binds);
  out_add_bind:
    simple_mtx_unlock(&trtt->mutex);
-   pthread_mutex_unlock(&device->mutex);
+   simple_mtx_unlock(&device->mutex);
    anv_async_submit_fini(&submit->base);
  out_async:
    vk_free(&device->vk.alloc, submit);
@@ -1132,10 +1120,6 @@ is_xe2_non_standard_msaa_block_shape(struct anv_physical_device *pdevice,
       break;
    case VK_SAMPLE_COUNT_8_BIT:
       if (bpb == 8 || bpb == 32)
-         return true;
-      break;
-   case VK_SAMPLE_COUNT_16_BIT:
-      if (bpb == 64)
          return true;
       break;
    default:
@@ -1645,8 +1629,6 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
       valid_samples &= ~VK_SAMPLE_COUNT_4_BIT;
    if (!pdevice->vk.supported_features.sparseResidency8Samples)
       valid_samples &= ~VK_SAMPLE_COUNT_8_BIT;
-   if (!pdevice->vk.supported_features.sparseResidency16Samples)
-      valid_samples &= ~VK_SAMPLE_COUNT_16_BIT;
    valid_samples &= ~(VK_SAMPLE_COUNT_32_BIT | VK_SAMPLE_COUNT_64_BIT);
 
    /* Here we return NOT_PRESENT since the user is asking for sample counts we
@@ -1658,15 +1640,30 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
       return VK_ERROR_FEATURE_NOT_PRESENT;
    }
 
-   /* While our hardware allows us to support sparse with some depth/stencil
-    * formats (e.g., single-sampled 2D), the spec seems to be expecting that,
-    * if we support a format, we have to support it with all the multi-sampled
-    * flags we support for non-sparse. Therefore, just give up depth/stencil
-    * entirely since games don't seem to be requiring it.
+   /* Please see ISL's filter_tiling() functions for accurate explanations on
+    * why depth/stencil images are not always supported with the tiling
+    * formats we want.
     */
    VkImageAspectFlags aspects = vk_format_aspects(vk_format);
-   if (aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
-      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+   if (aspects & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
+      /* For multi-sampled images, the image layouts for color and
+       * depth/stencil are different, and only the color layout is compatible
+       * with the standard block shapes.
+       */
+      valid_samples &= VK_SAMPLE_COUNT_1_BIT;
+
+      /* For 125+, isl_gfx125_filter_tiling() claims 3D is not supported.
+       * For the previous platforms, isl_gfx6_filter_tiling() says only 2D is
+       * supported.
+       */
+      if (pdevice->info.verx10 >= 125) {
+         if (type == VK_IMAGE_TYPE_3D)
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+      } else {
+         if (type != VK_IMAGE_TYPE_2D)
+            return VK_ERROR_FORMAT_NOT_SUPPORTED;
+      }
+   }
 
    const struct anv_format *anv_format = anv_get_format(pdevice, vk_format);
    if (!anv_format)
@@ -1708,6 +1705,9 @@ anv_sparse_image_check_support(struct anv_physical_device *pdevice,
 
    if (valid_samples_out)
       *valid_samples_out = valid_samples;
+
+   if (!valid_samples)
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
 
    return VK_SUCCESS;
 }

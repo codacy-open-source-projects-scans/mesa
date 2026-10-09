@@ -22,6 +22,8 @@
 #include "pvr_hw_pass.h"
 #include "pvr_types.h"
 
+#include "util/perf/u_trace.h"
+
 struct pvr_pds_upload;
 struct pvr_private_compute_pipeline;
 struct pvr_query_info;
@@ -112,6 +114,15 @@ struct pvr_transfer_cmd {
     * cmd_buffer::bo_list head.
     */
    struct pvr_cmd_buffer *cmd_buffer;
+};
+
+struct pvr_unbound_deferred_clear {
+   union fi clear_color[4];
+   VkOffset3D offset;
+   VkExtent3D extent;
+   uint32_t array_layer;
+   VkImageAspectFlags aspect_mask;
+   uint32_t attachment_index;
 };
 
 struct pvr_color_attachment_output_map {
@@ -208,6 +219,10 @@ struct pvr_sub_cmd_gfx {
 
    uint32_t view_mask;
    bool multiview_enabled;
+   bool view_index_wanted;
+
+   /* Recorded deferred RTA clears for secondary command buffers */
+   struct util_dynarray unbound_deferred_clears;
 };
 
 struct pvr_sub_cmd_compute {
@@ -542,6 +557,9 @@ struct pvr_cmd_buffer {
    struct list_head bo_list;
 
    struct list_head sub_cmds;
+
+   /* U-trace integration */
+   struct u_trace trace;
 };
 
 VK_DEFINE_HANDLE_CASTS(pvr_cmd_buffer,
@@ -592,6 +610,16 @@ static inline bool pvr_sub_cmd_gfx_requires_split_submit(
          return;                                                             \
       }                                                                      \
    } while (0)
+
+static inline
+struct pvr_descriptor_state *
+pvr_get_descriptors_state(struct pvr_cmd_buffer *cmd_buffer,
+                         VkPipelineBindPoint bind_point)
+{
+   if (bind_point == VK_PIPELINE_BIND_POINT_COMPUTE)
+      return &cmd_buffer->state.compute_desc_state;
+   return &cmd_buffer->state.gfx_desc_state;
+}
 
 #ifdef PVR_PER_ARCH
 

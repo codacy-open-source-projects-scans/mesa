@@ -79,11 +79,11 @@ radv_tex_mipfilter(VkSamplerMipmapMode mode)
 {
    switch (mode) {
    case VK_SAMPLER_MIPMAP_MODE_NEAREST:
-      return V_008F38_SQ_TEX_Z_FILTER_POINT;
+      return V_008F38_SQ_TEX_MIP_FILTER_POINT;
    case VK_SAMPLER_MIPMAP_MODE_LINEAR:
-      return V_008F38_SQ_TEX_Z_FILTER_LINEAR;
+      return V_008F38_SQ_TEX_MIP_FILTER_LINEAR;
    default:
-      return V_008F38_SQ_TEX_Z_FILTER_NONE;
+      return V_008F38_SQ_TEX_MIP_FILTER_NONE;
    }
 }
 
@@ -134,8 +134,8 @@ radv_tex_filter_mode(VkSamplerReductionMode mode)
 static uint32_t
 radv_get_max_anisotropy(const struct radv_compiler_info *compiler_info, const struct vk_sampler_state *sampler_state)
 {
-   if (compiler_info->force_aniso >= 0)
-      return compiler_info->force_aniso;
+   if (compiler_info->key.force_aniso >= 0)
+      return compiler_info->key.force_aniso;
 
    if (sampler_state->anisotropy_enable && sampler_state->max_anisotropy > 1.0f)
       return (uint32_t)sampler_state->max_anisotropy;
@@ -209,7 +209,7 @@ radv_make_sampler_descriptor(const struct radv_compiler_info *compiler_info,
    const bool trunc_coord =
       ((sampler_state->min_filter == VK_FILTER_NEAREST && sampler_state->mag_filter == VK_FILTER_NEAREST) ||
        compiler_info->ac->conformant_trunc_coord) &&
-      !compiler_info->cache_key->disable_trunc_coord;
+      !compiler_info->key.disable_trunc_coord;
    const VkBorderColor border_color = radv_get_border_color(sampler_state);
    const bool disable_cube_wrap = sampler_state->flags & VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT;
 
@@ -236,7 +236,7 @@ radv_make_sampler_descriptor(const struct radv_compiler_info *compiler_info,
       .min_lod = sampler_state->min_lod,
       .max_lod = sampler_state->max_lod,
       .lod_bias = sampler_state->mip_lod_bias,
-      .aniso_single_level = !compiler_info->cache_key->disable_aniso_single_level,
+      .aniso_single_level = !compiler_info->key.disable_aniso_single_level,
       .border_color_type = radv_tex_bordercolor(border_color),
       .border_color_ptr = border_color_ptr,
    };

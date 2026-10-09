@@ -179,9 +179,6 @@ struct ir3_compiler {
    /* Whether SSBOs have descriptors for sampling with ISAM */
    bool has_isam_ssbo;
 
-   /* Is lock/unlock sequence needed for CS? */
-   bool cs_lock_unlock_quirk;
-
    /* True if the shfl instruction is supported. Needed for subgroup rotate and
     * (more efficient) shuffle.
     */
@@ -260,6 +257,8 @@ struct ir3_compiler {
    } delay_slots;
 };
 
+#define IR3_QUIRK(compiler, name) FD_QUIRK((compiler)->info, name)
+
 void ir3_compiler_destroy(struct ir3_compiler *compiler);
 struct ir3_compiler *ir3_compiler_create(struct fd_device *dev,
                                          const struct fd_dev_id *dev_id,
@@ -269,10 +268,6 @@ struct ir3_compiler *ir3_compiler_create(struct fd_device *dev,
 void ir3_disk_cache_init(struct ir3_compiler *compiler);
 void ir3_disk_cache_init_shader_key(struct ir3_compiler *compiler,
                                     struct ir3_shader *shader);
-struct ir3_shader_variant *ir3_retrieve_variant(struct blob_reader *blob,
-                                                struct ir3_compiler *compiler,
-                                                void *mem_ctx);
-void ir3_store_variant(struct blob *blob, const struct ir3_shader_variant *v);
 bool ir3_disk_cache_retrieve(struct ir3_shader *shader,
                              struct ir3_shader_variant *v);
 void ir3_disk_cache_store(struct ir3_shader *shader,
@@ -314,12 +309,13 @@ enum ir3_shader_debug {
    IR3_DBG_NODESCPREFETCH = BITFIELD_BIT(18),
    IR3_DBG_EXPANDRPT = BITFIELD_BIT(19),
    IR3_DBG_ASM_ROUNDTRIP = BITFIELD_BIT(20),
+   IR3_DBG_THREAD64 = BITFIELD_BIT(21),
 
    /* MESA_DEBUG-only options: */
-   IR3_DBG_SCHEDMSGS = BITFIELD_BIT(21),
-   IR3_DBG_RAMSGS = BITFIELD_BIT(22),
-   IR3_DBG_NOALIASTEX = BITFIELD_BIT(23),
-   IR3_DBG_NOALIASRT = BITFIELD_BIT(24),
+   IR3_DBG_SCHEDMSGS = BITFIELD_BIT(22),
+   IR3_DBG_RAMSGS = BITFIELD_BIT(23),
+   IR3_DBG_NOALIASTEX = BITFIELD_BIT(24),
+   IR3_DBG_NOALIASRT = BITFIELD_BIT(25),
 };
 
 extern enum ir3_shader_debug ir3_shader_debug;
@@ -389,5 +385,24 @@ bool ir3_shader_bisect_select(struct ir3_shader_variant *v);
 bool ir3_shader_bisect_disasm_select(struct ir3_shader_variant *v);
 
 ENDC;
+
+#ifdef __cplusplus
+struct ir3_blob_write : mesa::blob_write {
+   using mesa::blob_write::blob_write;
+
+   void variant(const struct ir3_shader_variant *&v);
+};
+
+struct ir3_blob_read : mesa::blob_read {
+   struct ir3_compiler *const compiler;
+
+   ir3_blob_read(struct blob_reader *r, struct ir3_compiler *c)
+       : mesa::blob_read(r), compiler(c)
+   {
+   }
+
+   void variant(const struct ir3_shader_variant *&v_out);
+};
+#endif /* __cplusplus */
 
 #endif /* IR3_COMPILER_H_ */

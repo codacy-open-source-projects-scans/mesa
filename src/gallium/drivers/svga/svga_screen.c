@@ -136,6 +136,7 @@ get_bool_cap(struct svga_winsys_screen *sws, SVGA3dDevCapIndex cap,
    .lower_extract_word = true,                                                \
    .lower_insert_byte = true,                                                 \
    .lower_insert_word = true,                                                 \
+   .float_mul_add32 = nir_float_muladd_support_keep_weak_ffma,                \
    .lower_int64_options = nir_lower_imul_2x32_64 | nir_lower_divmod64,        \
    .lower_fdph = true,                                                        \
    .lower_flrp64 = true,                                                      \
@@ -144,6 +145,7 @@ get_bool_cap(struct svga_winsys_screen *sws, SVGA3dDevCapIndex cap,
    .max_unroll_iterations = 32
 
 #define VGPU10_OPTIONS                                                        \
+   .float_mul_add64 = nir_float_muladd_support_keep_weak_ffma,                \
    .lower_doubles_options = nir_lower_dfloor | nir_lower_dsign | nir_lower_dceil | nir_lower_dtrunc | nir_lower_dround_even, \
    .lower_fmod = true,                                                        \
    .lower_fpow = true,                                                        \
@@ -523,8 +525,6 @@ svga_init_screen_caps(struct svga_screen *svgascreen)
            svgascreen->max_viewports == SVGA3D_DX_MAX_VIEWPORTS));
    caps->max_viewports = svgascreen->max_viewports;
 
-   caps->endianness = PIPE_ENDIAN_LITTLE;
-
    caps->vendor_id = 0x15ad; /* VMware Inc. */
    caps->device_id = sws->device_id ? sws->device_id : 0x0405; /* assume SVGA II */
    caps->video_memory = sws->max_mob_memory_mib ? sws->max_mob_memory_mib : 1;
@@ -558,6 +558,7 @@ svga_init_screen_caps(struct svga_screen *svgascreen)
 
    caps->max_texture_lod_bias = 15.0;
    caps->query_pipeline_statistics = sws->have_vgpu10;
+   caps->texture_query_samples = sws->have_sm4_1;
 }
 
 static void

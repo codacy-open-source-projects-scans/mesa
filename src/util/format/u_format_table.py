@@ -95,6 +95,7 @@ def has_access(format):
         'y10_u10v10_420_unorm',
         'y10_u10v10_422_unorm',
         'x6y10_x6u10x6v10_420_unorm',
+        'x6y10_x6u10x6v10_422_unorm',
         'x4y12_x4u12x4v12_420_unorm',
         'y16_u16v16_420_unorm',
         'y10y10y10x2_u10v10u10x2v10u10v10x2_420_unorm',
@@ -117,6 +118,7 @@ def has_access(format):
         'x6r10x6g10_x6r10x6b10_422_unorm',
         'x6g10_x6b10x6r10_420_unorm',
         'x4g12_x4b12x4r12_420_unorm',
+        'x6g10_x6b10x6r10_422_unorm',
         'y8_400_unorm',
         'y8_u8_v8_422_unorm',
         'y8_u8_v8_444_unorm',
@@ -597,7 +599,7 @@ def write_format_table(formats):
         print("ATTRIBUTE_RETURNS_NONNULL const struct util_format_%sdescription *" % type)
         print("util_format_%sdescription%s(enum pipe_format format)" % (type, suffix))
         print("{")
-        print("   assert(format < PIPE_FORMAT_COUNT);")
+        print("   assert(format >= 0 && format < PIPE_FORMAT_COUNT);")
         print("   return &util_format_%sdescriptions[format];" % (type))
         print("}")
         print()
