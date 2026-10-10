@@ -922,7 +922,8 @@ jay_is_shuffle_like(const jay_inst *I)
 {
    return I->op == JAY_OPCODE_SHUFFLE ||
           I->op == JAY_OPCODE_QUAD_SWIZZLE ||
-          I->op == JAY_OPCODE_BROADCAST_IMM;
+          I->op == JAY_OPCODE_BROADCAST_IMM ||
+          I->op == JAY_OPCODE_MOV_INDIRECT;
 }
 
 static inline bool
@@ -1573,28 +1574,80 @@ jay_source_last_use_bit(const jay_def *srcs, unsigned src_idx)
    }
 
 /* Used for post-RA tracking ranges of all register files */
-struct jay_range {
-   unsigned base, width;
+struct jay_footprint {
+   unsigned base, width, stride, count;
 };
 
-static inline unsigned
-jay_range_base(jay_shader *shader, enum jay_file file)
+#define jay_foreach_in_footprint(fp, key)                                      \
+   for (unsigned _group = 0; _group < fp.count; ++_group)                      \
+      for (unsigned key = fp.base + (_group * fp.stride);                      \
+           key < fp.base + (_group * fp.stride) + fp.width; ++key)
+
+/* TODO: Optimize these */
+static inline void
+jay_footprint_set(BITSET_WORD *bitset, struct jay_footprint fp)
 {
-   return (file > GPR ? shader->num_regs[GPR] : 0) +
+   jay_foreach_in_footprint(fp, key) {
+      BITSET_SET(bitset, key);
+   }
+}
+
+static inline bool
+jay_footprint_test(BITSET_WORD *bitset, struct jay_footprint fp)
+{
+   bool x = false;
+
+   jay_foreach_in_footprint(fp, key) {
+      x |= BITSET_TEST(bitset, key);
+   }
+
+   return x;
+}
+
+static inline unsigned
+jay_footprint_base(jay_shader *shader, enum jay_file file)
+{
+   return (file > GPR ? (shader->num_regs[GPR] * jay_grf_per_gpr(shader)) : 0) +
           (file > UGPR ? shader->num_regs[UGPR] : 0) +
           (file > FLAG ? shader->num_regs[FLAG] : 0) +
           (file > ACCUM ? 4 : 0);
 }
 
-static inline struct jay_range
-jay_def_to_range(jay_function *func, jay_inst *I, jay_def x)
+static inline struct jay_footprint
+jay_def_to_footprint(jay_function *func,
+                     jay_inst *I,
+                     jay_def x,
+                     enum jay_type type)
 {
-   struct jay_range r = { 0, 0 };
+   struct jay_footprint r = { 0 };
 
    if (x.file == GPR || x.file == UGPR || x.file == ACCUM || x.file == FLAG) {
-      r.base = jay_range_base(func->shader, x.file);
-      r.base += (x.file == ACCUM) ? (x.reg / 2) : x.reg;
-      r.width = jay_num_values(x);
+      r.base = jay_footprint_base(func->shader, x.file);
+      r.base += (x.file == ACCUM) ? (x.reg / 2) :
+                (x.file == GPR)   ? (x.reg * jay_grf_per_gpr(func->shader)) :
+                                    x.reg;
+      r.width = 1;
+      r.stride = 1;
+      r.count = jay_num_values(x);
+
+      if (x.file == ACCUM && !jay_type_is_any_float(type)) {
+         assert(x.reg == 0 && r.width == 1 && "only acc0 used with integers");
+         r.count = (func->shader->dispatch_width < 32) ? 2 : 1;
+      }
+
+      if (x.file == GPR) {
+         unsigned split = I->simd_split, offs = I->simd_offs;
+
+         /* Cross-lane access needs to wait on the whole subgroup */
+         if (jay_is_shuffle_like(I)) {
+            split = 0;
+            offs = 0;
+         }
+
+         r.stride = jay_grf_per_gpr(func->shader);
+         r.width = MAX2(r.stride >> split, 1);
+         r.base += (r.stride * offs) >> split;
+      }
    }
 
    return r;

@@ -985,12 +985,22 @@ lower_txb_to_txl(nir_builder *b, nir_tex_instr *tex)
 }
 
 static nir_tex_instr *
-saturate_src(nir_builder *b, nir_tex_instr *tex, unsigned sat_mask)
+saturate_src(nir_builder *b, nir_tex_instr *tex, unsigned sat_mask, bool lod_zero)
 {
-   if (tex->op == nir_texop_tex)
-      tex = lower_tex_to_txd(b, tex);
-   else if (tex->op == nir_texop_txb)
-      tex = lower_txb_to_txl(b, tex);
+   if (!lod_zero) {
+      if (tex->op == nir_texop_tex)
+         tex = lower_tex_to_txd(b, tex);
+      else if (tex->op == nir_texop_txb)
+         tex = lower_txb_to_txl(b, tex);
+   } else if (tex->sampler_dim != GLSL_SAMPLER_DIM_RECT &&
+              (tex->op == nir_texop_tex || tex->op == nir_texop_txb)) {
+      int bias_idx = nir_tex_instr_src_index(tex, nir_tex_src_bias);
+      if (bias_idx >= 0)
+         nir_tex_instr_remove_src(tex, bias_idx);
+      b->cursor = nir_before_instr(&tex->instr);
+      tex->op = nir_texop_txl;
+      nir_tex_instr_add_src(tex, nir_tex_src_lod, nir_imm_float(b, 0.0));
+   }
 
    b->cursor = nir_before_instr(&tex->instr);
    int coord_index = nir_tex_instr_src_index(tex, nir_tex_src_coord);
@@ -1340,7 +1350,6 @@ nir_lower_ms_txf_to_fragment_fetch(nir_builder *b, nir_tex_instr *tex)
    b->cursor = nir_before_instr(&tex->instr);
 
    /* Create FMASK fetch. */
-   assert(tex->texture_index == 0);
    nir_tex_instr *fmask_fetch = nir_tex_instr_create(b->shader, tex->num_srcs - 1);
    fmask_fetch->op = nir_texop_fragment_mask_fetch_amd;
    fmask_fetch->coord_components = tex->coord_components;
@@ -1349,6 +1358,11 @@ nir_lower_ms_txf_to_fragment_fetch(nir_builder *b, nir_tex_instr *tex)
    fmask_fetch->texture_non_uniform = tex->texture_non_uniform;
    fmask_fetch->dest_type = nir_type_uint32;
    fmask_fetch->can_speculate = tex->can_speculate;
+   fmask_fetch->input_attachment_depth = tex->input_attachment_depth;
+   fmask_fetch->input_attachment_stencil = tex->input_attachment_stencil;
+   fmask_fetch->input_attachment_index = tex->input_attachment_index;
+   fmask_fetch->texture_index = tex->texture_index;
+   fmask_fetch->texture_array_size = tex->texture_array_size;
    nir_def_init(&fmask_fetch->instr, &fmask_fetch->def, 1, 32);
 
    fmask_fetch->num_srcs = 0;
@@ -1736,7 +1750,8 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
       }
 
       if (sat_mask) {
-         tex = saturate_src(b, tex, sat_mask);
+         tex = saturate_src(b, tex, sat_mask,
+                            (options->saturate_lod_zero & (1u << tex->sampler_index)) != 0);
          progress = true;
       }
 
